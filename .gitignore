@@ -1,0 +1,29 @@
+# Root repository ignores
+
+node_modules
+.next
+.turbo
+dist
+coverage
+
+.env*
+!*.env.example
+
+__pycache__/
+*.pyc
+
+backend/long-to-short/data/
+backend/long-to-short/.env
+backend/long-to-short/*.mkv
+
+.claude/
+versions/
+
+plan*.txt
+prompt.txt
+image.png
+Screenshot *.png
+start.cmd
+start.cmd - Shortcut.lnk
+start.sh
+
