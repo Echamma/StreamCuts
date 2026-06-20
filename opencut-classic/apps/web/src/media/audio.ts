@@ -19,7 +19,13 @@ import { canElementHaveAudio, hasMediaId } from "@/timeline/element-utils";
 import { canTrackHaveAudio } from "@/timeline";
 import { mediaSupportsAudio } from "@/media/media-utils";
 import { getSourceTimeAtClipTime, renderRetimedBuffer } from "@/retime";
-import { Input, ALL_FORMATS, BlobSource, AudioBufferSink } from "mediabunny";
+import {
+	Input,
+	ALL_FORMATS,
+	BlobSource,
+	AudioBufferSink,
+	AudioBufferSource,
+} from "mediabunny";
 import { TICKS_PER_SECOND } from "@/wasm";
 import {
 	computeRmsBuckets,
@@ -28,6 +34,8 @@ import {
 
 const MAX_AUDIO_CHANNELS = 2;
 const EXPORT_SAMPLE_RATE = 44100;
+const DEFAULT_AUDIO_RENDER_WINDOW_SECONDS = 15;
+const STREAMING_AUDIO_HEADROOM = 0.98;
 
 export interface CollectedAudioElement {
 	timelineElement: AudioCapableElement;
@@ -431,7 +439,7 @@ async function fetchLibraryAudioClip({
 		return {
 			timelineElement: element,
 			id: element.id,
-			sourceKey: element.id,
+			sourceKey: element.sourceUrl,
 			file,
 			startTime: element.startTime,
 			duration: element.duration,
@@ -631,6 +639,468 @@ export async function collectAudioClips({
 	}
 
 	return clips;
+}
+
+export interface TimelineAudioChunk {
+	buffer: AudioBuffer;
+	startTime: number;
+	duration: number;
+	hasAudio: boolean;
+}
+
+export class TimelineAudioRenderCancelledError extends Error {
+	constructor() {
+		super("Timeline audio rendering cancelled");
+		this.name = "TimelineAudioRenderCancelledError";
+	}
+}
+
+class DecodedAudioBufferCache {
+	private readonly promises = new Map<string, Promise<AudioBuffer | null>>();
+
+	constructor(private readonly audioContext: BaseAudioContext) {}
+
+	getBuffer({
+		sourceKey,
+		file,
+	}: {
+		sourceKey: string;
+		file: File;
+	}): Promise<AudioBuffer | null> {
+		const existing = this.promises.get(sourceKey);
+		if (existing) {
+			return existing;
+		}
+
+		const promise = decodeClipSourceFile({
+			file,
+			audioContext: this.audioContext,
+		}).catch((error) => {
+			console.warn("Failed to decode clip source:", error);
+			this.promises.delete(sourceKey);
+			return null;
+		});
+
+		this.promises.set(sourceKey, promise);
+		return promise;
+	}
+}
+
+async function decodeClipSourceFile({
+	file,
+	audioContext,
+}: {
+	file: File;
+	audioContext: BaseAudioContext;
+}): Promise<AudioBuffer | null> {
+	if (file.type.startsWith("audio/")) {
+		try {
+			const arrayBuffer = await file.arrayBuffer();
+			return await audioContext.decodeAudioData(arrayBuffer.slice(0));
+		} catch (error) {
+			console.warn("Failed to decode audio file:", error);
+			return null;
+		}
+	}
+
+	const input = new Input({
+		source: new BlobSource(file),
+		formats: ALL_FORMATS,
+	});
+
+	try {
+		const audioTrack = await input.getPrimaryAudioTrack();
+		if (!audioTrack) return null;
+
+		const sink = new AudioBufferSink(audioTrack);
+		const targetSampleRate = audioContext.sampleRate;
+		const chunks: AudioBuffer[] = [];
+		let totalSamples = 0;
+
+		for await (const { buffer } of sink.buffers(0)) {
+			chunks.push(buffer);
+			totalSamples += buffer.length;
+		}
+
+		if (chunks.length === 0) return null;
+
+		const nativeSampleRate = chunks[0].sampleRate;
+		const numChannels = Math.min(
+			MAX_AUDIO_CHANNELS,
+			chunks[0].numberOfChannels,
+		);
+		const nativeChannels = Array.from(
+			{ length: numChannels },
+			() => new Float32Array(totalSamples),
+		);
+
+		let offset = 0;
+		for (const chunk of chunks) {
+			for (let channel = 0; channel < numChannels; channel++) {
+				nativeChannels[channel].set(
+					chunk.getChannelData(
+						Math.min(channel, chunk.numberOfChannels - 1),
+					),
+					offset,
+				);
+			}
+			offset += chunk.length;
+		}
+
+		const outputSamples = Math.ceil(
+			totalSamples * (targetSampleRate / nativeSampleRate),
+		);
+		const offlineContext = new OfflineAudioContext(
+			numChannels,
+			outputSamples,
+			targetSampleRate,
+		);
+		const nativeBuffer = audioContext.createBuffer(
+			numChannels,
+			totalSamples,
+			nativeSampleRate,
+		);
+
+		for (let channel = 0; channel < numChannels; channel++) {
+			nativeBuffer.copyToChannel(nativeChannels[channel], channel);
+		}
+
+		const sourceNode = offlineContext.createBufferSource();
+		sourceNode.buffer = nativeBuffer;
+		sourceNode.connect(offlineContext.destination);
+		sourceNode.start(0);
+
+		return await offlineContext.startRendering();
+	} catch (error) {
+		console.warn("Failed to decode clip video source:", error);
+		return null;
+	} finally {
+		input.dispose();
+	}
+}
+
+function normalizeAudioBufferPeak({
+	audioBuffer,
+	maxPeak = STREAMING_AUDIO_HEADROOM,
+}: {
+	audioBuffer: AudioBuffer;
+	maxPeak?: number;
+}): void {
+	let peak = 0;
+
+	for (let channel = 0; channel < audioBuffer.numberOfChannels; channel++) {
+		const channelData = audioBuffer.getChannelData(channel);
+		for (let index = 0; index < channelData.length; index++) {
+			const magnitude = Math.abs(channelData[index]);
+			if (magnitude > peak) {
+				peak = magnitude;
+			}
+		}
+	}
+
+	if (peak <= maxPeak || peak === 0) {
+		return;
+	}
+
+	const scale = maxPeak / peak;
+	for (let channel = 0; channel < audioBuffer.numberOfChannels; channel++) {
+		const channelData = audioBuffer.getChannelData(channel);
+		for (let index = 0; index < channelData.length; index++) {
+			channelData[index] *= scale;
+		}
+	}
+}
+
+async function mixClipIntoTimelineChunk({
+	clip,
+	sourceBuffer,
+	outputBuffer,
+	audioContext,
+	windowStart,
+	windowEnd,
+	sampleRate,
+}: {
+	clip: AudioClipSource;
+	sourceBuffer: AudioBuffer;
+	outputBuffer: AudioBuffer;
+	audioContext: BaseAudioContext;
+	windowStart: number;
+	windowEnd: number;
+	sampleRate: number;
+}): Promise<boolean> {
+	const clipStart = clip.startTime;
+	const clipEnd = clip.startTime + clip.duration;
+	const overlapStart = Math.max(windowStart, clipStart);
+	const overlapEnd = Math.min(windowEnd, clipEnd);
+
+	if (overlapEnd <= overlapStart) {
+		return false;
+	}
+
+	const clipLocalStart = overlapStart - clipStart;
+	const overlapDuration = overlapEnd - overlapStart;
+	const outputOffsetSamples = Math.max(
+		0,
+		Math.floor((overlapStart - windowStart) * sampleRate),
+	);
+
+	const pitchPreservedBuffer = shouldMaintainPitch({
+		rate: clip.retime?.rate ?? 1,
+		maintainPitch: clip.retime?.maintainPitch,
+	})
+		? await renderRetimedBuffer({
+				audioContext,
+				sourceBuffer,
+				trimStart:
+					clip.trimStart +
+					getSourceTimeAtClipTime({
+						clipTime: clipLocalStart,
+						retime: clip.retime,
+					}),
+				clipDuration: overlapDuration,
+				retime: clip.retime,
+				maintainPitch: true,
+			})
+		: null;
+
+	return mixSourceIntoChunk({
+		clip,
+		buffer: pitchPreservedBuffer ?? sourceBuffer,
+		outputBuffer,
+		sampleRate,
+		outputOffsetSamples,
+		automationLocalStart: clipLocalStart,
+		bufferLocalStart: pitchPreservedBuffer ? 0 : clipLocalStart,
+		overlapDuration,
+		trimStart: pitchPreservedBuffer ? 0 : clip.trimStart,
+		retime: pitchPreservedBuffer ? undefined : clip.retime,
+	});
+}
+
+function mixSourceIntoChunk({
+	clip,
+	buffer,
+	outputBuffer,
+	sampleRate,
+	outputOffsetSamples,
+	automationLocalStart,
+	bufferLocalStart,
+	overlapDuration,
+	trimStart,
+	retime,
+}: {
+	clip: AudioClipSource;
+	buffer: AudioBuffer;
+	outputBuffer: AudioBuffer;
+	sampleRate: number;
+	outputOffsetSamples: number;
+	automationLocalStart: number;
+	bufferLocalStart: number;
+	overlapDuration: number;
+	trimStart: number;
+	retime?: RetimeConfig;
+}): boolean {
+	const outputChannels = 2;
+	const sampleCount = Math.min(
+		outputBuffer.length - outputOffsetSamples,
+		Math.ceil(overlapDuration * sampleRate),
+	);
+	let wroteSamples = false;
+
+	for (let channel = 0; channel < outputChannels; channel++) {
+		const outputData = outputBuffer.getChannelData(channel);
+		const sourceChannel = Math.min(channel, buffer.numberOfChannels - 1);
+		const sourceData = buffer.getChannelData(sourceChannel);
+
+		for (let index = 0; index < sampleCount; index++) {
+			const outputIndex = outputOffsetSamples + index;
+			if (outputIndex >= outputBuffer.length) break;
+
+			const automationLocalTime = automationLocalStart + index / sampleRate;
+			const sourceTime =
+				trimStart +
+				getSourceTimeAtClipTime({
+					clipTime: bufferLocalStart + index / sampleRate,
+					retime,
+				});
+			const sourceIndex = sourceTime * buffer.sampleRate;
+			if (sourceIndex >= sourceData.length) break;
+
+			const lowerIndex = Math.floor(sourceIndex);
+			const upperIndex = Math.min(sourceData.length - 1, lowerIndex + 1);
+			const fraction = sourceIndex - lowerIndex;
+			const gain = hasAnimatedVolume({ element: clip.timelineElement })
+				? resolveEffectiveAudioGain({
+						element: clip.timelineElement,
+						localTime: automationLocalTime,
+					})
+				: clip.volume;
+
+			outputData[outputIndex] +=
+				(sourceData[lowerIndex] * (1 - fraction) +
+					sourceData[upperIndex] * fraction) *
+				gain;
+			wroteSamples = true;
+		}
+	}
+
+	return wroteSamples;
+}
+
+export async function* renderTimelineAudioChunks({
+	tracks,
+	mediaAssets,
+	duration,
+	sampleRate = EXPORT_SAMPLE_RATE,
+	audioContext,
+	windowDurationSeconds = DEFAULT_AUDIO_RENDER_WINDOW_SECONDS,
+	normalizePeak = true,
+	onProgress,
+}: {
+	tracks: SceneTracks;
+	mediaAssets: MediaAsset[];
+	duration: number;
+	sampleRate?: number;
+	audioContext?: AudioContext;
+	windowDurationSeconds?: number;
+	normalizePeak?: boolean;
+	onProgress?: (fraction: number) => void;
+}): AsyncGenerator<TimelineAudioChunk> {
+	const context = audioContext ?? createAudioContext({ sampleRate });
+	const ownsContext = audioContext == null;
+	const durationSeconds = duration / TICKS_PER_SECOND;
+	const safeWindowDurationSeconds = Math.max(1, windowDurationSeconds);
+	const clips = (await collectAudioClips({ tracks, mediaAssets }))
+		.filter((clip) => !clip.muted && clip.duration > 0)
+		.sort((left, right) => left.startTime - right.startTime);
+
+	if (clips.length === 0 || durationSeconds <= 0) {
+		if (ownsContext) {
+			void context.close();
+		}
+		return;
+	}
+
+	const cache = new DecodedAudioBufferCache(context);
+	const totalWindows = Math.max(
+		1,
+		Math.ceil(durationSeconds / safeWindowDurationSeconds),
+	);
+	const activeClips: AudioClipSource[] = [];
+	let nextClipIndex = 0;
+
+	try {
+		for (let windowIndex = 0; windowIndex < totalWindows; windowIndex++) {
+			const windowStart = windowIndex * safeWindowDurationSeconds;
+			const windowEnd = Math.min(
+				durationSeconds,
+				windowStart + safeWindowDurationSeconds,
+			);
+			const chunkDuration = Math.max(0, windowEnd - windowStart);
+			if (chunkDuration <= 0) break;
+
+			while (
+				nextClipIndex < clips.length &&
+				clips[nextClipIndex].startTime < windowEnd
+			) {
+				activeClips.push(clips[nextClipIndex]);
+				nextClipIndex += 1;
+			}
+
+			for (let index = activeClips.length - 1; index >= 0; index--) {
+				const clip = activeClips[index];
+				if (clip.startTime + clip.duration <= windowStart) {
+					activeClips.splice(index, 1);
+				}
+			}
+
+			const outputBuffer = context.createBuffer(
+				2,
+				Math.max(1, Math.ceil(chunkDuration * sampleRate)),
+				sampleRate,
+			);
+			let hasAudio = false;
+
+			for (const clip of activeClips) {
+				const sourceBuffer = await cache.getBuffer({
+					sourceKey: clip.sourceKey,
+					file: clip.file,
+				});
+				if (!sourceBuffer) continue;
+
+				hasAudio =
+					(await mixClipIntoTimelineChunk({
+						clip,
+						sourceBuffer,
+						outputBuffer,
+						audioContext: context,
+						windowStart,
+						windowEnd,
+						sampleRate,
+					})) || hasAudio;
+			}
+
+			if (normalizePeak) {
+				normalizeAudioBufferPeak({ audioBuffer: outputBuffer });
+			}
+
+			onProgress?.((windowIndex + 1) / totalWindows);
+			yield {
+				buffer: outputBuffer,
+				startTime: windowStart,
+				duration: chunkDuration,
+				hasAudio,
+			};
+		}
+	} finally {
+		if (ownsContext) {
+			void context.close();
+		}
+	}
+}
+
+export async function addTimelineAudioToSource({
+	tracks,
+	mediaAssets,
+	duration,
+	audioSource,
+	sampleRate = EXPORT_SAMPLE_RATE,
+	windowDurationSeconds = DEFAULT_AUDIO_RENDER_WINDOW_SECONDS,
+	onProgress,
+	shouldCancel,
+}: {
+	tracks: SceneTracks;
+	mediaAssets: MediaAsset[];
+	duration: number;
+	audioSource: AudioBufferSource;
+	sampleRate?: number;
+	windowDurationSeconds?: number;
+	onProgress?: (fraction: number) => void;
+	shouldCancel?: () => boolean;
+}): Promise<boolean> {
+	let addedAnyAudio = false;
+
+	for await (const chunk of renderTimelineAudioChunks({
+		tracks,
+		mediaAssets,
+		duration,
+		sampleRate,
+		windowDurationSeconds,
+		onProgress,
+	})) {
+		if (shouldCancel?.()) {
+			throw new TimelineAudioRenderCancelledError();
+		}
+
+		await audioSource.add(chunk.buffer);
+		addedAnyAudio ||= chunk.hasAudio;
+
+		if (shouldCancel?.()) {
+			throw new TimelineAudioRenderCancelledError();
+		}
+	}
+
+	return addedAnyAudio;
 }
 
 export async function createTimelineAudioBuffer({

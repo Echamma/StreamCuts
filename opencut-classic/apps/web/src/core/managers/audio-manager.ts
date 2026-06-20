@@ -169,8 +169,7 @@ export class AudioManager {
 				if (element.sourceType === "upload" && mediaAsset) {
 					keys.add(mediaAsset.id);
 				} else if (element.sourceType === "library") {
-					// Library audio uses element.id as its sourceKey (see fetchLibraryAudioClip).
-					keys.add(element.id);
+					keys.add(element.sourceUrl);
 				}
 			} else if (element.type === "video" && mediaAsset) {
 				keys.add(mediaAsset.id);

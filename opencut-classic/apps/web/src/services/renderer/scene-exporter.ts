@@ -5,12 +5,9 @@ import {
 	Mp4OutputFormat,
 	WebMOutputFormat,
 	BufferTarget,
+	StreamTarget,
 	CanvasSource,
 	AudioBufferSource,
-	QUALITY_LOW,
-	QUALITY_MEDIUM,
-	QUALITY_HIGH,
-	QUALITY_VERY_HIGH,
 } from "mediabunny";
 import type { FrameRate } from "opencut-wasm";
 import { mediaTimeToSeconds } from "opencut-wasm";
@@ -28,21 +25,41 @@ type ExportParams = {
 	quality: ExportQuality;
 	shouldIncludeAudio?: boolean;
 	audioBuffer?: AudioBuffer;
+	target?: BufferTarget | StreamTarget;
+	writeAudioToSource?: ({
+		audioSource,
+	}: {
+		audioSource: AudioBufferSource;
+	}) => Promise<boolean>;
 };
 
-const qualityMap = {
-	low: QUALITY_LOW,
-	medium: QUALITY_MEDIUM,
-	high: QUALITY_HIGH,
-	very_high: QUALITY_VERY_HIGH,
+const EXPORT_AUDIO_SAMPLE_RATE = 44100;
+const EXPORT_AUDIO_CHANNELS = 2;
+const KEY_FRAME_INTERVAL_SECONDS = 2;
+const VIDEO_QUALITY_MULTIPLIER: Record<ExportQuality, number> = {
+	low: 0.7,
+	medium: 1,
+	high: 1.45,
+	very_high: 2.1,
+};
+const AUDIO_BITRATE_BY_QUALITY: Record<ExportQuality, number> = {
+	low: 96000,
+	medium: 128000,
+	high: 192000,
+	very_high: 256000,
 };
 
 export type SceneExporterEvents = {
 	progress: [progress: number];
-	complete: [buffer: ArrayBuffer];
+	complete: [result: SceneExportResult];
 	error: [error: Error];
 	cancelled: [];
 };
+
+export interface SceneExportResult {
+	buffer?: ArrayBuffer;
+	wroteToFile: boolean;
+}
 
 export class SceneExporter extends EventEmitter<SceneExporterEvents> {
 	private renderer: CanvasRenderer;
@@ -50,6 +67,12 @@ export class SceneExporter extends EventEmitter<SceneExporterEvents> {
 	private quality: ExportQuality;
 	private shouldIncludeAudio: boolean;
 	private audioBuffer?: AudioBuffer;
+	private target: BufferTarget | StreamTarget;
+	private writeAudioToSource?: ({
+		audioSource,
+	}: {
+		audioSource: AudioBufferSource;
+	}) => Promise<boolean>;
 
 	private isCancelled = false;
 
@@ -61,6 +84,8 @@ export class SceneExporter extends EventEmitter<SceneExporterEvents> {
 		quality,
 		shouldIncludeAudio,
 		audioBuffer,
+		target,
+		writeAudioToSource,
 	}: ExportParams) {
 		super();
 		this.renderer = new CanvasRenderer({
@@ -73,6 +98,8 @@ export class SceneExporter extends EventEmitter<SceneExporterEvents> {
 		this.quality = quality;
 		this.shouldIncludeAudio = shouldIncludeAudio ?? false;
 		this.audioBuffer = audioBuffer;
+		this.target = target ?? new BufferTarget();
+		this.writeAudioToSource = writeAudioToSource;
 	}
 
 	cancel(): void {
@@ -83,7 +110,7 @@ export class SceneExporter extends EventEmitter<SceneExporterEvents> {
 		rootNode,
 	}: {
 		rootNode: RootNode;
-	}): Promise<ArrayBuffer | null> {
+	}): Promise<SceneExportResult | null> {
 		const fps = this.renderer.fps;
 		const fpsFloat = frameRateToFloat(fps);
 		const ticksPerFrame = Math.round(
@@ -92,46 +119,84 @@ export class SceneExporter extends EventEmitter<SceneExporterEvents> {
 		const frameCount = Math.floor(rootNode.duration / ticksPerFrame);
 
 		const outputFormat =
-			this.format === "webm" ? new WebMOutputFormat() : new Mp4OutputFormat();
+			this.format === "webm"
+				? new WebMOutputFormat()
+				: new Mp4OutputFormat(
+						this.target instanceof StreamTarget ? { fastStart: false } : undefined,
+					);
 
 		const output = new Output({
 			format: outputFormat,
-			target: new BufferTarget(),
+			target: this.target,
 		});
 
+		const videoCodec = this.format === "webm" ? "vp9" : "avc";
+		const videoBitrate = getTargetVideoBitrate({
+			codec: videoCodec,
+			width: this.renderer.width,
+			height: this.renderer.height,
+			fps: fpsFloat,
+			quality: this.quality,
+		});
 		const videoSource = new CanvasSource(this.renderer.getOutputCanvas(), {
-			codec: this.format === "webm" ? "vp9" : "avc",
-			bitrate: qualityMap[this.quality],
+			codec: videoCodec,
+			bitrate: videoBitrate,
+			bitrateMode: "variable",
+			latencyMode: "quality",
+			contentHint: "detail",
+			keyFrameInterval: KEY_FRAME_INTERVAL_SECONDS,
 		});
 
 		output.addVideoTrack(videoSource, { frameRate: fpsFloat });
 
 		let audioSource: AudioBufferSource | null = null;
-		if (this.shouldIncludeAudio && this.audioBuffer) {
+		if (this.shouldIncludeAudio && (this.audioBuffer || this.writeAudioToSource)) {
 			let audioCodec: "aac" | "opus" = this.format === "webm" ? "opus" : "aac";
+			let audioBitrate = getTargetAudioBitrate({
+				codec: audioCodec,
+				quality: this.quality,
+			});
 
 			if (audioCodec === "aac" && typeof AudioEncoder !== "undefined") {
 				const { supported } = await AudioEncoder.isConfigSupported({
 					codec: "mp4a.40.2",
-					sampleRate: this.audioBuffer.sampleRate,
-					numberOfChannels: this.audioBuffer.numberOfChannels,
-					bitrate: 192000,
+					sampleRate: this.audioBuffer?.sampleRate ?? EXPORT_AUDIO_SAMPLE_RATE,
+					numberOfChannels:
+						this.audioBuffer?.numberOfChannels ?? EXPORT_AUDIO_CHANNELS,
+					bitrate: audioBitrate,
 				});
-				if (!supported) audioCodec = "opus";
+				if (!supported) {
+					audioCodec = "opus";
+					audioBitrate = getTargetAudioBitrate({
+						codec: audioCodec,
+						quality: this.quality,
+					});
+				}
 			}
 
 			audioSource = new AudioBufferSource({
 				codec: audioCodec,
-				bitrate: qualityMap[this.quality],
+				bitrate: audioBitrate,
+				bitrateMode: "variable",
 			});
 			output.addAudioTrack(audioSource);
 		}
 
 		await output.start();
 
-		if (audioSource && this.audioBuffer) {
-			await audioSource.add(this.audioBuffer);
+		if (audioSource) {
+			if (this.writeAudioToSource) {
+				await this.writeAudioToSource({ audioSource });
+			} else if (this.audioBuffer) {
+				await audioSource.add(this.audioBuffer);
+			}
 			audioSource.close();
+		}
+
+		if (this.isCancelled) {
+			await output.cancel();
+			this.emit("cancelled");
+			return null;
 		}
 
 		let prevAddPromise: Promise<void> = Promise.resolve();
@@ -170,13 +235,76 @@ export class SceneExporter extends EventEmitter<SceneExporterEvents> {
 		await output.finalize();
 		this.emit("progress", 1);
 
-		const buffer = output.target.buffer;
-		if (!buffer) {
-			this.emit("error", new Error("Failed to export video"));
-			return null;
+		if (this.target instanceof BufferTarget) {
+			const buffer = this.target.buffer;
+			if (!buffer) {
+				this.emit("error", new Error("Failed to export video"));
+				return null;
+			}
+
+			const result = {
+				buffer,
+				wroteToFile: false,
+			};
+			this.emit("complete", result);
+			return result;
 		}
 
-		this.emit("complete", buffer);
-		return buffer;
+		const result = {
+			wroteToFile: true,
+		};
+		this.emit("complete", result);
+		return result;
 	}
+}
+
+function getTargetVideoBitrate({
+	codec,
+	width,
+	height,
+	fps,
+	quality,
+}: {
+	codec: "avc" | "vp9";
+	width: number;
+	height: number;
+	fps: number;
+	quality: ExportQuality;
+}): number {
+	const safeFps = Math.max(1, fps);
+	const bitsPerPixelPerFrame =
+		codec === "vp9"
+			? 0.085 * VIDEO_QUALITY_MULTIPLIER[quality]
+			: 0.13 * VIDEO_QUALITY_MULTIPLIER[quality];
+	const rawBitrate = width * height * safeFps * bitsPerPixelPerFrame;
+	const minimumBitrate = codec === "vp9" ? 2_000_000 : 3_500_000;
+	const maximumBitrate = codec === "vp9" ? 60_000_000 : 80_000_000;
+
+	return roundBitrate({
+		bitrate: Math.max(minimumBitrate, Math.min(maximumBitrate, rawBitrate)),
+	});
+}
+
+function getTargetAudioBitrate({
+	codec,
+	quality,
+}: {
+	codec: "aac" | "opus";
+	quality: ExportQuality;
+}): number {
+	if (codec === "opus") {
+		const opusBitrateByQuality: Record<ExportQuality, number> = {
+			low: 64000,
+			medium: 96000,
+			high: 160000,
+			very_high: 224000,
+		};
+		return opusBitrateByQuality[quality];
+	}
+
+	return AUDIO_BITRATE_BY_QUALITY[quality];
+}
+
+function roundBitrate({ bitrate }: { bitrate: number }): number {
+	return Math.max(1_000, Math.round(bitrate / 1_000) * 1_000);
 }

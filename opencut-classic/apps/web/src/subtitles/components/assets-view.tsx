@@ -8,12 +8,16 @@ import {
 	SelectValue,
 } from "@/components/ui/select";
 import { useEffect, useReducer, useRef, useState } from "react";
-import { extractTimelineAudio } from "@/media/mediabunny";
+import {
+	DEFAULT_TRANSCRIPTION_CHUNK_DURATION_SECONDS,
+	extractTimelineAudioChunks,
+} from "@/media/mediabunny";
 import { useEditor } from "@/editor/use-editor";
 import { TRANSCRIPTION_LANGUAGES } from "@/transcription/supported-languages";
 import type {
 	CaptionChunk,
 	TranscriptionLanguage,
+	TranscriptionSegment,
 } from "@/transcription/types";
 import {
 	downloadTranscriptionModel,
@@ -78,6 +82,29 @@ function processingReducer(
 	}
 }
 /* eslint-enable opencut/prefer-object-params */
+
+function offsetTranscriptionSegments({
+	segments,
+	offsetSeconds,
+}: {
+	segments: TranscriptionSegment[];
+	offsetSeconds: number;
+}): TranscriptionSegment[] {
+	return segments.map((segment) => ({
+		...segment,
+		start: segment.start + offsetSeconds,
+		end: segment.end + offsetSeconds,
+		...(segment.words
+			? {
+					words: segment.words.map((word) => ({
+						...word,
+						start: word.start + offsetSeconds,
+						end: word.end + offsetSeconds,
+					})),
+				}
+			: {}),
+	}));
+}
 
 export function Captions() {
 	const [selectedLanguage, setSelectedLanguage] =
@@ -152,20 +179,8 @@ export function Captions() {
 			return;
 		}
 
-		dispatch({ type: "start", step: "Extracting audio..." });
+		dispatch({ type: "start", step: "Preparing transcription..." });
 		try {
-			const audioBlob = await extractTimelineAudio({
-				tracks: editor.scenes.getActiveScene().tracks,
-				mediaAssets: editor.media.getAssets(),
-				totalDuration,
-				onProgress: (progress) => {
-					dispatch({
-						type: "update_step",
-						step: `Extracting audio ${Math.round(progress)}%`,
-					});
-				},
-			});
-
 			if (modelStatus[selectedModel] === false) {
 				const label = getBackendModel(selectedModel)?.label ?? selectedModel;
 				dispatch({
@@ -176,16 +191,66 @@ export function Captions() {
 				setModelStatus((prev) => ({ ...prev, [selectedModel]: true }));
 			}
 
-			dispatch({ type: "update_step", step: "Sending audio to backend..." });
-			const result = await transcribeWithBackend({
-				audioBlob,
-				language: selectedLanguage === "auto" ? undefined : selectedLanguage,
-				model: selectedModel,
-			});
+			const mergedSegments: TranscriptionSegment[] = [];
+			const transcriptParts: string[] = [];
+			let transcriptLanguage =
+				selectedLanguage === "auto" ? "" : selectedLanguage;
+			let transcribedChunkCount = 0;
+			let activeChunkCount = 0;
 
-			if (result.segments.length === 0) {
+			for await (const chunk of extractTimelineAudioChunks({
+				tracks: editor.scenes.getActiveScene().tracks,
+				mediaAssets: editor.media.getAssets(),
+				totalDuration,
+				windowDurationSeconds: DEFAULT_TRANSCRIPTION_CHUNK_DURATION_SECONDS,
+				onProgress: (progress) => {
+					dispatch({
+						type: "update_step",
+						step: `Preparing audio ${Math.round(progress)}%`,
+					});
+				},
+			})) {
+				if (!chunk.hasAudio) {
+					continue;
+				}
+				if (!chunk.blob) {
+					continue;
+				}
+
+				activeChunkCount += 1;
+				dispatch({
+					type: "update_step",
+					step: `Transcribing chunk ${activeChunkCount}...`,
+				});
+
+				const result = await transcribeWithBackend({
+					audioBlob: chunk.blob,
+					language: selectedLanguage === "auto" ? undefined : selectedLanguage,
+					model: selectedModel,
+				});
+
+				transcribedChunkCount += 1;
+				if (!transcriptLanguage && result.language) {
+					transcriptLanguage = result.language;
+				}
+				if (result.text.trim()) {
+					transcriptParts.push(result.text.trim());
+				}
+				if (result.segments.length > 0) {
+					mergedSegments.push(
+						...offsetTranscriptionSegments({
+							segments: result.segments,
+							offsetSeconds: chunk.startTime,
+						}),
+					);
+				}
+			}
+
+			if (mergedSegments.length === 0) {
 				const message =
-					"The backend transcription completed, but it returned 0 segments. The timeline audio may be silent, the source may contain no speech, or speech detection filtered everything out.";
+					transcribedChunkCount === 0
+						? "The timeline audio is silent or empty, so there was nothing to transcribe."
+						: "The backend transcription completed, but it returned 0 segments. The timeline audio may be silent, the source may contain no speech, or speech detection filtered everything out.";
 				dispatch({ type: "fail", error: message });
 				toast.error("Caption generation failed", {
 					description: message,
@@ -194,10 +259,11 @@ export function Captions() {
 			}
 
 			dispatch({ type: "update_step", step: "Generating captions..." });
-			const captionChunks = buildCaptionChunks({ segments: result.segments });
+			mergedSegments.sort((left, right) => left.start - right.start);
+			const captionChunks = buildCaptionChunks({ segments: mergedSegments });
 
 			if (captionChunks.length === 0) {
-				const message = `The backend returned ${result.segments.length} segment(s), but caption chunking produced 0 captions.`;
+				const message = `The backend returned ${mergedSegments.length} merged segment(s), but caption chunking produced 0 captions.`;
 				dispatch({ type: "fail", error: message });
 				toast.error("Caption generation failed", {
 					description: message,
@@ -216,16 +282,16 @@ export function Captions() {
 
 			editor.project.setTranscript({
 				transcript: {
-					text: result.text,
-					segments: result.segments,
-					language: result.language,
+					text: transcriptParts.join(" ").trim(),
+					segments: mergedSegments,
+					language: transcriptLanguage || "unknown",
 					savedAt: new Date().toISOString(),
 				},
 			});
 
 			dispatch({ type: "succeed", warnings: [] });
 			toast.success("Captions added to the timeline.", {
-				description: `Inserted ${captionChunks.length} caption(s) from ${result.segments.length} segment(s).`,
+				description: `Inserted ${captionChunks.length} caption(s) from ${mergedSegments.length} segment(s) across ${activeChunkCount} audio chunk(s).`,
 			});
 		} catch (error) {
 			console.error("Transcription failed:", error);

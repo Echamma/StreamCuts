@@ -1,15 +1,25 @@
 import type { EditorCore } from "@/core";
 import type { RootNode } from "@/services/renderer/nodes/root-node";
-import type { ExportOptions, ExportPhase, ExportResult } from "@/export";
+import type {
+	ExportOptions,
+	ExportPhase,
+	ExportResult,
+	ExportOutputTarget,
+} from "@/export";
 import { CanvasRenderer } from "@/services/renderer/canvas-renderer";
 import { SceneExporter } from "@/services/renderer/scene-exporter";
 import { buildScene } from "@/services/renderer/scene-builder";
-import { collectAudibleCandidates, createTimelineAudioBuffer } from "@/media/audio";
+import {
+	addTimelineAudioToSource,
+	collectAudibleCandidates,
+	timelineHasAudio,
+	TimelineAudioRenderCancelledError,
+} from "@/media/audio";
 import type { SceneTracks } from "@/timeline";
 import type { MediaAsset } from "@/media/types";
 import { formatTimecode } from "opencut-wasm";
-import { frameRateToFloat } from "@/fps/utils";
 import { downloadBlob } from "@/utils/browser";
+import { StreamTarget } from "mediabunny";
 
 type SnapshotResult =
 	| { success: true; blob: Blob; filename: string }
@@ -170,23 +180,13 @@ export class RendererManager {
 			const exportFps = fps ?? activeProject.settings.fps;
 			const canvasSize = activeProject.settings.canvasSize;
 
-			let audioBuffer: AudioBuffer | null = null;
-			const audioWeight = estimateAudioWeight({ tracks, mediaAssets, includeAudio: !!includeAudio });
-
-			if (includeAudio) {
-				onProgress?.({ progress: 0, phase: "audio", statusText: "Preparing audio..." });
-				audioBuffer = await createTimelineAudioBuffer({
-					tracks,
-					mediaAssets,
-					duration,
-					onProgress: (fraction) =>
-						onProgress?.({
-							progress: fraction * audioWeight,
-							phase: "audio",
-							statusText: "Preparing audio...",
-						}),
-				});
-			}
+			const shouldIncludeAudio =
+				!!includeAudio && timelineHasAudio({ tracks, mediaAssets });
+			const audioWeight = estimateAudioWeight({
+				tracks,
+				mediaAssets,
+				includeAudio: shouldIncludeAudio,
+			});
 
 			const scene = buildScene({
 				tracks,
@@ -196,14 +196,50 @@ export class RendererManager {
 				background: activeProject.settings.background,
 			});
 
-			const exporter = new SceneExporter({
+			const outputTarget = createExporterTarget({
+				outputTarget: options.outputTarget,
+			});
+			let cancelled = false;
+			let exporter: SceneExporter;
+			exporter = new SceneExporter({
 				width: canvasSize.width,
 				height: canvasSize.height,
 				fps: exportFps,
 				format,
 				quality,
-				shouldIncludeAudio: !!includeAudio,
-				audioBuffer: audioBuffer || undefined,
+				shouldIncludeAudio,
+				target: outputTarget,
+				writeAudioToSource: shouldIncludeAudio
+					? async ({ audioSource }) => {
+							onProgress?.({
+								progress: 0,
+								phase: "audio",
+								statusText: "Preparing audio...",
+							});
+							try {
+								return await addTimelineAudioToSource({
+									tracks,
+									mediaAssets,
+									duration,
+									audioSource,
+									onProgress: (fraction) =>
+										onProgress?.({
+											progress: fraction * audioWeight,
+											phase: "audio",
+											statusText: "Preparing audio...",
+										}),
+									shouldCancel: onCancel,
+								});
+							} catch (error) {
+								if (error instanceof TimelineAudioRenderCancelledError) {
+									cancelled = true;
+									exporter.cancel();
+									return false;
+								}
+								throw error;
+							}
+						}
+					: undefined,
 			});
 
 			onProgress?.({ progress: audioWeight, phase: "video", statusText: "Encoding video..." });
@@ -216,7 +252,6 @@ export class RendererManager {
 				}
 			});
 
-			let cancelled = false;
 			const checkCancel = () => {
 				if (onCancel?.()) {
 					cancelled = true;
@@ -227,20 +262,21 @@ export class RendererManager {
 			const cancelInterval = setInterval(checkCancel, 100);
 
 			try {
-				const buffer = await exporter.export({ rootNode: scene });
+				const exportResult = await exporter.export({ rootNode: scene });
 				clearInterval(cancelInterval);
 
 				if (cancelled) {
 					return { success: false, cancelled: true };
 				}
 
-				if (!buffer) {
+				if (!exportResult) {
 					return { success: false, error: "Export failed to produce buffer" };
 				}
 
 				return {
 					success: true,
-					buffer,
+					buffer: exportResult.buffer,
+					wroteToFile: exportResult.wroteToFile,
 				};
 			} finally {
 				clearInterval(cancelInterval);
@@ -264,6 +300,20 @@ export class RendererManager {
 			fn();
 		});
 	}
+}
+
+function createExporterTarget({
+	outputTarget,
+}: {
+	outputTarget?: ExportOutputTarget;
+}) {
+	if (outputTarget?.mode === "file-system") {
+		return new StreamTarget(outputTarget.writable, {
+			chunked: true,
+		});
+	}
+
+	return undefined;
 }
 
 function estimateAudioWeight({

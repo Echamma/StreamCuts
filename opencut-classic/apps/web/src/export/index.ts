@@ -18,17 +18,23 @@ export type ExportSceneTarget =
 	| { mode: "specific"; sceneId: string }
 	| { mode: "all" };
 
+export type ExportOutputTarget =
+	| { mode: "buffer" }
+	| { mode: "file-system"; writable: FileSystemWritableFileStream };
+
 export interface ExportOptions {
 	format: ExportFormat;
 	quality: ExportQuality;
 	fps?: FrameRate;
 	includeAudio?: boolean;
 	sceneTarget?: ExportSceneTarget;
+	outputTarget?: ExportOutputTarget;
 }
 
 export interface ExportResult {
 	success: boolean;
 	buffer?: ArrayBuffer;
+	wroteToFile?: boolean;
 	error?: string;
 	cancelled?: boolean;
 }

@@ -5,10 +5,9 @@ import {
 	VideoSampleSink,
 	type VideoCodec,
 } from "mediabunny";
-import { createTimelineAudioBuffer } from "@/media/audio";
+import { renderTimelineAudioChunks } from "@/media/audio";
 import type { SceneTracks } from "@/timeline";
 import type { MediaAsset } from "@/media/types";
-import { TICKS_PER_SECOND } from "@/wasm";
 import { renderThumbnailDataUrl } from "./thumbnail";
 
 export type VideoFileData = {
@@ -80,55 +79,51 @@ export async function readVideoFile({
 
 const SAMPLE_RATE = 44100;
 const NUM_CHANNELS = 2;
-const EMPTY_TIMELINE_SILENT_DURATION_SECONDS = 0.1;
-const MIN_SILENT_DURATION_SECONDS = 0.001;
+export const DEFAULT_TRANSCRIPTION_CHUNK_DURATION_SECONDS = 45;
 
-export const extractTimelineAudio = async ({
+export interface TimelineAudioBlobChunk {
+	blob: Blob | null;
+	startTime: number;
+	duration: number;
+	hasAudio: boolean;
+}
+
+export async function* extractTimelineAudioChunks({
 	tracks,
 	mediaAssets,
 	totalDuration,
+	windowDurationSeconds = DEFAULT_TRANSCRIPTION_CHUNK_DURATION_SECONDS,
 	onProgress,
 }: {
 	tracks: SceneTracks;
 	mediaAssets: MediaAsset[];
 	totalDuration: number;
+	windowDurationSeconds?: number;
 	onProgress?: (progress: number) => void;
-}): Promise<Blob> => {
-	if (totalDuration === 0) {
-		return createWavBlob({
-			samples: new Float32Array(
-				SAMPLE_RATE * EMPTY_TIMELINE_SILENT_DURATION_SECONDS,
-			),
-		});
+}): AsyncGenerator<TimelineAudioBlobChunk> {
+	if (totalDuration <= 0) {
+		return;
 	}
 
-	onProgress?.(10);
-
-	const audioBuffer = await createTimelineAudioBuffer({
+	for await (const chunk of renderTimelineAudioChunks({
 		tracks,
 		mediaAssets,
 		duration: totalDuration,
 		sampleRate: SAMPLE_RATE,
-	});
-
-	if (!audioBuffer) {
-		const silentDurationSeconds = Math.max(
-			MIN_SILENT_DURATION_SECONDS,
-			totalDuration / TICKS_PER_SECOND,
-		);
-		const silentSamples = new Float32Array(
-			Math.ceil(silentDurationSeconds * SAMPLE_RATE) * NUM_CHANNELS,
-		);
-		return createWavBlob({ samples: silentSamples });
+		windowDurationSeconds,
+		normalizePeak: false,
+		onProgress: (fraction) => onProgress?.(fraction * 100),
+	})) {
+		yield {
+			blob: chunk.hasAudio
+				? createWavBlobFromAudioBuffer({ audioBuffer: chunk.buffer })
+				: null,
+			startTime: chunk.startTime,
+			duration: chunk.duration,
+			hasAudio: chunk.hasAudio,
+		};
 	}
-
-	onProgress?.(90);
-
-	const interleavedSamples = interleaveAudioBuffer({ audioBuffer });
-	onProgress?.(100);
-
-	return createWavBlob({ samples: interleavedSamples });
-};
+}
 
 function interleaveAudioBuffer({
 	audioBuffer,
@@ -149,6 +144,16 @@ function interleaveAudioBuffer({
 	}
 
 	return interleavedSamples;
+}
+
+function createWavBlobFromAudioBuffer({
+	audioBuffer,
+}: {
+	audioBuffer: AudioBuffer;
+}): Blob {
+	return createWavBlob({
+		samples: interleaveAudioBuffer({ audioBuffer }),
+	});
 }
 
 function createWavBlob({ samples }: { samples: Float32Array }): Blob {

@@ -24,6 +24,7 @@ import {
 	EXPORT_FORMAT_VALUES,
 	EXPORT_QUALITY_VALUES,
 	type ExportFormat,
+	type ExportOutputTarget,
 	type ExportQuality,
 	type ExportSceneTarget,
 } from "@/export";
@@ -36,12 +37,96 @@ import {
 import { useEditor } from "@/editor/use-editor";
 import { DEFAULT_EXPORT_OPTIONS } from "@/export/defaults";
 
+type SaveFilePickerLike = (options?: {
+	suggestedName?: string;
+	types?: Array<{
+		description?: string;
+		accept: Record<string, string[]>;
+	}>;
+}) => Promise<FileSystemFileHandle>;
+
 function isExportFormat(value: string): value is ExportFormat {
 	return EXPORT_FORMAT_VALUES.some((formatValue) => formatValue === value);
 }
 
 function isExportQuality(value: string): value is ExportQuality {
 	return EXPORT_QUALITY_VALUES.some((qualityValue) => qualityValue === value);
+}
+
+function getShowSaveFilePicker(): SaveFilePickerLike | null {
+	if (typeof window === "undefined") {
+		return null;
+	}
+
+	return (
+		(window as Window & { showSaveFilePicker?: SaveFilePickerLike })
+			.showSaveFilePicker ?? null
+	);
+}
+
+function getSceneLabel({
+	sceneTarget,
+	scenes,
+}: {
+	sceneTarget: ExportSceneTarget;
+	scenes: Array<{ id: string; name: string }>;
+}): string {
+	return sceneTarget.mode === "specific"
+		? `-${scenes.find((scene) => scene.id === sceneTarget.sceneId)?.name ?? "scene"}`
+		: sceneTarget.mode === "all"
+			? "-all"
+			: "";
+}
+
+function buildExportFileName({
+	projectName,
+	sceneTarget,
+	scenes,
+	format,
+}: {
+	projectName: string;
+	sceneTarget: ExportSceneTarget;
+	scenes: Array<{ id: string; name: string }>;
+	format: ExportFormat;
+}): string {
+	return `${projectName}${getSceneLabel({ sceneTarget, scenes })}${getExportFileExtension({ format })}`;
+}
+
+async function createExportOutputTarget({
+	format,
+	fileName,
+}: {
+	format: ExportFormat;
+	fileName: string;
+}): Promise<ExportOutputTarget | null> {
+	const showSaveFilePicker = getShowSaveFilePicker();
+	if (!showSaveFilePicker) {
+		return { mode: "buffer" };
+	}
+
+	try {
+		const handle = await showSaveFilePicker({
+			suggestedName: fileName,
+			types: [
+				{
+					description: `${format.toUpperCase()} video`,
+					accept: {
+						[getExportMimeType({ format })]: [getExportFileExtension({ format })],
+					},
+				},
+			],
+		});
+
+		return {
+			mode: "file-system",
+			writable: await handle.createWritable(),
+		};
+	} catch (error) {
+		if (error instanceof DOMException && error.name === "AbortError") {
+			return null;
+		}
+		throw error;
+	}
 }
 
 export function ExportButton() {
@@ -119,36 +204,53 @@ function ExportPopover({
 	const handleExport = async () => {
 		if (!activeProject) return;
 
-		const result = await editor.project.export({
-			options: {
-				format,
-				quality,
-				fps: activeProject.settings.fps,
-				includeAudio: shouldIncludeAudio,
+		try {
+			const fileName = buildExportFileName({
+				projectName: activeProject.metadata.name,
 				sceneTarget,
-			},
-		});
+				scenes,
+				format,
+			});
+			const outputTarget = await createExportOutputTarget({
+				format,
+				fileName,
+			});
+			if (!outputTarget) {
+				return;
+			}
 
-		if (result.cancelled) {
-			editor.project.clearExportState();
-			return;
-		}
-
-		if (result.success && result.buffer) {
-			const sceneLabel =
-				sceneTarget.mode === "specific"
-					? `-${scenes.find((s) => s.id === sceneTarget.sceneId)?.name ?? "scene"}`
-					: sceneTarget.mode === "all"
-						? "-all"
-						: "";
-			downloadBuffer({
-				buffer: result.buffer,
-				filename: `${activeProject.metadata.name}${sceneLabel}${getExportFileExtension({ format })}`,
-				mimeType: getExportMimeType({ format }),
+			const result = await editor.project.export({
+				options: {
+					format,
+					quality,
+					fps: activeProject.settings.fps,
+					includeAudio: shouldIncludeAudio,
+					sceneTarget,
+					outputTarget,
+				},
 			});
 
-			editor.project.clearExportState();
-			onOpenChange(false);
+			if (result.cancelled) {
+				editor.project.clearExportState();
+				return;
+			}
+
+			if (result.success) {
+				if (result.buffer) {
+					downloadBuffer({
+						buffer: result.buffer,
+						filename: fileName,
+						mimeType: getExportMimeType({ format }),
+					});
+				}
+
+				if (result.buffer || result.wroteToFile) {
+					editor.project.clearExportState();
+					onOpenChange(false);
+				}
+			}
+		} catch (error) {
+			console.error("Failed to start export:", error);
 		}
 	};
 
