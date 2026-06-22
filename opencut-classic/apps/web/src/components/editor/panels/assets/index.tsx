@@ -11,6 +11,7 @@ import { StickersView } from "@/stickers/components/assets-view";
 import { TextView } from "@/text/components/assets-view";
 import { EffectsView } from "@/effects/components/assets-view";
 import { BossPanel } from "@/components/editor/panels/boss";
+import { SummarizePanel } from "@/components/editor/panels/summarize";
 import { LongToShortView } from "@/components/editor/panels/assets/views/long-to-short";
 import { SocialsView } from "@/components/editor/panels/assets/views/socials";
 import { AudioMixerView } from "@/components/editor/panels/assets/views/audio-mixer";
@@ -37,6 +38,7 @@ export function AssetsPanel() {
 			</div>
 		),
 		boss: <BossPanel />,
+		summarize: <SummarizePanel />,
 		"long-to-short": <LongToShortView />,
 		socials: <SocialsView />,
 		settings: <SettingsView />,

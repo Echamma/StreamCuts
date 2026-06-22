@@ -55,6 +55,24 @@ export type BossRenderResult = {
 	shorts: BossRenderedShort[];
 };
 
+export type BossHighlight = {
+	startSeconds: number;
+	endSeconds: number;
+	reason: string;
+};
+
+export type BossSummarizePlanResult = {
+	highlights: BossHighlight[];
+	totalSeconds: number;
+};
+
+export type BossSummarizeRenderResult = {
+	downloadUrl: string;
+	title: string;
+	durationSeconds: number;
+	segmentCount: number;
+};
+
 // ── Boss pipeline API calls ────────────────────────────────────────────
 
 export async function bossSaveUpload({ video }: { video: File }): Promise<BossUploadResult> {
@@ -187,6 +205,84 @@ export async function bossRender({
 	return {
 		longerVideos: payload.longerVideos as BossRenderedClip[],
 		shorts: payload.shorts as BossRenderedShort[],
+	};
+}
+
+// ── Summarize pipeline API calls ────────────────────────────────────────
+
+export async function bossSummarizePlan({
+	jobId,
+	segments,
+	durationSeconds,
+	targetSeconds,
+	focus,
+}: {
+	jobId: string;
+	segments: BossTranscriptSegment[];
+	durationSeconds: number;
+	targetSeconds: number;
+	focus?: string;
+}): Promise<BossSummarizePlanResult> {
+	const response = await fetch(
+		resolveLongToShortUrl({ path: "/api/boss/summarize-plan" }),
+		{
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ jobId, segments, durationSeconds, targetSeconds, focus }),
+		},
+	);
+
+	if (!response.ok) {
+		throw new Error(await readErrorMessage({ response }));
+	}
+
+	const payload: unknown = await response.json();
+	if (!isRecord(payload) || !Array.isArray(payload.highlights)) {
+		throw new Error("Backend returned an invalid summarize-plan payload.");
+	}
+
+	return {
+		highlights: payload.highlights as BossHighlight[],
+		totalSeconds: typeof payload.totalSeconds === "number" ? payload.totalSeconds : 0,
+	};
+}
+
+export async function bossSummarizeRender({
+	jobId,
+	highlights,
+}: {
+	jobId: string;
+	highlights: BossHighlight[];
+}): Promise<BossSummarizeRenderResult> {
+	const response = await fetch(
+		resolveLongToShortUrl({ path: "/api/boss/summarize-render" }),
+		{
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ jobId, highlights }),
+		},
+	);
+
+	if (!response.ok) {
+		throw new Error(await readErrorMessage({ response }));
+	}
+
+	const payload: unknown = await response.json();
+	if (
+		!isRecord(payload) ||
+		typeof payload.downloadUrl !== "string" ||
+		typeof payload.title !== "string"
+	) {
+		throw new Error("Backend returned an invalid summarize-render payload.");
+	}
+
+	return {
+		downloadUrl: payload.downloadUrl,
+		title: payload.title,
+		durationSeconds:
+			typeof payload.durationSeconds === "number" ? payload.durationSeconds : 0,
+		segmentCount:
+			typeof payload.segmentCount === "number" ? payload.segmentCount : 0,
 	};
 }
 

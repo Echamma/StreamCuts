@@ -14,6 +14,7 @@ import {
 	Settings01Icon,
 	TextIcon,
 	Video01Icon,
+	VideoReplayIcon,
 	VolumeHighIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon, type IconSvgElement } from "@hugeicons/react";
@@ -29,6 +30,7 @@ export const TAB_KEYS = [
 	"captions",
 	"adjustment",
 	"boss",
+	"summarize",
 	"long-to-short",
 	"socials",
 	"settings",
@@ -85,6 +87,10 @@ export const tabs = {
 	boss: {
 		icon: createHugeiconsIcon({ icon: Briefcase09Icon }),
 		label: "Boss",
+	},
+	summarize: {
+		icon: createHugeiconsIcon({ icon: VideoReplayIcon }),
+		label: "Summarize",
 	},
 	"long-to-short": {
 		icon: createHugeiconsIcon({ icon: Video01Icon }),

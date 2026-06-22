@@ -7,11 +7,14 @@ import {
 import ffmpegPath from "ffmpeg-static";
 import { path as ffprobePath } from "ffprobe-static";
 import {
+  copyFileSync,
   createReadStream,
   existsSync,
   mkdirSync,
   renameSync,
   statSync,
+  unlinkSync,
+  writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import { basename, extname, join, resolve } from "node:path";
@@ -97,6 +100,19 @@ export type BossShort = {
   endSeconds: number;
   title: string;
   description: string;
+};
+
+export type BossHighlight = {
+  startSeconds: number;
+  endSeconds: number;
+  reason: string;
+};
+
+export type BossSummaryResult = {
+  downloadUrl: string;
+  title: string;
+  durationSeconds: number;
+  segmentCount: number;
 };
 
 export type BossRenderedClip = { downloadUrl: string; title: string };
@@ -566,6 +582,146 @@ export class LongToShortService {
     }
 
     return { longerVideos, shorts: renderedShorts };
+  }
+
+  // ── Summarize pipeline ─────────────────────────────────────────────────
+
+  async bossSummarizePlan({
+    jobId,
+    segments,
+    durationSeconds,
+    targetSeconds,
+    focus,
+  }: {
+    jobId: string;
+    segments: TranscriptionSegment[];
+    durationSeconds: number;
+    targetSeconds: number;
+    focus?: string;
+  }): Promise<{ highlights: BossHighlight[]; totalSeconds: number }> {
+    if (!this.geminiApiKey) {
+      throw new InternalServerErrorException(
+        "GEMINI_API_KEY is not configured. Add it to backend/long-to-short/.env.",
+      );
+    }
+    if (segments.length === 0) {
+      throw new InternalServerErrorException(
+        "Transcription produced no text, so this video can't be summarized.",
+      );
+    }
+    if (targetSeconds >= durationSeconds) {
+      throw new BadRequestException(
+        "The target length must be shorter than the source video.",
+      );
+    }
+
+    this.logger.log(
+      `Boss summarizing job ${jobId} (${durationSeconds.toFixed(0)}s -> ${targetSeconds.toFixed(0)}s)`,
+    );
+
+    // Long VODs produce large transcripts; allow a generous cap so highlights
+    // can be drawn from the whole video, not just the first chunk.
+    const transcriptText = this.truncateText(
+      segments
+        .map(
+          (seg) =>
+            `[${this.formatSecondsAsTimestamp(seg.start)}-${this.formatSecondsAsTimestamp(seg.end)}] ${this.normalizeWhitespace(seg.text)}`,
+        )
+        .filter(Boolean)
+        .join("\n"),
+      400000,
+    );
+
+    const highlights = await this.bossGeminiPlanHighlights({
+      transcriptText,
+      durationSeconds,
+      targetSeconds,
+      focus,
+    });
+
+    if (highlights.length === 0) {
+      throw new InternalServerErrorException(
+        "Gemini could not pick any highlights for this summary. Try a longer target length.",
+      );
+    }
+
+    const totalSeconds = this.roundTo(
+      highlights.reduce((sum, h) => sum + (h.endSeconds - h.startSeconds), 0),
+      2,
+    );
+
+    return { highlights, totalSeconds };
+  }
+
+  async bossSummarizeRender({
+    jobId,
+    highlights,
+  }: {
+    jobId: string;
+    highlights: BossHighlight[];
+  }): Promise<BossSummaryResult> {
+    if (!ffmpegPath) {
+      throw new InternalServerErrorException(
+        "The bundled ffmpeg binary is unavailable. Reinstall backend dependencies.",
+      );
+    }
+    if (highlights.length === 0) {
+      throw new BadRequestException("No highlights to render.");
+    }
+
+    const sourcePath = this.findSourceFile(jobId);
+    const jobDir = join(this.jobsDir, jobId);
+    const resolvedFfmpegPath = ffmpegPath;
+
+    // Re-encode every highlight to identical codec params so the segments can
+    // be concatenated losslessly afterwards.
+    const segmentPaths: string[] = [];
+    for (let i = 0; i < highlights.length; i++) {
+      const h = highlights[i];
+      const segPath = join(jobDir, `summary-seg-${i + 1}.mp4`);
+      await this.bossRenderSegmentReencode({
+        ffmpegBinaryPath: resolvedFfmpegPath,
+        inputPath: sourcePath,
+        outputPath: segPath,
+        startSeconds: h.startSeconds,
+        durationSeconds: this.roundTo(h.endSeconds - h.startSeconds, 2),
+      });
+      segmentPaths.push(segPath);
+    }
+
+    const fileName = "summary.mp4";
+    const outputPath = join(jobDir, fileName);
+
+    if (segmentPaths.length === 1) {
+      copyFileSync(segmentPaths[0], outputPath);
+    } else {
+      await this.concatSegments({
+        ffmpegBinaryPath: resolvedFfmpegPath,
+        jobDir,
+        segmentPaths,
+        outputPath,
+      });
+    }
+
+    for (const segPath of segmentPaths) {
+      try {
+        unlinkSync(segPath);
+      } catch {
+        // best-effort cleanup of temp segments
+      }
+    }
+
+    const durationSeconds = this.roundTo(
+      highlights.reduce((sum, h) => sum + (h.endSeconds - h.startSeconds), 0),
+      2,
+    );
+
+    return {
+      downloadUrl: `/api/long-to-short/jobs/${jobId}/clips/${fileName}`,
+      title: "Summary",
+      durationSeconds,
+      segmentCount: highlights.length,
+    };
   }
 
   private async probeVideo(sourcePath: string, ffprobeBinaryPath: string) {
@@ -1541,6 +1697,198 @@ export class LongToShortService {
 
     if (stderr) {
       this.logger.debug(stderr);
+    }
+  }
+
+  private async bossGeminiPlanHighlights({
+    transcriptText,
+    durationSeconds,
+    targetSeconds,
+    focus,
+  }: {
+    transcriptText: string;
+    durationSeconds: number;
+    targetSeconds: number;
+    focus?: string;
+  }): Promise<BossHighlight[]> {
+    const targetMinutes = (targetSeconds / 60).toFixed(1);
+    const promptLines = [
+      "You are a video editor creating a condensed highlight reel that summarizes a long video.",
+      `The source video is ${durationSeconds.toFixed(0)} seconds long.`,
+      `Select the most important, interesting, and self-contained moments so the COMBINED duration of all selected clips is as close as possible to ${targetSeconds.toFixed(0)} seconds (about ${targetMinutes} minutes).`,
+      focus ? `Focus especially on: "${focus}"` : "",
+      "",
+      "Return raw JSON only, no markdown:",
+      '[{"startSeconds": number, "endSeconds": number, "reason": "string"}]',
+      "",
+      "Rules:",
+      "- Segments MUST be in chronological order and must NOT overlap.",
+      `- Spread the selections across the ENTIRE video from 0 to ${durationSeconds.toFixed(0)} seconds, not just the beginning.`,
+      "- Each segment should be a coherent moment, ideally 8 to 90 seconds long, and never shorter than 4 seconds.",
+      `- The combined duration of all segments should total approximately ${targetSeconds.toFixed(0)} seconds. Do not greatly exceed it.`,
+      "- Cut on natural pauses using the transcript timestamps, and prefer complete sentences or thoughts.",
+      "- reason: a short phrase explaining why the moment matters.",
+      "",
+      "Transcript (each line is [MM:SS-MM:SS] spoken text; minutes may exceed 59 for long videos):",
+      transcriptText || "(no transcript available)",
+    ].filter(Boolean);
+
+    const text = await this.bossCallGemini(promptLines.join("\n"));
+    return this.parseHighlightPlan(text, durationSeconds);
+  }
+
+  private parseHighlightPlan(
+    text: string,
+    durationSeconds: number,
+  ): BossHighlight[] {
+    try {
+      const json = this.extractJsonPayload(text);
+      const payload: unknown = JSON.parse(json);
+
+      if (!Array.isArray(payload)) return [];
+
+      const cleaned = payload
+        .filter(
+          (item): item is { startSeconds: number; endSeconds: number; reason?: unknown } =>
+            isRecord(item) &&
+            typeof item.startSeconds === "number" &&
+            typeof item.endSeconds === "number" &&
+            item.endSeconds > item.startSeconds,
+        )
+        .map((item) => ({
+          startSeconds: this.roundTo(Math.max(0, item.startSeconds), 2),
+          endSeconds: this.roundTo(Math.min(durationSeconds, item.endSeconds), 2),
+          reason:
+            typeof item.reason === "string"
+              ? this.normalizeWhitespace(item.reason).slice(0, 200)
+              : "",
+        }))
+        .filter((item) => item.endSeconds - item.startSeconds >= 2)
+        .sort((a, b) => a.startSeconds - b.startSeconds);
+
+      // Clamp any overlaps so concatenation stays chronological and clean.
+      const nonOverlapping: BossHighlight[] = [];
+      let lastEnd = 0;
+      for (const item of cleaned) {
+        const startSeconds = this.roundTo(Math.max(item.startSeconds, lastEnd), 2);
+        if (item.endSeconds - startSeconds >= 2) {
+          nonOverlapping.push({
+            startSeconds,
+            endSeconds: item.endSeconds,
+            reason: item.reason,
+          });
+          lastEnd = item.endSeconds;
+        }
+      }
+
+      return nonOverlapping;
+    } catch {
+      return [];
+    }
+  }
+
+  private async bossRenderSegmentReencode({
+    ffmpegBinaryPath,
+    inputPath,
+    outputPath,
+    startSeconds,
+    durationSeconds,
+  }: {
+    ffmpegBinaryPath: string;
+    inputPath: string;
+    outputPath: string;
+    startSeconds: number;
+    durationSeconds: number;
+  }): Promise<void> {
+    // Keep the source aspect ratio but normalize codec/pixel/audio params so
+    // all segments are concat-compatible.
+    const args = [
+      "-y",
+      "-ss",
+      startSeconds.toFixed(2),
+      "-i",
+      inputPath,
+      "-t",
+      durationSeconds.toFixed(2),
+      "-map",
+      "0:v:0",
+      "-map",
+      "0:a?",
+      "-c:v",
+      "libx264",
+      "-preset",
+      "veryfast",
+      "-crf",
+      "23",
+      "-pix_fmt",
+      "yuv420p",
+      "-c:a",
+      "aac",
+      "-b:a",
+      "128k",
+      "-ar",
+      "48000",
+      "-ac",
+      "2",
+      "-movflags",
+      "+faststart",
+      outputPath,
+    ];
+
+    const { stderr } = await execFileAsync(ffmpegBinaryPath, args, {
+      encoding: "utf8",
+    });
+
+    if (stderr) {
+      this.logger.debug(stderr);
+    }
+  }
+
+  private async concatSegments({
+    ffmpegBinaryPath,
+    jobDir,
+    segmentPaths,
+    outputPath,
+  }: {
+    ffmpegBinaryPath: string;
+    jobDir: string;
+    segmentPaths: string[];
+    outputPath: string;
+  }): Promise<void> {
+    const listPath = join(jobDir, "summary-concat.txt");
+    const listContent = segmentPaths
+      .map((segPath) => `file '${segPath.replace(/\\/g, "/").replace(/'/g, "'\\''")}'`)
+      .join("\n");
+    writeFileSync(listPath, listContent, "utf8");
+
+    const args = [
+      "-y",
+      "-f",
+      "concat",
+      "-safe",
+      "0",
+      "-i",
+      listPath,
+      "-c",
+      "copy",
+      "-movflags",
+      "+faststart",
+      outputPath,
+    ];
+
+    try {
+      const { stderr } = await execFileAsync(ffmpegBinaryPath, args, {
+        encoding: "utf8",
+      });
+      if (stderr) {
+        this.logger.debug(stderr);
+      }
+    } finally {
+      try {
+        unlinkSync(listPath);
+      } catch {
+        // best-effort cleanup of the concat manifest
+      }
     }
   }
 

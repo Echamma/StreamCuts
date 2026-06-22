@@ -18,6 +18,7 @@ backend/long-to-short/*.mkv
 
 .claude/
 versions/
+launcher/target/
 
 plan*.txt
 prompt.txt
@@ -26,4 +27,3 @@ Screenshot *.png
 start.cmd
 start.cmd - Shortcut.lnk
 start.sh
-

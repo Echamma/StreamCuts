@@ -14,6 +14,7 @@ import {
   getUploadDirectory,
   type BossChapter,
   type BossShort,
+  type BossHighlight,
 } from "./long-to-short.service";
 
 const MEDIA_MULTER_OPTIONS = {
@@ -147,6 +148,88 @@ export class BossController {
       jobId: jobId.trim(),
       longerSegments: parsedLonger,
       shorts: parsedShorts,
+    });
+  }
+
+  // ── Summarize pipeline ─────────────────────────────────────────────────
+
+  @Post("/api/boss/summarize-plan")
+  async bossSummarizePlan(@Body() body: unknown) {
+    if (!isRecord(body)) {
+      throw new BadRequestException("Invalid request body.");
+    }
+    const { jobId, segments, durationSeconds, targetSeconds, focus } =
+      body as Record<string, unknown>;
+
+    if (typeof jobId !== "string" || !jobId.trim()) {
+      throw new BadRequestException("jobId is required.");
+    }
+    if (!Array.isArray(segments)) {
+      throw new BadRequestException("segments must be an array.");
+    }
+    const duration = Number(durationSeconds);
+    if (!Number.isFinite(duration) || duration <= 0) {
+      throw new BadRequestException("durationSeconds must be a positive number.");
+    }
+    const target = Number(targetSeconds);
+    if (!Number.isFinite(target) || target <= 0) {
+      throw new BadRequestException("targetSeconds must be a positive number.");
+    }
+
+    const parsedSegments = segments
+      .filter(
+        (s): s is { start: number; end: number; text: string } =>
+          isRecord(s) &&
+          typeof s.start === "number" &&
+          typeof s.end === "number" &&
+          typeof s.text === "string",
+      )
+      .map((s) => ({ start: s.start, end: s.end, text: s.text }));
+
+    return this.longToShortService.bossSummarizePlan({
+      jobId: jobId.trim(),
+      segments: parsedSegments,
+      durationSeconds: duration,
+      targetSeconds: target,
+      focus: typeof focus === "string" ? focus.trim() : undefined,
+    });
+  }
+
+  @Post("/api/boss/summarize-render")
+  async bossSummarizeRender(@Body() body: unknown) {
+    if (!isRecord(body)) {
+      throw new BadRequestException("Invalid request body.");
+    }
+    const { jobId, highlights } = body as Record<string, unknown>;
+
+    if (typeof jobId !== "string" || !jobId.trim()) {
+      throw new BadRequestException("jobId is required.");
+    }
+    if (!Array.isArray(highlights)) {
+      throw new BadRequestException("highlights must be an array.");
+    }
+
+    const parsedHighlights: BossHighlight[] = highlights
+      .filter(
+        (h): h is { startSeconds: number; endSeconds: number; reason?: unknown } =>
+          isRecord(h) &&
+          typeof h.startSeconds === "number" &&
+          typeof h.endSeconds === "number" &&
+          h.endSeconds > h.startSeconds,
+      )
+      .map((h) => ({
+        startSeconds: h.startSeconds,
+        endSeconds: h.endSeconds,
+        reason: typeof h.reason === "string" ? h.reason : "",
+      }));
+
+    if (parsedHighlights.length === 0) {
+      throw new BadRequestException("No valid highlights were provided.");
+    }
+
+    return this.longToShortService.bossSummarizeRender({
+      jobId: jobId.trim(),
+      highlights: parsedHighlights,
     });
   }
 
