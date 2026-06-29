@@ -152,6 +152,33 @@ const visualElementParams: ElementParamDefinition[] = [
 		keyframable: false,
 		options: BLEND_MODE_OPTIONS,
 	},
+	{
+		key: "reframe.x",
+		label: "Reframe X",
+		type: "number",
+		default: DEFAULTS.element.reframe.x,
+		min: 0,
+		max: 1,
+		step: 0.001,
+	},
+	{
+		key: "reframe.y",
+		label: "Reframe Y",
+		type: "number",
+		default: DEFAULTS.element.reframe.y,
+		min: 0,
+		max: 1,
+		step: 0.001,
+	},
+	{
+		key: "reframe.scale",
+		label: "Reframe Scale",
+		type: "number",
+		default: DEFAULTS.element.reframe.scale,
+		min: 1,
+		max: 8,
+		step: 0.01,
+	},
 ];
 
 const audioElementParams: ElementParamDefinition[] = [

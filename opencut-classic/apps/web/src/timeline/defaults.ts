@@ -15,6 +15,12 @@ const defaultOpacity = 1;
 const defaultBlendMode: BlendMode = "normal";
 const defaultVolume = 0;
 
+const defaultReframe = {
+	x: 0.5,
+	y: 0.5,
+	scale: 1,
+};
+
 const defaultTextLetterSpacing = 0;
 const defaultTextLineHeight = 1.2;
 
@@ -75,6 +81,7 @@ export const DEFAULTS = {
 		opacity: defaultOpacity,
 		blendMode: defaultBlendMode,
 		volume: defaultVolume,
+		reframe: defaultReframe,
 	},
 	text: {
 		letterSpacing: defaultTextLetterSpacing,

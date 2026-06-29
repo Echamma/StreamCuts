@@ -25,6 +25,13 @@ export interface TCanvasSize {
 	height: number;
 }
 
+export const TARGET_ASPECTS = ["16:9", "9:16", "1:1", "4:5"] as const;
+export type TTargetAspect = (typeof TARGET_ASPECTS)[number];
+
+export function isTargetAspect(value: string): value is TTargetAspect {
+	return TARGET_ASPECTS.some((aspect) => aspect === value);
+}
+
 export interface TProjectMetadata {
 	id: string;
 	name: string;
@@ -41,6 +48,9 @@ export interface TProjectSettings {
 	lastCustomCanvasSize?: TCanvasSize | null;
 	originalCanvasSize?: TCanvasSize | null;
 	background: TBackground;
+	/** Conceptual target aspect for export / reframe pipelines. Optional — when
+	 * omitted, downstream code falls back to the actual canvasSize aspect. */
+	targetAspect?: TTargetAspect;
 }
 
 export interface TTimelineViewState {
