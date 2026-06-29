@@ -73,6 +73,15 @@ type ResolvedTranscriptionRequest = {
   beamSize: number
   wordTimestamps: boolean
   batchSize: number
+  device?: TranscriptionDevice
+  computeType?: string
+}
+
+export const TRANSCRIPTION_DEVICES = ['auto', 'cuda', 'cpu'] as const
+export type TranscriptionDevice = (typeof TRANSCRIPTION_DEVICES)[number]
+
+export function isTranscriptionDevice(value: unknown): value is TranscriptionDevice {
+  return typeof value === 'string' && (TRANSCRIPTION_DEVICES as readonly string[]).includes(value)
 }
 
 type PreparedTranscriptionInput = {
@@ -127,6 +136,8 @@ export class TranscriptionService implements OnModuleDestroy {
     model,
     profile = 'longform',
     deleteAfter = false,
+    device,
+    computeType,
   }: {
     inputPath: string
     originalName: string
@@ -134,6 +145,8 @@ export class TranscriptionService implements OnModuleDestroy {
     model?: string
     profile?: TranscriptionProfile
     deleteAfter?: boolean
+    device?: TranscriptionDevice
+    computeType?: string
   }) {
     if (!existsSync(this.scriptPath)) {
       throw new InternalServerErrorException(
@@ -145,12 +158,14 @@ export class TranscriptionService implements OnModuleDestroy {
       language,
       model,
       profile,
+      device,
+      computeType,
     })
     let preparedInput: PreparedTranscriptionInput | null = null
 
     try {
       this.logger.log(
-        `Starting backend transcription for ${originalName} with profile "${request.profile}", model "${request.model}", beam ${request.beamSize}, word timestamps ${request.wordTimestamps}, batch size ${request.batchSize}.`,
+        `Starting backend transcription for ${originalName} with profile "${request.profile}", model "${request.model}", beam ${request.beamSize}, word timestamps ${request.wordTimestamps}, batch size ${request.batchSize}, device "${request.device ?? 'env-default'}", computeType "${request.computeType ?? 'env-default'}".`,
       )
 
       preparedInput = await this.prepareInputForTranscription({
@@ -167,6 +182,8 @@ export class TranscriptionService implements OnModuleDestroy {
         beam_size: request.beamSize,
         word_timestamps: request.wordTimestamps,
         batch_size: request.batchSize,
+        device: request.device,
+        compute_type: request.computeType,
       })
       const result = this.parseTranscriptionResult(payload)
 
@@ -269,10 +286,14 @@ export class TranscriptionService implements OnModuleDestroy {
     language,
     model,
     profile,
+    device,
+    computeType,
   }: {
     language?: string
     model?: string
     profile?: TranscriptionProfile
+    device?: TranscriptionDevice
+    computeType?: string
   }): ResolvedTranscriptionRequest {
     const resolvedProfile = this.normalizeProfile(profile)
 
@@ -284,6 +305,10 @@ export class TranscriptionService implements OnModuleDestroy {
       beamSize: this.getProfileBeamSize(resolvedProfile),
       wordTimestamps: this.getProfileWordTimestamps(resolvedProfile),
       batchSize: this.getProfileBatchSize(resolvedProfile),
+      device: device && isTranscriptionDevice(device) ? device : undefined,
+      computeType: typeof computeType === 'string' && computeType.trim()
+        ? computeType.trim()
+        : undefined,
     }
   }
 

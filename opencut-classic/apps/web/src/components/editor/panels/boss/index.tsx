@@ -44,6 +44,14 @@ import {
 	isExportPlatformPresetId,
 } from "@/export/presets";
 import {
+	TRANSCRIPTION_DEVICES,
+	TRANSCRIPTION_MODELS,
+	isTranscriptionDevice,
+	isTranscriptionModel,
+	type TranscriptionDevice,
+	type TranscriptionModel,
+} from "@/long-to-short/api";
+import {
 	Select,
 	SelectContent,
 	SelectItem,
@@ -175,7 +183,11 @@ export function BossPanel() {
 			if (currentTranscript.length === 0) {
 				// Step 2: Transcribe
 				store.setProcessingStep("transcribing");
-				const transcribed = await bossTranscribe({ jobId: currentJobId });
+				const transcribed = await bossTranscribe({
+					jobId: currentJobId,
+					device: currentSettings.transcriptionDevice,
+					model: currentSettings.transcriptionModel,
+				});
 				currentTranscript = transcribed.segments as BossTranscriptSegment[];
 				store.setTranscriptSegments(currentTranscript);
 			}
@@ -619,6 +631,70 @@ function PromptStep({
 						})}
 					</SelectContent>
 				</Select>
+			</div>
+
+			<div className="mb-4 rounded-md border bg-accent/20 p-3">
+				<div className="mb-2 flex flex-col gap-0.5">
+					<p className="text-sm font-medium">Transcription</p>
+					<p className="text-muted-foreground text-xs">
+						Picking GPU or CPU skips the auto-fallback — if the chosen device
+						can't load, the job stops with the underlying error.
+					</p>
+				</div>
+				<div className="grid gap-2 sm:grid-cols-2">
+					<div>
+						<p className="text-muted-foreground mb-1 text-xs">Device</p>
+						<Select
+							value={settings.transcriptionDevice}
+							onValueChange={(value) => {
+								if (isTranscriptionDevice(value)) {
+									onSettingsChange({
+										transcriptionDevice: value satisfies TranscriptionDevice,
+									});
+								}
+							}}
+						>
+							<SelectTrigger className="w-full">
+								<SelectValue />
+							</SelectTrigger>
+							<SelectContent>
+								{TRANSCRIPTION_DEVICES.map((device) => (
+									<SelectItem key={device} value={device}>
+										{device === "auto"
+											? "Auto (GPU, fallback to CPU)"
+											: device === "cuda"
+												? "GPU (CUDA)"
+												: "CPU"}
+									</SelectItem>
+								))}
+							</SelectContent>
+						</Select>
+					</div>
+					<div>
+						<p className="text-muted-foreground mb-1 text-xs">Model</p>
+						<Select
+							value={settings.transcriptionModel}
+							onValueChange={(value) => {
+								if (isTranscriptionModel(value)) {
+									onSettingsChange({
+										transcriptionModel: value satisfies TranscriptionModel,
+									});
+								}
+							}}
+						>
+							<SelectTrigger className="w-full">
+								<SelectValue />
+							</SelectTrigger>
+							<SelectContent>
+								{TRANSCRIPTION_MODELS.map((model) => (
+									<SelectItem key={model} value={model}>
+										{model}
+									</SelectItem>
+								))}
+							</SelectContent>
+						</Select>
+					</div>
+				</div>
 			</div>
 
 			<Section

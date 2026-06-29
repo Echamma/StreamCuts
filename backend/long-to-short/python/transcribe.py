@@ -128,10 +128,43 @@ def get_default_batch_size() -> int:
     return normalize_positive_int(os.environ.get("FASTER_WHISPER_BATCH_SIZE", "1"), 1)
 
 
-def model_setting_candidates() -> list[dict[str, str | None]]:
-    requested_device = default_device().lower()
-    requested_compute_type = default_compute_type().lower()
+def model_setting_candidates(
+    *,
+    device_override: str | None = None,
+    compute_type_override: str | None = None,
+    strict: bool = False,
+) -> list[dict[str, str | None]]:
+    """Build the ordered list of (device, compute_type) load candidates.
+
+    When ``strict=True`` the returned list is a single candidate: the caller
+    has named the device explicitly and a load failure must propagate, not
+    silently fall through to CPU.
+    """
+
+    requested_device = (device_override or default_device()).lower()
+    requested_compute_type = (compute_type_override or default_compute_type()).lower()
     download_root = model_download_root()
+
+    if strict:
+        if requested_device == "auto":
+            raise ValueError(
+                "device cannot be 'auto' when strict device selection is requested.",
+            )
+        compute_candidates = (
+            resolve_cuda_compute_types(requested_compute_type)
+            if requested_device == "cuda"
+            else resolve_cpu_compute_types(requested_compute_type)
+        )
+        if requested_compute_type != "auto":
+            # Caller named both — use exactly that pair, no fallback at all.
+            compute_candidates = [requested_compute_type]
+        return [
+            {
+                "device": requested_device,
+                "compute_type": compute_candidates[0],
+                "download_root": download_root,
+            }
+        ]
 
     if requested_device == "auto":
         candidates: list[tuple[str, list[str]]] = [
@@ -174,14 +207,32 @@ def resolve_cpu_compute_types(requested_compute_type: str) -> list[str]:
     return [requested_compute_type]
 
 
-def get_model(name: str):
-    """Return a cached model, loading (and downloading if needed) on demand."""
+def get_model(
+    name: str,
+    *,
+    device_override: str | None = None,
+    compute_type_override: str | None = None,
+):
+    """Return a cached model, loading (and downloading if needed) on demand.
+
+    When ``device_override`` is provided and not "auto", the load is strict —
+    no silent CPU fallback. A failure raises with the underlying device error
+    so the caller can surface it to the user. Auto remains the default and
+    keeps the existing cuda → cpu fallback behavior.
+    """
     from faster_whisper import WhisperModel
 
     key = name.strip() or default_model_name()
     errors: list[str] = []
 
-    for settings in model_setting_candidates():
+    strict = bool(device_override) and device_override.lower() != "auto"
+    candidates = model_setting_candidates(
+        device_override=device_override,
+        compute_type_override=compute_type_override,
+        strict=strict,
+    )
+
+    for settings in candidates:
         cache_key = build_model_cache_key(
             name=key,
             device=str(settings["device"]),
@@ -218,6 +269,13 @@ def get_model(name: str):
         return model
 
     if errors:
+        if strict:
+            # Caller named the device. The first (and only) candidate failed,
+            # so surface that error verbatim instead of pretending we tried
+            # multiple things.
+            raise RuntimeError(
+                f'Failed to load model "{key}" on the requested device: {errors[0]}'
+            )
         raise RuntimeError(
             f'Unable to load model "{key}". Tried: {" | ".join(errors)}'
         )
@@ -330,7 +388,11 @@ def handle_transcribe(request: dict) -> dict[str, object]:
     if not isinstance(input_path, str) or not input_path.strip():
         raise ValueError("Input path is required.")
 
-    model = get_model(normalize_model(request.get("model")))
+    model = get_model(
+        normalize_model(request.get("model")),
+        device_override=normalize_device(request.get("device")),
+        compute_type_override=normalize_compute_type(request.get("compute_type")),
+    )
     return transcribe_request(
         model=model,
         input_path=input_path.strip(),
@@ -341,6 +403,35 @@ def handle_transcribe(request: dict) -> dict[str, object]:
         ),
         batch_size=normalize_positive_int(request.get("batch_size"), get_default_batch_size()),
     )
+
+
+_VALID_DEVICES = {"auto", "cuda", "cpu"}
+
+
+def normalize_device(raw: object) -> str | None:
+    """Validate a request-supplied device. Returns None when unspecified
+    so the env-driven default applies."""
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise ValueError("device must be a string when provided.")
+    value = raw.strip().lower()
+    if not value:
+        return None
+    if value not in _VALID_DEVICES:
+        raise ValueError(
+            f"device must be one of {sorted(_VALID_DEVICES)} (got {raw!r})."
+        )
+    return value
+
+
+def normalize_compute_type(raw: object) -> str | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise ValueError("compute_type must be a string when provided.")
+    value = raw.strip().lower()
+    return value or None
 
 
 def handle_ensure_model(request: dict) -> dict[str, object]:

@@ -10,6 +10,12 @@ import {
 	type ExportPlatformPresetId,
 	isExportPlatformPresetId,
 } from "@/export/presets";
+import {
+	isTranscriptionDevice,
+	isTranscriptionModel,
+	type TranscriptionDevice,
+	type TranscriptionModel,
+} from "@/long-to-short/api";
 
 export const BOSS_VIDEO_ACCEPT =
 	".mp4,.mov,.mkv,.webm,video/mp4,video/quicktime,video/x-matroska,video/webm";
@@ -58,6 +64,12 @@ export interface BossSettings extends BossPlanningSettings {
 	/** Target social platform for generated shorts. Drives project.targetAspect
 	 * and the default export preset. */
 	targetPlatform: ExportPlatformPresetId;
+	/** Per-job transcription device. "auto" preserves the legacy
+	 * cuda→cpu fallback; "cuda" or "cpu" disables the fallback so the
+	 * caller sees a clean error if the chosen device cannot load. */
+	transcriptionDevice: TranscriptionDevice;
+	/** Whisper model used for the boss transcribe step. */
+	transcriptionModel: TranscriptionModel;
 }
 
 export interface BossPlannedCuts {
@@ -80,6 +92,8 @@ export const DEFAULT_BOSS_SETTINGS: BossSettings = {
 	startOffsetSeconds: 0,
 	endOffsetSeconds: 0,
 	targetPlatform: "tiktok-shorts",
+	transcriptionDevice: "auto",
+	transcriptionModel: "small",
 };
 
 export { EXPORT_PLATFORM_PRESET_IDS };
@@ -204,6 +218,12 @@ function normalizeBossSettings(settings: Partial<BossSettings>): BossSettings {
 		targetPlatform: isExportPlatformPresetId(String(next.targetPlatform))
 			? (next.targetPlatform as ExportPlatformPresetId)
 			: DEFAULT_BOSS_SETTINGS.targetPlatform,
+		transcriptionDevice: isTranscriptionDevice(String(next.transcriptionDevice))
+			? (next.transcriptionDevice as TranscriptionDevice)
+			: DEFAULT_BOSS_SETTINGS.transcriptionDevice,
+		transcriptionModel: isTranscriptionModel(String(next.transcriptionModel))
+			? (next.transcriptionModel as TranscriptionModel)
+			: DEFAULT_BOSS_SETTINGS.transcriptionModel,
 	};
 }
 

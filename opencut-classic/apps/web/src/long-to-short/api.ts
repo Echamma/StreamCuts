@@ -54,6 +54,27 @@ export type BossUploadResult = {
 
 export type BossTranscribeResult = { segments: BossTranscriptSegment[] };
 
+export const TRANSCRIPTION_DEVICES = ["auto", "cuda", "cpu"] as const;
+export type TranscriptionDevice = (typeof TRANSCRIPTION_DEVICES)[number];
+
+export function isTranscriptionDevice(
+	value: string,
+): value is TranscriptionDevice {
+	return TRANSCRIPTION_DEVICES.some((d) => d === value);
+}
+
+export const TRANSCRIPTION_MODELS = [
+	"tiny",
+	"small",
+	"medium",
+	"large-v3-turbo",
+] as const;
+export type TranscriptionModel = (typeof TRANSCRIPTION_MODELS)[number];
+
+export function isTranscriptionModel(value: string): value is TranscriptionModel {
+	return TRANSCRIPTION_MODELS.some((m) => m === value);
+}
+
 export type BossPlanCutsResult = {
 	longerSegments: BossChapter[];
 	shorts: BossShort[];
@@ -116,13 +137,24 @@ export async function bossSaveUpload({ video }: { video: File }): Promise<BossUp
 
 export async function bossTranscribe({
 	jobId,
+	device,
+	model,
+	computeType,
 }: {
 	jobId: string;
+	device?: TranscriptionDevice;
+	model?: TranscriptionModel | string;
+	computeType?: string;
 }): Promise<BossTranscribeResult> {
 	const response = await fetch(resolveLongToShortUrl({ path: "/api/boss/transcribe" }), {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify({ jobId }),
+		body: JSON.stringify({
+			jobId,
+			...(device !== undefined && { device }),
+			...(model !== undefined && { model }),
+			...(computeType !== undefined && { computeType }),
+		}),
 	});
 
 	if (!response.ok) {

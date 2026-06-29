@@ -23,6 +23,7 @@ import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
 import {
   TranscriptionService,
+  type TranscriptionDevice,
   type TranscriptionSegment,
 } from "./transcription.service";
 
@@ -513,23 +514,46 @@ export class LongToShortService {
     };
   }
 
-  async bossTranscribe({ jobId }: { jobId: string }): Promise<{
-    segments: TranscriptionSegment[];
-  }> {
+  async bossTranscribe({
+    jobId,
+    device,
+    model,
+    computeType,
+  }: {
+    jobId: string;
+    device?: TranscriptionDevice;
+    model?: string;
+    computeType?: string;
+  }): Promise<{ segments: TranscriptionSegment[] }> {
     const sourcePath = this.findSourceFile(jobId);
 
+    // Explicit device choices must fail loudly (per UI contract). When the
+    // caller omits device, fall back to the auto-with-cpu-fallback behavior
+    // that swallows errors and returns an empty transcript.
+    const strict = !!device && device !== "auto";
     try {
       const transcription = await this.transcriptionService.transcribeFilePath({
         inputPath: sourcePath,
         originalName: basename(sourcePath),
         profile: "longform",
         deleteAfter: false,
+        device,
+        model,
+        computeType,
       });
       return { segments: transcription.segments };
     } catch (error) {
+      const message = this.getErrorMessage(error);
       this.logger.warn(
-        `Boss transcription failed for job ${jobId}: ${this.getErrorMessage(error)}`,
+        `Boss transcription failed for job ${jobId}: ${message}`,
       );
+      if (strict) {
+        // Re-throw so the controller surfaces a 500 with the device error
+        // and the UI can show "GPU was requested but CUDA failed: <reason>".
+        throw error instanceof Error
+          ? error
+          : new InternalServerErrorException(message);
+      }
       return { segments: [] };
     }
   }
