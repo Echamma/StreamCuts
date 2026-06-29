@@ -40,21 +40,41 @@ def main() -> int:
         model=model,
         input_path=args.input_path,
         language=normalize_language(args.language),
+        beam_size=get_default_beam_size(),
+        word_timestamps=get_default_word_timestamps(),
+        batch_size=get_default_batch_size(),
     )
     json.dump(payload, sys.stdout)
     return 0
 
 
-# Faster-Whisper models are loaded lazily and cached so the client can switch
-# models without restarting the worker. The cache is kept small to bound memory;
-# switching back to an evicted model just reloads it from the local disk cache.
-MAX_LOADED_MODELS = 1
 _loaded_models: "OrderedDict[str, object]" = OrderedDict()
+_batched_pipelines: dict[int, object] = {}
 
 
 def default_model_name() -> str:
-    name = os.environ.get("FASTER_WHISPER_MODEL", "medium")
-    return name.strip() or "medium"
+    return (
+        string_env("FASTER_WHISPER_DEFAULT_MODEL")
+        or string_env("FASTER_WHISPER_CAPTION_MODEL")
+        or string_env("FASTER_WHISPER_MODEL")
+        or "small"
+    )
+
+
+def max_loaded_models() -> int:
+    return normalize_positive_int(os.environ.get("FASTER_WHISPER_MAX_LOADED_MODELS"), 2)
+
+
+def default_device() -> str:
+    return string_env("FASTER_WHISPER_DEVICE") or "auto"
+
+
+def default_compute_type() -> str:
+    return string_env("FASTER_WHISPER_COMPUTE_TYPE") or "auto"
+
+
+def model_download_root() -> str | None:
+    return os.environ.get("FASTER_WHISPER_DOWNLOAD_ROOT") or None
 
 
 def normalize_model(raw_model: object) -> str:
@@ -67,12 +87,91 @@ def normalize_model(raw_model: object) -> str:
     return name or default_model_name()
 
 
-def model_settings() -> dict[str, object]:
-    return {
-        "device": os.environ.get("FASTER_WHISPER_DEVICE", "cpu"),
-        "compute_type": os.environ.get("FASTER_WHISPER_COMPUTE_TYPE", "int8"),
-        "download_root": os.environ.get("FASTER_WHISPER_DOWNLOAD_ROOT") or None,
-    }
+def string_env(name: str) -> str | None:
+    raw = os.environ.get(name)
+    if raw is None:
+        return None
+
+    value = raw.strip()
+    return value or None
+
+
+def normalize_positive_int(raw_value: object, default: int) -> int:
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+def normalize_bool(raw_value: object, default: bool) -> bool:
+    if isinstance(raw_value, bool):
+        return raw_value
+    if isinstance(raw_value, str):
+        value = raw_value.strip().lower()
+        if value in {"1", "true", "yes", "on"}:
+            return True
+        if value in {"0", "false", "no", "off"}:
+            return False
+    return default
+
+
+def get_default_beam_size() -> int:
+    return normalize_positive_int(os.environ.get("FASTER_WHISPER_BEAM_SIZE", "5"), 5)
+
+
+def get_default_word_timestamps() -> bool:
+    return normalize_bool(os.environ.get("FASTER_WHISPER_WORD_TIMESTAMPS"), True)
+
+
+def get_default_batch_size() -> int:
+    return normalize_positive_int(os.environ.get("FASTER_WHISPER_BATCH_SIZE", "1"), 1)
+
+
+def model_setting_candidates() -> list[dict[str, str | None]]:
+    requested_device = default_device().lower()
+    requested_compute_type = default_compute_type().lower()
+    download_root = model_download_root()
+
+    if requested_device == "auto":
+        candidates: list[tuple[str, list[str]]] = [
+            ("cuda", resolve_cuda_compute_types(requested_compute_type)),
+            ("cpu", resolve_cpu_compute_types(requested_compute_type)),
+        ]
+    elif requested_device == "cuda":
+        candidates = [("cuda", resolve_cuda_compute_types(requested_compute_type))]
+    else:
+        candidates = [(requested_device, resolve_cpu_compute_types(requested_compute_type))]
+
+    seen: set[tuple[str, str]] = set()
+    resolved: list[dict[str, str | None]] = []
+    for device, compute_types in candidates:
+        for compute_type in compute_types:
+            key = (device, compute_type)
+            if key in seen:
+                continue
+            seen.add(key)
+            resolved.append(
+                {
+                    "device": device,
+                    "compute_type": compute_type,
+                    "download_root": download_root,
+                }
+            )
+
+    return resolved
+
+
+def resolve_cuda_compute_types(requested_compute_type: str) -> list[str]:
+    if requested_compute_type == "auto":
+        return ["float16", "int8_float16", "int8"]
+    return [requested_compute_type]
+
+
+def resolve_cpu_compute_types(requested_compute_type: str) -> list[str]:
+    if requested_compute_type == "auto":
+        return ["int8"]
+    return [requested_compute_type]
 
 
 def get_model(name: str):
@@ -80,25 +179,73 @@ def get_model(name: str):
     from faster_whisper import WhisperModel
 
     key = name.strip() or default_model_name()
+    errors: list[str] = []
 
-    cached = _loaded_models.get(key)
-    if cached is not None:
-        _loaded_models.move_to_end(key)
-        return cached
+    for settings in model_setting_candidates():
+        cache_key = build_model_cache_key(
+            name=key,
+            device=str(settings["device"]),
+            compute_type=str(settings["compute_type"]),
+        )
+        cached = _loaded_models.get(cache_key)
+        if cached is not None:
+            _loaded_models.move_to_end(cache_key)
+            return cached
 
-    settings = model_settings()
-    model = WhisperModel(
-        key,
-        device=settings["device"],
-        compute_type=settings["compute_type"],
-        download_root=settings["download_root"],
-    )
+        try:
+            model = WhisperModel(
+                key,
+                device=str(settings["device"]),
+                compute_type=str(settings["compute_type"]),
+                download_root=settings["download_root"],
+            )
+        except Exception as error:  # noqa: BLE001 - depends on runtime device state
+            errors.append(
+                f'{settings["device"]}/{settings["compute_type"]}: {error}'
+            )
+            print(
+                f'Failed to load model "{key}" on {settings["device"]}/{settings["compute_type"]}: {error}',
+                file=sys.stderr,
+                flush=True,
+            )
+            continue
 
-    _loaded_models[key] = model
-    while len(_loaded_models) > MAX_LOADED_MODELS:
-        _loaded_models.popitem(last=False)
+        _loaded_models[cache_key] = model
+        while len(_loaded_models) > max_loaded_models():
+            _, evicted_model = _loaded_models.popitem(last=False)
+            _batched_pipelines.pop(id(evicted_model), None)
 
-    return model
+        return model
+
+    if errors:
+        raise RuntimeError(
+            f'Unable to load model "{key}". Tried: {" | ".join(errors)}'
+        )
+    raise RuntimeError(f'Unable to load model "{key}".')
+
+
+def build_model_cache_key(*, name: str, device: str, compute_type: str) -> str:
+    return f"{name}|{device}|{compute_type}"
+
+
+def active_model_name() -> str | None:
+    if not _loaded_models:
+        return None
+
+    key = next(reversed(_loaded_models))
+    return key.split("|", 1)[0]
+
+
+def get_batched_pipeline(model):
+    pipeline = _batched_pipelines.get(id(model))
+    if pipeline is not None:
+        return pipeline
+
+    from faster_whisper import BatchedInferencePipeline
+
+    pipeline = BatchedInferencePipeline(model=model)
+    _batched_pipelines[id(model)] = pipeline
+    return pipeline
 
 
 def _download_model_fn():
@@ -112,39 +259,25 @@ def _download_model_fn():
 def ensure_model_downloaded(name: str) -> str:
     """Fetch model files into the local cache without loading them into memory."""
     download_model = _download_model_fn()
-    settings = model_settings()
-    return download_model(name, cache_dir=settings["download_root"])
+    return download_model(name, cache_dir=model_download_root())
 
 
 def is_model_downloaded(name: str) -> bool:
     download_model = _download_model_fn()
-    settings = model_settings()
     try:
-        download_model(name, local_files_only=True, cache_dir=settings["download_root"])
+        download_model(name, local_files_only=True, cache_dir=model_download_root())
         return True
     except Exception:
         return False
 
 
-def get_beam_size() -> int:
-    """Beam width for decoding. Higher = more accurate, slower. Default 5."""
-    raw = os.environ.get("FASTER_WHISPER_BEAM_SIZE", "5")
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return 5
-    return value if value > 0 else 5
-
-
 def serve() -> int:
     # Warm the default model so the first transcription is fast. A failure here
-    # (offline, model not downloaded yet, etc.) must not brick the worker: log it
-    # to stderr and still announce readiness so the client can pick another model
-    # or trigger a download. Anything other than the ready line on stdout would be
-    # treated as a startup failure by the Node side, so warnings go to stderr.
+    # must not brick the worker, because a later request may use a different
+    # model or fall back to CPU.
     try:
         get_model(default_model_name())
-    except Exception as error:  # noqa: BLE001 - depends on runtime/network
+    except Exception as error:  # noqa: BLE001 - depends on runtime/device state
         print(f"Failed to preload default model: {error}", file=sys.stderr, flush=True)
 
     print(json.dumps({"type": "ready"}), flush=True)
@@ -202,6 +335,11 @@ def handle_transcribe(request: dict) -> dict[str, object]:
         model=model,
         input_path=input_path.strip(),
         language=normalize_language(request.get("language")),
+        beam_size=normalize_positive_int(request.get("beam_size"), get_default_beam_size()),
+        word_timestamps=normalize_bool(
+            request.get("word_timestamps"), get_default_word_timestamps()
+        ),
+        batch_size=normalize_positive_int(request.get("batch_size"), get_default_batch_size()),
     )
 
 
@@ -222,7 +360,7 @@ def handle_list_models(request: dict) -> dict[str, object]:
 
     return {
         "default": default_model_name(),
-        "active": next(reversed(_loaded_models), None),
+        "active": active_model_name(),
         "models": [
             {"id": name, "downloaded": is_model_downloaded(name)} for name in names
         ],
@@ -241,14 +379,20 @@ def normalize_language(raw_language: object) -> str | None:
 
 def transcribe_request(
     *,
-    model: "WhisperModel",
+    model,
     input_path: str,
     language: str | None,
+    beam_size: int,
+    word_timestamps: bool,
+    batch_size: int,
 ) -> dict[str, object]:
     result_segments, text_parts, detected_language, used_vad_fallback = run_transcription(
         model=model,
         input_path=input_path,
         language=language,
+        beam_size=beam_size,
+        word_timestamps=word_timestamps,
+        batch_size=batch_size,
     )
 
     return {
@@ -261,15 +405,21 @@ def transcribe_request(
 
 def run_transcription(
     *,
-    model: "WhisperModel",
+    model,
     input_path: str,
     language: str | None,
+    beam_size: int,
+    word_timestamps: bool,
+    batch_size: int,
 ) -> tuple[list[dict[str, object]], list[str], str, bool]:
     first_segments, first_text_parts, first_language = transcribe_once(
         model=model,
         input_path=input_path,
         language=language,
         vad_filter=True,
+        beam_size=beam_size,
+        word_timestamps=word_timestamps,
+        batch_size=batch_size,
     )
     if first_segments:
         return first_segments, first_text_parts, first_language, False
@@ -279,25 +429,31 @@ def run_transcription(
         input_path=input_path,
         language=language,
         vad_filter=False,
+        beam_size=beam_size,
+        word_timestamps=word_timestamps,
+        batch_size=batch_size,
     )
     return retry_segments, retry_text_parts, retry_language, True
 
 
 def transcribe_once(
     *,
-    model: "WhisperModel",
+    model,
     input_path: str,
     language: str | None,
     vad_filter: bool,
+    beam_size: int,
+    word_timestamps: bool,
+    batch_size: int,
 ) -> tuple[list[dict[str, object]], list[str], str]:
-    segments, info = model.transcribe(
-        input_path,
+    segments, info = transcribe_with_pipeline(
+        model=model,
+        input_path=input_path,
         language=language,
         vad_filter=vad_filter,
-        beam_size=get_beam_size(),
-        # Per-word timing is what makes captions line up with speech instead of
-        # being linearly guessed from a coarse segment duration on the client.
-        word_timestamps=True,
+        beam_size=beam_size,
+        word_timestamps=word_timestamps,
+        batch_size=batch_size,
     )
 
     result_segments = []
@@ -322,12 +478,43 @@ def transcribe_once(
     return result_segments, text_parts, detected_language
 
 
-def extract_words(segment) -> list[dict[str, object]]:
-    """Normalize faster-whisper word objects into JSON-safe dicts.
+def transcribe_with_pipeline(
+    *,
+    model,
+    input_path: str,
+    language: str | None,
+    vad_filter: bool,
+    beam_size: int,
+    word_timestamps: bool,
+    batch_size: int,
+):
+    kwargs = {
+        "language": language,
+        "vad_filter": vad_filter,
+        "beam_size": beam_size,
+        "word_timestamps": word_timestamps,
+    }
 
-    Returns an empty list when word timings are unavailable so the client can
-    fall back to estimating timing from the segment as a whole.
-    """
+    if batch_size > 1:
+        try:
+            pipeline = get_batched_pipeline(model)
+            return pipeline.transcribe(
+                input_path,
+                batch_size=batch_size,
+                **kwargs,
+            )
+        except Exception as error:  # noqa: BLE001 - depends on installed version/runtime
+            print(
+                f"Falling back to non-batched inference: {error}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+    return model.transcribe(input_path, **kwargs)
+
+
+def extract_words(segment) -> list[dict[str, object]]:
+    """Normalize faster-whisper word objects into JSON-safe dicts."""
     raw_words = getattr(segment, "words", None)
     if not raw_words:
         return []

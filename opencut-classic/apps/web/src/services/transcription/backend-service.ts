@@ -19,14 +19,18 @@ export interface BackendModelListResult {
 	models: BackendModelStatus[];
 }
 
+export type BackendTranscriptionProfile = "captions" | "longform";
+
 export async function transcribeWithBackend({
 	audioBlob,
 	language,
 	model,
+	profile,
 }: {
 	audioBlob: Blob;
 	language?: Exclude<TranscriptionLanguage, "auto">;
 	model?: string;
+	profile?: BackendTranscriptionProfile;
 }): Promise<TranscriptionResult> {
 	const formData = new FormData();
 	formData.set("audio", audioBlob, "timeline.wav");
@@ -37,6 +41,10 @@ export async function transcribeWithBackend({
 
 	if (model) {
 		formData.set("model", model);
+	}
+
+	if (profile) {
+		formData.set("profile", profile);
 	}
 
 	const response = await fetch(

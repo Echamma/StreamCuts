@@ -13,6 +13,7 @@ import { DiagnosticsManager } from "./managers/diagnostics-manager";
 import { AssetPreparationService } from "@/services/asset-preparation/service";
 import { registerDefaultEffects } from "@/effects";
 import { registerDefaultMasks } from "@/masks";
+import { registerDefaultTransitions } from "@/transitions";
 import { registerTranscriptionDiagnostics } from "@/transcription/diagnostics";
 
 export class EditorCore {
@@ -34,6 +35,7 @@ export class EditorCore {
 	private constructor() {
 		registerDefaultEffects();
 		registerDefaultMasks();
+		registerDefaultTransitions();
 		this.command = new CommandManager(this);
 		this.timeline = new TimelineManager(this);
 		this.playback = new PlaybackManager(this);

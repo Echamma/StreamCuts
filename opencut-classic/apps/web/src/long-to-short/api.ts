@@ -36,6 +36,15 @@ export type BossShort = {
 };
 export type BossRenderedClip = { downloadUrl: string; title: string };
 export type BossRenderedShort = { downloadUrl: string; title: string; description: string };
+export type BossPlanningSettings = {
+	minChapters: number;
+	maxChapters: number;
+	minChapterDurationSeconds: number;
+	minShortsPerSegment: number;
+	maxShortsPerSegment: number;
+	minShortDurationSeconds: number;
+	maxShortDurationSeconds: number;
+};
 
 export type BossUploadResult = {
 	jobId: string;
@@ -143,16 +152,18 @@ export async function bossPlanCuts({
 	prompt,
 	segments,
 	durationSeconds,
+	settings,
 }: {
 	jobId: string;
 	prompt: string;
 	segments: BossTranscriptSegment[];
 	durationSeconds: number;
+	settings: BossPlanningSettings;
 }): Promise<BossPlanCutsResult> {
 	const response = await fetch(resolveLongToShortUrl({ path: "/api/boss/plan-cuts" }), {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify({ jobId, prompt, segments, durationSeconds }),
+		body: JSON.stringify({ jobId, prompt, segments, durationSeconds, settings }),
 	});
 
 	if (!response.ok) {
@@ -169,8 +180,12 @@ export async function bossPlanCuts({
 	}
 
 	return {
-		longerSegments: payload.longerSegments as BossChapter[],
-		shorts: payload.shorts as BossShort[],
+		longerSegments: payload.longerSegments
+			.map((segment) => parseBossChapter({ payload: segment }))
+			.filter((segment): segment is BossChapter => segment !== null),
+		shorts: payload.shorts
+			.map((short) => parseBossShort({ payload: short }))
+			.filter((short): short is BossShort => short !== null),
 	};
 }
 
@@ -203,8 +218,12 @@ export async function bossRender({
 	}
 
 	return {
-		longerVideos: payload.longerVideos as BossRenderedClip[],
-		shorts: payload.shorts as BossRenderedShort[],
+		longerVideos: payload.longerVideos
+			.map((clip) => parseBossRenderedClip({ payload: clip }))
+			.filter((clip): clip is BossRenderedClip => clip !== null),
+		shorts: payload.shorts
+			.map((short) => parseBossRenderedShort({ payload: short }))
+			.filter((short): short is BossRenderedShort => short !== null),
 	};
 }
 
@@ -242,7 +261,9 @@ export async function bossSummarizePlan({
 	}
 
 	return {
-		highlights: payload.highlights as BossHighlight[],
+		highlights: payload.highlights
+			.map((highlight) => parseBossHighlight({ payload: highlight }))
+			.filter((highlight): highlight is BossHighlight => highlight !== null),
 		totalSeconds: typeof payload.totalSeconds === "number" ? payload.totalSeconds : 0,
 	};
 }
@@ -395,6 +416,99 @@ async function readErrorMessage({ response }: { response: Response }) {
 	} catch {
 		return "The backend request failed.";
 	}
+}
+
+function parseBossChapter({ payload }: { payload: unknown }): BossChapter | null {
+	if (
+		!isRecord(payload) ||
+		typeof payload.startSeconds !== "number" ||
+		typeof payload.endSeconds !== "number" ||
+		typeof payload.title !== "string"
+	) {
+		return null;
+	}
+
+	return {
+		startSeconds: payload.startSeconds,
+		endSeconds: payload.endSeconds,
+		title: payload.title,
+	};
+}
+
+function parseBossShort({ payload }: { payload: unknown }): BossShort | null {
+	if (
+		!isRecord(payload) ||
+		typeof payload.startSeconds !== "number" ||
+		typeof payload.endSeconds !== "number" ||
+		typeof payload.title !== "string" ||
+		typeof payload.description !== "string"
+	) {
+		return null;
+	}
+
+	return {
+		startSeconds: payload.startSeconds,
+		endSeconds: payload.endSeconds,
+		title: payload.title,
+		description: payload.description,
+	};
+}
+
+function parseBossRenderedClip({
+	payload,
+}: {
+	payload: unknown;
+}): BossRenderedClip | null {
+	if (
+		!isRecord(payload) ||
+		typeof payload.downloadUrl !== "string" ||
+		typeof payload.title !== "string"
+	) {
+		return null;
+	}
+
+	return {
+		downloadUrl: payload.downloadUrl,
+		title: payload.title,
+	};
+}
+
+function parseBossRenderedShort({
+	payload,
+}: {
+	payload: unknown;
+}): BossRenderedShort | null {
+	if (
+		!isRecord(payload) ||
+		typeof payload.downloadUrl !== "string" ||
+		typeof payload.title !== "string" ||
+		typeof payload.description !== "string"
+	) {
+		return null;
+	}
+
+	return {
+		downloadUrl: payload.downloadUrl,
+		title: payload.title,
+		description: payload.description,
+	};
+}
+
+function parseBossHighlight({ payload }: { payload: unknown }): BossHighlight | null {
+	if (
+		!isRecord(payload) ||
+		typeof payload.startSeconds !== "number" ||
+		typeof payload.endSeconds !== "number" ||
+		typeof payload.reason !== "string"
+	) {
+		return null;
+	}
+
+	return {
+		startSeconds: payload.startSeconds,
+		endSeconds: payload.endSeconds,
+		reason: payload.reason,
+	};
 }
 
 function parseHealthResponse({ payload }: { payload: unknown }) {

@@ -29,8 +29,7 @@ import {
 	TooltipProvider,
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { DEFAULT_NEW_ELEMENT_DURATION } from "@/timeline/creation";
-import { mediaTimeFromSeconds, type MediaTime } from "@/wasm";
+import { type MediaTime } from "@/wasm";
 import { useEditor } from "@/editor/use-editor";
 import { useFileUpload } from "@/media/use-file-upload";
 import { invokeAction } from "@/actions";
@@ -45,7 +44,6 @@ import {
 	useSelection,
 	useSelectionScope,
 } from "@/selection";
-import { buildElementFromMedia } from "@/timeline/element-utils";
 import {
 	type MediaFolder,
 	type MediaSortKey,
@@ -56,6 +54,7 @@ import {
 import { MASKABLE_ELEMENT_TYPES } from "@/timeline";
 import type { MediaAsset } from "@/media/types";
 import { cn } from "@/utils/ui";
+import { buildElementFromAsset, isSubclipAsset } from "@/media/asset-source";
 import {
 	ArrowLeft01Icon,
 	CloudUploadIcon,
@@ -249,8 +248,8 @@ export function MediaView() {
 					valueB = b.duration || 0;
 					break;
 				case "size":
-					valueA = a.file.size;
-					valueB = b.file.size;
+					valueA = a.size;
+					valueB = b.size;
 					break;
 				default:
 					return 0;
@@ -544,15 +543,8 @@ function MediaAssetDraggable({
 		asset: MediaAsset;
 		startTime: MediaTime;
 	}) => {
-		const duration =
-			asset.duration != null
-				? mediaTimeFromSeconds({ seconds: asset.duration })
-				: DEFAULT_NEW_ELEMENT_DURATION;
-		const element = buildElementFromMedia({
-			mediaId: asset.id,
-			mediaType: asset.type,
-			name: asset.name,
-			duration,
+		const element = buildElementFromAsset({
+			asset,
 			startTime,
 		});
 		editor.timeline.insertElement({
@@ -587,7 +579,7 @@ function MediaAssetDraggable({
 function MediaItemWithContextMenu({
 	item,
 	folders,
-	currentFolderId,
+	currentFolderId: _currentFolderId,
 	children,
 	onRemove,
 	onMoveToFolder,
@@ -836,6 +828,9 @@ function MediaPreview({
 					loading="lazy"
 					unoptimized
 				/>
+				{isSubclipAsset({ asset: item }) ? (
+					<SubclipBadge className="left-2" />
+				) : null}
 			</div>
 		);
 	}
@@ -853,6 +848,9 @@ function MediaPreview({
 						loading="lazy"
 						unoptimized
 					/>
+					{isSubclipAsset({ asset: item }) ? (
+						<SubclipBadge className="left-2" />
+					) : null}
 					{shouldShowDurationBadge ? (
 						<MediaDurationBadge duration={item.duration} />
 					) : null}
@@ -871,17 +869,35 @@ function MediaPreview({
 
 	if (item.type === "audio") {
 		return (
-			<MediaTypePlaceholder
-				icon={MusicNote03Icon}
-				label="Audio"
-				duration={item.duration}
-				variant="bordered"
-			/>
+			<div className="relative size-full">
+				<MediaTypePlaceholder
+					icon={MusicNote03Icon}
+					label="Audio"
+					duration={item.duration}
+					variant="bordered"
+				/>
+				{isSubclipAsset({ asset: item }) ? (
+					<SubclipBadge className="left-2" />
+				) : null}
+			</div>
 		);
 	}
 
 	return (
 		<MediaTypePlaceholder icon={Image02Icon} label="Unknown" variant="muted" />
+	);
+}
+
+function SubclipBadge({ className }: { className?: string }) {
+	return (
+		<span
+			className={cn(
+				"bg-background/90 text-foreground absolute top-2 rounded-full border px-2 py-0.5 text-[10px] font-medium shadow-sm",
+				className,
+			)}
+		>
+			Subclip
+		</span>
 	);
 }
 

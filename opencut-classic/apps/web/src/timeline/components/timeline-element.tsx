@@ -31,6 +31,7 @@ import {
 	ContextMenuSeparator,
 	ContextMenuTrigger,
 } from "@/components/ui/context-menu";
+import { toast } from "sonner";
 import type { SelectionBoxBounds } from "@/selection/types";
 import type {
 	TimelineElement as TimelineElementType,
@@ -47,9 +48,16 @@ import {
 	getSourceAudioActionLabel,
 	isSourceAudioSeparated,
 } from "@/timeline/audio-separation";
-import { buildWaveformGainSamples, isElementMuted } from "@/timeline/audio-state";
+import {
+	buildWaveformGainSamples,
+	isElementMuted,
+} from "@/timeline/audio-state";
 import { getTimelinePixelsPerSecond } from "@/timeline";
 import { buildWaveformSourceKey } from "@/media/waveform-summary";
+import {
+	getAssetSourceStartTime,
+	getWaveformSourceKeyForAsset,
+} from "@/media/asset-source";
 import { addMediaTime, type MediaTime, TICKS_PER_SECOND } from "@/wasm";
 import {
 	getActionDefinition,
@@ -57,6 +65,7 @@ import {
 	type TActionWithOptionalArgs,
 	invokeAction,
 } from "@/actions";
+import { saveTimelineClipToAssets } from "@/media/save-selected-clip";
 import { useElementSelection } from "@/timeline/hooks/element/use-element-selection";
 import { resolveStickerId } from "@/stickers";
 import { buildGraphicPreviewUrl } from "@/graphics";
@@ -65,6 +74,7 @@ import {
 	ScissorIcon,
 	Delete02Icon,
 	Copy01Icon,
+	CloudUploadIcon,
 	ViewIcon,
 	ViewOffSlashIcon,
 	VolumeHighIcon,
@@ -89,6 +99,10 @@ import {
 	getExpansionHeight,
 	type ExpandedRow,
 } from "./expanded-layout";
+import {
+	getAdjacentVideoElements,
+	getTrackTransitionByElements,
+} from "@/transitions";
 
 const KEYFRAME_INDICATOR_MIN_WIDTH_PX = 40;
 const ELEMENT_RING_WIDTH_PX = 1.5;
@@ -235,9 +249,11 @@ export function TimelineElement({
 	dragView,
 	isDropTarget = false,
 }: TimelineElementProps) {
+	const editor = useEditor();
 	const mediaAssets = useMedia((e) => e.media.getAssets());
 	const { selectedElements, isElementSelected } = useElementSelection();
 	const requestRevealMedia = useAssetsPanelStore((s) => s.requestRevealMedia);
+	const activeProject = useEditor((e) => e.project.getActiveOrNull());
 	const { renderElement } = useElementPreview({
 		trackId: track.id,
 		elementId: element.id,
@@ -340,6 +356,39 @@ export function TimelineElement({
 		}
 	};
 
+	const handleSaveClipToAssets = async ({
+		event,
+	}: {
+		event: React.MouseEvent;
+	}) => {
+		event.stopPropagation();
+		if (
+			!activeProject ||
+			!mediaAsset ||
+			(element.type !== "video" && element.type !== "audio")
+		) {
+			return;
+		}
+
+		try {
+			const importedAsset = await saveTimelineClipToAssets({
+				editor,
+				projectId: activeProject.metadata.id,
+				element,
+				mediaAsset,
+			});
+			requestRevealMedia(importedAsset.id);
+			toast.success(`${element.name || mediaAsset.name} saved to Assets.`);
+		} catch (error) {
+			toast.error("Save clip failed", {
+				description:
+					error instanceof Error
+						? error.message
+						: "Could not save the selected clip.",
+			});
+		}
+	};
+
 	const isMuted = canElementHaveAudio(element) && isElementMuted({ element });
 	const canToggleCurrentSourceAudio =
 		selectedElements.length === 1 &&
@@ -354,6 +403,21 @@ export function TimelineElement({
 	const hasKeyframes = elementKeyframes.length > 0;
 	const expansionHeight = getExpansionHeight({ rows: expandedRows });
 	const baseTrackHeight = getTrackHeight({ type: track.type });
+	const adjacentVideoElements =
+		track.type === "video"
+			? getAdjacentVideoElements({
+					track,
+					elementId: element.id,
+				})
+			: null;
+	const currentTransition =
+		track.type === "video" && adjacentVideoElements
+			? getTrackTransitionByElements({
+					track,
+					fromElementId: adjacentVideoElements.from.id,
+					toElementId: adjacentVideoElements.to.id,
+				})
+			: null;
 
 	const expandedContent =
 		isExpanded && expandedRows.length > 0 ? (
@@ -486,24 +550,65 @@ export function TimelineElement({
 							{isExpanded ? "Collapse keyframes" : "Expand keyframes"}
 						</ContextMenuItem>
 					)}
-					{selectedElements.length === 1 && hasMediaId(element) && (
-						<>
-							<ContextMenuItem
-								icon={<HugeiconsIcon icon={Search01Icon} />}
-								onClick={(event: React.MouseEvent) =>
-									handleRevealInMedia({ event })
-								}
-							>
-								Reveal media
-							</ContextMenuItem>
-							<ContextMenuItem
-								icon={<HugeiconsIcon icon={Exchange01Icon} />}
-								disabled
-							>
-								Replace media
-							</ContextMenuItem>
-						</>
-					)}
+					{selectedElements.length === 1 &&
+						hasMediaId(element) &&
+						(element.type === "video" || element.type === "audio") && (
+							<>
+								<ContextMenuItem
+									icon={<HugeiconsIcon icon={Search01Icon} />}
+									onClick={(event: React.MouseEvent) =>
+										handleRevealInMedia({ event })
+									}
+								>
+									Reveal media
+								</ContextMenuItem>
+								<ContextMenuItem
+									icon={<HugeiconsIcon icon={CloudUploadIcon} />}
+									onClick={(event: React.MouseEvent) =>
+										void handleSaveClipToAssets({ event })
+									}
+								>
+									Save clip to Assets
+								</ContextMenuItem>
+								{adjacentVideoElements ? (
+									<ContextMenuItem
+										icon={<HugeiconsIcon icon={MagicWand05Icon} />}
+										onClick={(event: React.MouseEvent) => {
+											event.stopPropagation();
+											editor.timeline.setTransitionToNextClip({
+												trackId: track.id,
+												elementId: element.id,
+												type: "crossfade",
+											});
+										}}
+									>
+										{currentTransition
+											? "Replace with crossfade"
+											: "Add crossfade"}
+									</ContextMenuItem>
+								) : null}
+								{adjacentVideoElements && currentTransition ? (
+									<ContextMenuItem
+										icon={<HugeiconsIcon icon={Delete02Icon} />}
+										onClick={(event: React.MouseEvent) => {
+											event.stopPropagation();
+											editor.timeline.removeTransitionToNextClip({
+												trackId: track.id,
+												elementId: element.id,
+											});
+										}}
+									>
+										Remove transition
+									</ContextMenuItem>
+								) : null}
+								<ContextMenuItem
+									icon={<HugeiconsIcon icon={Exchange01Icon} />}
+									disabled
+								>
+									Replace media
+								</ContextMenuItem>
+							</>
+						)}
 					<ContextMenuSeparator />
 					<DeleteMenuItem
 						isMultipleSelected={selectedElements.length > 1}
@@ -592,7 +697,9 @@ function ElementInner({
 						className="absolute inset-0 size-full flex flex-col"
 						onClick={(event) => onElementClick({ event, element })}
 						onMouseDown={(event) => onElementMouseDown({ event, element })}
-						onDoubleClick={(event) => onElementDoubleClick?.({ event, element })}
+						onDoubleClick={(event) =>
+							onElementDoubleClick?.({ event, element })
+						}
 					>
 						<div
 							className={cn(
@@ -921,7 +1028,9 @@ function TextElementContent({
 	return (
 		<div className="flex size-full items-center justify-start pl-2">
 			<span className="truncate text-xs text-white">
-				{typeof element.params.content === "string" ? element.params.content : ""}
+				{typeof element.params.content === "string"
+					? element.params.content
+					: ""}
 			</span>
 		</div>
 	);
@@ -1017,8 +1126,15 @@ function AudioElementContent({
 		element.sourceType === "upload" ? mediaAsset?.file : undefined;
 	const sourceKey =
 		element.sourceType === "upload"
-			? buildWaveformSourceKey({ kind: "media", id: element.mediaId })
+			? mediaAsset
+				? getWaveformSourceKeyForAsset({ asset: mediaAsset })
+				: buildWaveformSourceKey({ kind: "media", id: element.mediaId })
 			: buildWaveformSourceKey({ kind: "library", id: element.sourceUrl });
+	const sourceStartSec =
+		element.sourceType === "upload" && mediaAsset
+			? (getAssetSourceStartTime({ asset: mediaAsset }) + element.trimStart) /
+				TICKS_PER_SECOND
+			: element.trimStart / TICKS_PER_SECOND;
 	const mediaLabel = mediaAsset?.name ?? element.name;
 	const gainSamples = useMemo(
 		() =>
@@ -1042,7 +1158,7 @@ function AudioElementContent({
 						pixelsPerSecond={pixelsPerSecond}
 						clipDurationSec={element.duration / TICKS_PER_SECOND}
 						retime={element.retime}
-						sourceStartSec={element.trimStart / TICKS_PER_SECOND}
+						sourceStartSec={sourceStartSec}
 						color={TIMELINE_TRACK_THEME.audio.waveformColor}
 					/>
 					<AudioVolumeLine element={element} trackId={trackId} />
@@ -1104,6 +1220,10 @@ function TiledMediaContent({
 	const mediaAssets = useMedia((e) => e.media.getAssets());
 
 	const mediaAsset = mediaAssets.find((asset) => asset.id === element.mediaId);
+	const sourceStartSec = mediaAsset
+		? (getAssetSourceStartTime({ asset: mediaAsset }) + element.trimStart) /
+			TICKS_PER_SECOND
+		: element.trimStart / TICKS_PER_SECOND;
 	const imageUrl =
 		element.type === "video"
 			? mediaAsset?.thumbnailUrl
@@ -1158,23 +1278,29 @@ function TiledMediaContent({
 				}
 				hasFade={true}
 			/>
-			{hasVideoAudio && pixelsPerSecond !== null && element.type === "video" && (
-				<div className="pointer-events-none absolute inset-x-0 bottom-0 h-1/2">
-					<AudioWaveform
-						sourceKey={buildWaveformSourceKey({
-							kind: "media",
-							id: element.mediaId,
-						})}
-						sourceFile={mediaAsset?.file}
-						gainSamples={gainSamples}
-						pixelsPerSecond={pixelsPerSecond}
-						clipDurationSec={element.duration / TICKS_PER_SECOND}
-						retime={element.retime}
-						sourceStartSec={element.trimStart / TICKS_PER_SECOND}
-						color="rgba(255, 255, 255, 0.5)"
-					/>
-				</div>
-			)}
+			{hasVideoAudio &&
+				pixelsPerSecond !== null &&
+				element.type === "video" && (
+					<div className="pointer-events-none absolute inset-x-0 bottom-0 h-1/2">
+						<AudioWaveform
+							sourceKey={
+								mediaAsset
+									? getWaveformSourceKeyForAsset({ asset: mediaAsset })
+									: buildWaveformSourceKey({
+											kind: "media",
+											id: element.mediaId,
+										})
+							}
+							sourceFile={mediaAsset?.file}
+							gainSamples={gainSamples}
+							pixelsPerSecond={pixelsPerSecond}
+							clipDurationSec={element.duration / TICKS_PER_SECOND}
+							retime={element.retime}
+							sourceStartSec={sourceStartSec}
+							color="rgba(255, 255, 255, 0.5)"
+						/>
+					</div>
+				)}
 		</>
 	);
 }

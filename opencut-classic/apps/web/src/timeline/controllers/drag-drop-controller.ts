@@ -1,6 +1,7 @@
 import type { DragEvent } from "react";
 import { processMediaAssets } from "@/media/processing";
 import { showMediaUploadToast } from "@/media/upload-toast";
+import { buildElementFromAsset } from "@/media/asset-source";
 import {
 	DEFAULT_NEW_ELEMENT_DURATION,
 	toElementDurationTicks,
@@ -444,11 +445,8 @@ export class DragDropController {
 
 		const trackType: TrackType =
 			dragData.mediaType === "audio" ? "audio" : "video";
-		const element = buildElementFromMedia({
-			mediaId: mediaAsset.id,
-			mediaType: mediaAsset.type,
-			name: mediaAsset.name,
-			duration: toElementDurationTicks({ seconds: mediaAsset.duration }),
+		const element = buildElementFromAsset({
+			asset: mediaAsset,
 			startTime: target.xPosition,
 		});
 		this.insertAtTarget({ element, target, trackType });

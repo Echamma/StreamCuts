@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo } from "react";
+import { useEditor } from "@/editor/use-editor";
 import { useElementSelection } from "@/timeline/hooks/element/use-element-selection";
 import { useTimelineScroll } from "./timeline-scroll-context";
 import { TimelineElement } from "./timeline-element";
@@ -10,6 +11,10 @@ import { TIMELINE_LAYERS } from "./layers";
 import type { ElementDragView } from "@/timeline";
 import { timelineTimeToPixels } from "@/timeline/pixel-utils";
 import { useTextEditRequestStore } from "@/preview/text-edit-request-store";
+import {
+	getRenderableTrackTransitions,
+	transitionRegistry,
+} from "@/transitions";
 
 interface TimelineTrackContentProps {
 	track: TimelineTrack;
@@ -49,6 +54,7 @@ export function TimelineTrackContent({
 	shouldIgnoreClick,
 	targetElementId = null,
 }: TimelineTrackContentProps) {
+	const editor = useEditor();
 	const { isElementSelected } = useElementSelection();
 	const { scrollLeft, viewportWidth } = useTimelineScroll();
 	const requestTextEdit = useTextEditRequestStore((s) => s.requestTextEdit);
@@ -102,38 +108,73 @@ export function TimelineTrackContent({
 				{track.elements.length === 0 ? (
 					<div className="text-muted-foreground border-muted/30 pointer-events-none flex size-full items-center justify-center rounded-sm border-2 border-dashed text-xs" />
 				) : (
-					visibleElements.map((element) => {
-						const isSelected = isElementSelected({
-							trackId: track.id,
-							elementId: element.id,
-						});
+					<>
+						{track.type === "video"
+							? getRenderableTrackTransitions({ track }).map(
+									({ transition, to }) => {
+										const definition = transitionRegistry.get(transition.type);
+										if (!definition) {
+											return null;
+										}
 
-						return (
-							<TimelineElement
-								key={element.id}
-								element={element}
-								track={track}
-								zoomLevel={zoomLevel}
-								isSelected={isSelected}
-								onResizeStart={({ event, element, side }) =>
-									onResizeStart({ event, element, track, side })
-								}
-								onElementMouseDown={({ event, element }) =>
-									onElementMouseDown({ event, element, track })
-								}
-								onElementClick={({ event, element }) =>
-									onElementClick({ event, element, track })
-								}
-								onElementDoubleClick={({ element: el }) => {
-									if (el.type === "text") {
-										requestTextEdit({ trackId: track.id, elementId: el.id });
+										const left = timelineTimeToPixels({
+											time: to.startTime,
+											zoomLevel,
+										});
+										return (
+											<button
+												key={transition.id}
+												type="button"
+												className="bg-background/95 text-foreground absolute top-1/2 z-20 -translate-x-1/2 -translate-y-1/2 rounded-full border px-2 py-0.5 text-[10px] shadow-sm"
+												style={{ left }}
+												onClick={(event) => {
+													event.stopPropagation();
+													editor.timeline.removeTransitionToNextClip({
+														trackId: track.id,
+														elementId: transition.fromElementId,
+													});
+												}}
+												title={`${definition.name} transition. Click to remove.`}
+											>
+												{definition.name}
+											</button>
+										);
+									},
+								)
+							: null}
+						{visibleElements.map((element) => {
+							const isSelected = isElementSelected({
+								trackId: track.id,
+								elementId: element.id,
+							});
+
+							return (
+								<TimelineElement
+									key={element.id}
+									element={element}
+									track={track}
+									zoomLevel={zoomLevel}
+									isSelected={isSelected}
+									onResizeStart={({ event, element, side }) =>
+										onResizeStart({ event, element, track, side })
 									}
-								}}
-								dragView={dragView}
-								isDropTarget={element.id === targetElementId}
-							/>
-						);
-					})
+									onElementMouseDown={({ event, element }) =>
+										onElementMouseDown({ event, element, track })
+									}
+									onElementClick={({ event, element }) =>
+										onElementClick({ event, element, track })
+									}
+									onElementDoubleClick={({ element: el }) => {
+										if (el.type === "text") {
+											requestTextEdit({ trackId: track.id, elementId: el.id });
+										}
+									}}
+									dragView={dragView}
+									isDropTarget={element.id === targetElementId}
+								/>
+							);
+						})}
+					</>
 				)}
 			</div>
 		</div>

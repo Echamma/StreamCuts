@@ -7,6 +7,9 @@ import type { RetimeConfig, VisualElement } from "@/timeline";
 export interface VisualNodeParams {
 	duration: number;
 	timeOffset: number;
+	playbackStartTime?: number;
+	visibleStartTime?: number;
+	visibleEndTime?: number;
 	trimStart: number;
 	trimEnd: number;
 	retime?: RetimeConfig;

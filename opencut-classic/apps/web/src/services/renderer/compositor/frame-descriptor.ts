@@ -15,6 +15,10 @@ import { ImageNode } from "../nodes/image-node";
 import { RootNode } from "../nodes/root-node";
 import { StickerNode } from "../nodes/sticker-node";
 import { renderTextToContext, TextNode } from "../nodes/text-node";
+import {
+	TransitionNode,
+	type ResolvedTransitionNodeState,
+} from "../nodes/transition-node";
 import { VideoNode } from "../nodes/video-node";
 import type { ResolvedVisualSourceNodeState } from "../nodes/visual-node";
 import type {
@@ -26,6 +30,7 @@ import type {
 	TextureUploadDescriptor,
 } from "./types";
 import { DEFAULT_GRAPHIC_SOURCE_SIZE } from "@/graphics";
+import { gpuRenderer } from "../gpu-renderer";
 
 export async function buildFrameDescriptor({
 	node,
@@ -178,6 +183,17 @@ async function collectNode({
 		return;
 	}
 
+	if (node instanceof TransitionNode) {
+		collectTransitionNode({
+			node,
+			renderer,
+			path,
+			items,
+			textures,
+		});
+		return;
+	}
+
 	if (
 		node instanceof VideoNode ||
 		node instanceof ImageNode ||
@@ -203,6 +219,53 @@ async function collectNode({
 			textures,
 		});
 	}
+}
+
+function collectTransitionNode({
+	node,
+	renderer,
+	path,
+	items,
+	textures,
+}: {
+	node: TransitionNode;
+	renderer: CanvasRenderer;
+	path: string;
+	items: FrameItemDescriptor[];
+	textures: Map<string, TextureUploadDescriptor>;
+}) {
+	if (!node.resolved) {
+		return;
+	}
+	const resolved = node.resolved;
+
+	const textureId = `${path}:transition`;
+	const contentHash = `transition:${node.params.definition.type}:${resolved.progress}:${hashTransitionSource(
+		resolved,
+	)}`;
+	textures.set(textureId, {
+		kind: "rendered",
+		id: textureId,
+		contentHash,
+		width: renderer.width,
+		height: renderer.height,
+		draw: (ctx) => {
+			renderTransitionNodeToContext({
+				ctx,
+				renderer,
+				resolved,
+			});
+		},
+	});
+	items.push({
+		type: "layer",
+		textureId,
+		transform: fullCanvasTransform(renderer),
+		opacity: 1,
+		blendMode: "normal",
+		effectPassGroups: [],
+		mask: null,
+	});
 }
 
 async function collectVisualSourceNode({
@@ -322,6 +385,94 @@ function collectTextNode({
 		effectPassGroups: node.resolved.effectPasses,
 		mask: null,
 	});
+}
+
+function renderTransitionNodeToContext({
+	ctx,
+	renderer,
+	resolved,
+}: {
+	ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
+	renderer: CanvasRenderer;
+	resolved: ResolvedTransitionNodeState;
+}) {
+	const fromCanvas =
+		resolved.outgoing != null
+			? renderResolvedVisualSourceToCanvas({
+					renderer,
+					resolved: resolved.outgoing,
+				})
+			: null;
+	const toCanvas =
+		resolved.incoming != null
+			? renderResolvedVisualSourceToCanvas({
+					renderer,
+					resolved: resolved.incoming,
+				})
+			: null;
+
+	ctx.clearRect(0, 0, renderer.width, renderer.height);
+	if (!fromCanvas && !toCanvas) {
+		return;
+	}
+	if (!fromCanvas && toCanvas) {
+		ctx.drawImage(toCanvas, 0, 0, renderer.width, renderer.height);
+		return;
+	}
+	if (fromCanvas && !toCanvas) {
+		ctx.drawImage(fromCanvas, 0, 0, renderer.width, renderer.height);
+		return;
+	}
+
+	resolved.definition.render({
+		context: ctx,
+		from: fromCanvas as CanvasImageSource,
+		to: toCanvas as CanvasImageSource,
+		width: renderer.width,
+		height: renderer.height,
+		progress: resolved.progress,
+		params: resolved.params,
+	});
+}
+
+function renderResolvedVisualSourceToCanvas({
+	renderer,
+	resolved,
+}: {
+	renderer: CanvasRenderer;
+	resolved: ResolvedVisualSourceNodeState;
+}): OffscreenCanvas {
+	let canvas = createCanvasSurface({
+		width: renderer.width,
+		height: renderer.height,
+	}).canvas;
+	const context = canvas.getContext("2d");
+	if (!context) {
+		return canvas;
+	}
+
+	const transform = computeVisualTransform({
+		renderer,
+		resolved,
+		sourceWidth: resolved.sourceWidth,
+		sourceHeight: resolved.sourceHeight,
+	});
+	drawTransformedCanvas({
+		ctx: context,
+		source: resolved.source,
+		transform,
+	});
+
+	for (const passes of resolved.effectPasses) {
+		canvas = gpuRenderer.applyEffect({
+			source: canvas,
+			width: renderer.width,
+			height: renderer.height,
+			passes,
+		});
+	}
+
+	return canvas;
 }
 
 function computeVisualTransform({
@@ -578,4 +729,11 @@ function identityKey(source: CanvasImageSource): string {
 		return `@${key}`;
 	}
 	return "@?";
+}
+
+function hashTransitionSource(resolved: ResolvedTransitionNodeState): string {
+	return [
+		resolved.outgoing ? identityKey(resolved.outgoing.source) : "none",
+		resolved.incoming ? identityKey(resolved.incoming.source) : "none",
+	].join(":");
 }

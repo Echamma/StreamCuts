@@ -1,6 +1,6 @@
 import type { EditorCore } from "@/core";
 import type { MediaAsset } from "@/media/types";
-import { buildWaveformSourceKey } from "@/media/waveform-summary";
+import { getWaveformSourceKeyForAsset } from "@/media/asset-source";
 import { waveformCache } from "@/services/waveform-cache/service";
 
 // ---------------------------------------------------------------------------
@@ -117,7 +117,7 @@ export class AssetPreparationService {
 	}
 
 	private async prepareWaveform(asset: MediaAsset): Promise<void> {
-		const sourceKey = buildWaveformSourceKey({ kind: "media", id: asset.id });
+		const sourceKey = getWaveformSourceKeyForAsset({ asset });
 
 		this.setAssetState({
 			assetId: asset.id,

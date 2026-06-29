@@ -1,9 +1,13 @@
-import type { MediaAssetData } from "@/services/storage/types";
+import type {
+	MediaAssetData,
+	MediaAssetSource,
+	MediaType,
+} from "@/services/storage/types";
 
-export type MediaType = "image" | "video" | "audio";
+export type { MediaAssetSource, MediaType } from "@/services/storage/types";
 
-export interface MediaAsset
-	extends Omit<MediaAssetData, "size" | "lastModified"> {
+export interface MediaAsset extends MediaAssetData {
 	file: File;
 	url?: string;
+	source: MediaAssetSource;
 }

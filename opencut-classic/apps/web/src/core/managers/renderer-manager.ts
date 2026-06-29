@@ -15,7 +15,7 @@ import {
 	timelineHasAudio,
 	TimelineAudioRenderCancelledError,
 } from "@/media/audio";
-import type { SceneTracks } from "@/timeline";
+import { calculateTotalDuration, type SceneTracks } from "@/timeline";
 import type { MediaAsset } from "@/media/types";
 import { formatTimecode } from "opencut-wasm";
 import { downloadBlob } from "@/utils/browser";
@@ -161,7 +161,7 @@ export class RendererManager {
 		onProgress?: ({ progress, phase, statusText }: { progress: number; phase?: ExportPhase; statusText?: string }) => void;
 		onCancel?: () => boolean;
 	}): Promise<ExportResult> {
-		const { format, quality, fps, includeAudio } = options;
+		const { format, quality, fps, includeAudio, canvasSizeOverride } = options;
 
 		try {
 			const tracks = tracksOverride ?? this.editor.scenes.getActiveScene().tracks;
@@ -172,13 +172,16 @@ export class RendererManager {
 				return { success: false, error: "No active project" };
 			}
 
-			const duration = this.editor.timeline.getTotalDuration();
+			const duration = tracksOverride
+				? calculateTotalDuration({ tracks })
+				: this.editor.timeline.getTotalDuration();
 			if (duration === 0) {
 				return { success: false, error: "Project is empty" };
 			}
 
 			const exportFps = fps ?? activeProject.settings.fps;
-			const canvasSize = activeProject.settings.canvasSize;
+			const canvasSize =
+				canvasSizeOverride ?? activeProject.settings.canvasSize;
 
 			const shouldIncludeAudio =
 				!!includeAudio && timelineHasAudio({ tracks, mediaAssets });

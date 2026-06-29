@@ -1,11 +1,29 @@
-import type { MediaType } from "@/media/types";
 import type {
 	TProject,
 	TProjectMetadata,
 	TTimelineViewState,
 } from "@/project/types";
 import type { SocialCopy } from "@/socials/types";
-import type { TScene } from "@/timeline";
+import type { RetimeConfig, TScene } from "@/timeline";
+
+export type MediaType = "image" | "video" | "audio";
+
+export interface FileMediaAssetSource {
+	kind: "file";
+}
+
+export interface SubclipMediaAssetSource {
+	kind: "subclip";
+	rootSourceAssetId: string;
+	sourceStartTime: number;
+	sourceDuration: number;
+	timelineDuration: number;
+	retime?: RetimeConfig;
+	includeAudio?: boolean;
+	savedFromAssetId: string;
+}
+
+export type MediaAssetSource = FileMediaAssetSource | SubclipMediaAssetSource;
 
 export interface StorageAdapter<T> {
 	get(key: string): Promise<T | null>;
@@ -31,6 +49,7 @@ export interface MediaAssetData {
 	socialCopy?: SocialCopy;
 	folderId?: string | null;
 	sceneId?: string;
+	source?: MediaAssetSource;
 }
 
 export type SerializedScene = Omit<TScene, "createdAt" | "updatedAt"> & {

@@ -6,6 +6,7 @@ import type { MediaAsset } from "@/media/types";
 import { readVideoFile } from "./mediabunny";
 import type { VideoFileData } from "./mediabunny";
 import { renderThumbnailDataUrl } from "./thumbnail";
+import { FILE_MEDIA_ASSET_SOURCE } from "@/media/asset-source";
 
 export interface ProcessedMediaAsset extends Omit<MediaAsset, "id"> {}
 
@@ -167,6 +168,8 @@ export async function processMediaAssets({
 			processedAssets.push({
 				name: file.name,
 				type: fileType,
+				size: file.size,
+				lastModified: file.lastModified,
 				file,
 				url,
 				thumbnailUrl,
@@ -175,6 +178,7 @@ export async function processMediaAssets({
 				height,
 				fps,
 				hasAudio,
+				source: FILE_MEDIA_ASSET_SOURCE,
 			});
 
 			await new Promise((resolve) => setTimeout(resolve, 0));

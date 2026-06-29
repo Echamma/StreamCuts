@@ -77,8 +77,8 @@ export async function readVideoFile({
 	}
 }
 
-const SAMPLE_RATE = 44100;
-const NUM_CHANNELS = 2;
+const SAMPLE_RATE = 16000;
+const NUM_CHANNELS = 1;
 export const DEFAULT_TRANSCRIPTION_CHUNK_DURATION_SECONDS = 45;
 
 export interface TimelineAudioBlobChunk {
@@ -137,6 +137,16 @@ function interleaveAudioBuffer({
 
 	for (let sampleIndex = 0; sampleIndex < audioBuffer.length; sampleIndex++) {
 		for (let channel = 0; channel < NUM_CHANNELS; channel++) {
+			if (NUM_CHANNELS === 1 && numChannels > 1) {
+				let mixedSample = 0;
+				for (let sourceChannel = 0; sourceChannel < numChannels; sourceChannel++) {
+					mixedSample +=
+						audioBuffer.getChannelData(sourceChannel)[sampleIndex] ?? 0;
+				}
+				interleavedSamples[sampleIndex] = mixedSample / numChannels;
+				continue;
+			}
+
 			const sourceChannel = Math.min(channel, Math.max(0, numChannels - 1));
 			interleavedSamples[sampleIndex * NUM_CHANNELS + channel] =
 				audioBuffer.getChannelData(sourceChannel)[sampleIndex] ?? 0;

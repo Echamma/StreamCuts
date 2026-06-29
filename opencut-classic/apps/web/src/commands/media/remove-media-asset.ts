@@ -1,6 +1,11 @@
 import { Command, type CommandResult } from "@/commands/base-command";
 import { EditorCore } from "@/core";
+import { toast } from "sonner";
 import type { MediaAsset } from "@/media/types";
+import {
+	getMediaAssetSource,
+	isSubclipAsset,
+} from "@/media/asset-source";
 import { buildWaveformSourceKey } from "@/media/waveform-summary";
 import { storageService } from "@/services/storage/service";
 import { videoCache } from "@/services/video-cache/service";
@@ -43,20 +48,52 @@ export class RemoveMediaAssetCommand extends Command {
 			return;
 		}
 
-		if (this.removedAsset.url) {
+		const dependentSubclips = isSubclipAsset({ asset: this.removedAsset })
+			? []
+			: assets.filter((asset) => {
+					const source = getMediaAssetSource({ asset });
+					return (
+						source.kind === "subclip" &&
+						source.rootSourceAssetId === this.removedAsset?.id
+					);
+				});
+		if (dependentSubclips.length > 0) {
+			toast.error("Delete blocked", {
+				description:
+					dependentSubclips.length === 1
+						? "This source media has 1 saved subclip in Assets. Delete that subclip first."
+						: `This source media has ${dependentSubclips.length} saved subclips in Assets. Delete those subclips first.`,
+			});
+			return;
+		}
+
+		const isSharedUrl = !!this.removedAsset.url &&
+			assets.some(
+				(asset) => asset.id !== this.assetId && asset.url === this.removedAsset?.url,
+			);
+		const isSharedThumbnail = !!this.removedAsset.thumbnailUrl &&
+			assets.some(
+				(asset) =>
+					asset.id !== this.assetId &&
+					asset.thumbnailUrl === this.removedAsset?.thumbnailUrl,
+			);
+
+		if (this.removedAsset.url && !isSharedUrl) {
 			URL.revokeObjectURL(this.removedAsset.url);
 		}
-		if (this.removedAsset.thumbnailUrl) {
+		if (this.removedAsset.thumbnailUrl && !isSharedThumbnail) {
 			URL.revokeObjectURL(this.removedAsset.thumbnailUrl);
 		}
 
 		videoCache.clearVideo({ mediaId: this.assetId });
-		waveformCache.clearSource({
-			sourceKey: buildWaveformSourceKey({
-				kind: "media",
-				id: this.assetId,
-			}),
-		});
+		if (getMediaAssetSource({ asset: this.removedAsset }).kind === "file") {
+			waveformCache.clearSource({
+				sourceKey: buildWaveformSourceKey({
+					kind: "media",
+					id: this.assetId,
+				}),
+			});
+		}
 
 		editor.media.setAssets({
 			assets: assets.filter((media) => media.id !== this.assetId),

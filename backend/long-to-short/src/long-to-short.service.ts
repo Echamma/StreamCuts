@@ -102,6 +102,16 @@ export type BossShort = {
   description: string;
 };
 
+export type BossPlanningSettings = {
+  minChapters: number;
+  maxChapters: number;
+  minChapterDurationSeconds: number;
+  minShortsPerSegment: number;
+  maxShortsPerSegment: number;
+  minShortDurationSeconds: number;
+  maxShortDurationSeconds: number;
+};
+
 export type BossHighlight = {
   startSeconds: number;
   endSeconds: number;
@@ -118,11 +128,69 @@ export type BossSummaryResult = {
 export type BossRenderedClip = { downloadUrl: string; title: string };
 export type BossRenderedShort = { downloadUrl: string; title: string; description: string };
 
+export const DEFAULT_BOSS_PLANNING_SETTINGS: BossPlanningSettings = {
+  minChapters: 2,
+  maxChapters: 10,
+  minChapterDurationSeconds: 30,
+  minShortsPerSegment: 1,
+  maxShortsPerSegment: 3,
+  minShortDurationSeconds: 15,
+  maxShortDurationSeconds: 90,
+};
+
 type GeminiSocialCopyResult = {
   clipId: string;
   title: string;
   description: string;
 };
+
+function clampInteger(value: number, min: number, max: number) {
+  if (!Number.isFinite(value)) return min;
+  return Math.min(max, Math.max(min, Math.round(value)));
+}
+
+function normalizeBossPlanningSettings(
+  settings?: Partial<BossPlanningSettings>,
+): BossPlanningSettings {
+  const next = {
+    ...DEFAULT_BOSS_PLANNING_SETTINGS,
+    ...settings,
+  };
+
+  const minChapters = clampInteger(next.minChapters, 1, 20);
+  const maxChapters = clampInteger(next.maxChapters, minChapters, 20);
+  const minChapterDurationSeconds = clampInteger(
+    next.minChapterDurationSeconds,
+    5,
+    3600,
+  );
+  const minShortsPerSegment = clampInteger(next.minShortsPerSegment, 1, 5);
+  const maxShortsPerSegment = clampInteger(
+    next.maxShortsPerSegment,
+    minShortsPerSegment,
+    5,
+  );
+  const minShortDurationSeconds = clampInteger(
+    next.minShortDurationSeconds,
+    5,
+    180,
+  );
+  const maxShortDurationSeconds = clampInteger(
+    next.maxShortDurationSeconds,
+    minShortDurationSeconds,
+    180,
+  );
+
+  return {
+    minChapters,
+    maxChapters,
+    minChapterDurationSeconds,
+    minShortsPerSegment,
+    maxShortsPerSegment,
+    minShortDurationSeconds,
+    maxShortDurationSeconds,
+  };
+}
 
 @Injectable()
 export class LongToShortService {
@@ -454,6 +522,7 @@ export class LongToShortService {
       const transcription = await this.transcriptionService.transcribeFilePath({
         inputPath: sourcePath,
         originalName: basename(sourcePath),
+        profile: "longform",
         deleteAfter: false,
       });
       return { segments: transcription.segments };
@@ -470,11 +539,13 @@ export class LongToShortService {
     prompt,
     segments,
     durationSeconds,
+    settings,
   }: {
     jobId: string;
     prompt: string;
     segments: TranscriptionSegment[];
     durationSeconds: number;
+    settings?: Partial<BossPlanningSettings>;
   }): Promise<{
     longerSegments: BossChapter[];
     shorts: BossShort[];
@@ -486,6 +557,7 @@ export class LongToShortService {
     }
 
     this.logger.log(`Boss planning cuts for job ${jobId} (${durationSeconds.toFixed(0)}s)`);
+    const planningSettings = normalizeBossPlanningSettings(settings);
 
     const transcriptText =
       segments.length > 0
@@ -505,6 +577,7 @@ export class LongToShortService {
       prompt,
       transcriptText,
       durationSeconds,
+      settings: planningSettings,
     });
 
     if (longerSegments.length === 0) {
@@ -517,6 +590,7 @@ export class LongToShortService {
       longerSegments,
       transcriptSegments: segments,
       durationSeconds,
+      settings: planningSettings,
     });
 
     return { longerSegments, shorts };
@@ -782,6 +856,7 @@ export class LongToShortService {
           await this.transcriptionService.transcribeFilePath({
             inputPath: sourcePath,
             originalName: originalFileName,
+            profile: "longform",
             deleteAfter: false,
           })
         ).segments;
@@ -1161,6 +1236,7 @@ export class LongToShortService {
       const transcription = await this.transcriptionService.transcribeFilePath({
         inputPath: sourcePath,
         originalName: originalFileName,
+        profile: "longform",
         deleteAfter: false,
       });
       transcriptionSegments = transcription.segments;
@@ -1502,10 +1578,12 @@ export class LongToShortService {
     prompt,
     transcriptText,
     durationSeconds,
+    settings,
   }: {
     prompt: string;
     transcriptText: string;
     durationSeconds: number;
+    settings: BossPlanningSettings;
   }): Promise<BossChapter[]> {
     const promptLines = [
       "You are a video editor. Split this video into consecutive named chapters based on the user's instructions.",
@@ -1517,8 +1595,8 @@ export class LongToShortService {
       "",
       "Rules:",
       `- Chapters must be consecutive and together span the ENTIRE video from 0 to ${durationSeconds.toFixed(2)}`,
-      "- Minimum chapter duration: 30 seconds",
-      "- Return 2 to 10 chapters",
+      `- Minimum chapter duration: ${settings.minChapterDurationSeconds} seconds`,
+      `- Return ${settings.minChapters} to ${settings.maxChapters} chapters`,
       "- Title: descriptive, under 80 chars",
       "- No overlaps, no gaps between chapters",
     ];
@@ -1528,10 +1606,14 @@ export class LongToShortService {
     }
 
     const text = await this.bossCallGemini(promptLines.join("\n"));
-    return this.parseChapterPlan(text, durationSeconds);
+    return this.parseChapterPlan(text, durationSeconds, settings);
   }
 
-  private parseChapterPlan(text: string, durationSeconds: number): BossChapter[] {
+  private parseChapterPlan(
+    text: string,
+    durationSeconds: number,
+    settings: BossPlanningSettings,
+  ): BossChapter[] {
     try {
       const json = this.extractJsonPayload(text);
       const payload: unknown = JSON.parse(json);
@@ -1552,7 +1634,11 @@ export class LongToShortService {
           endSeconds: this.roundTo(Math.min(durationSeconds, item.endSeconds), 2),
           title: this.normalizeWhitespace(item.title).slice(0, 80) || "Section",
         }))
-        .filter((item) => item.endSeconds - item.startSeconds >= 5);
+        .filter(
+          (item) =>
+            item.endSeconds - item.startSeconds >=
+            Math.max(5, settings.minChapterDurationSeconds - 2),
+        );
     } catch {
       return [];
     }
@@ -1562,10 +1648,12 @@ export class LongToShortService {
     longerSegments,
     transcriptSegments,
     durationSeconds,
+    settings,
   }: {
     longerSegments: BossChapter[];
     transcriptSegments: TranscriptionSegment[];
     durationSeconds: number;
+    settings: BossPlanningSettings;
   }): Promise<BossShort[]> {
     const segmentPayloads = longerSegments.map((seg, i) => ({
       index: i,
@@ -1581,10 +1669,10 @@ export class LongToShortService {
     }));
 
     const promptLines = [
-      "You are a TikTok content strategist. From the video segments below, identify the 1-3 best short-form moments per segment.",
+      `You are a TikTok content strategist. From the video segments below, identify the ${settings.minShortsPerSegment}-${settings.maxShortsPerSegment} best short-form moments per segment.`,
       "",
       "Each short must have:",
-      "- Duration: 15-90 seconds",
+      `- Duration: ${settings.minShortDurationSeconds}-${settings.maxShortDurationSeconds} seconds`,
       "- Absolute timestamps from the ORIGINAL video (not relative to the segment)",
       "- Title: exactly 3-5 words, punchy (avoid generic filler like 'amazing moment')",
       "- Description: under 300 chars, conversational, end with 3-5 relevant hashtags",
@@ -1598,7 +1686,12 @@ export class LongToShortService {
 
     try {
       const text = await this.bossCallGemini(promptLines.join("\n"));
-      return this.parseShortsPlan(text, durationSeconds);
+      return this.parseShortsPlan(
+        text,
+        durationSeconds,
+        settings,
+        longerSegments.length,
+      );
     } catch (error) {
       this.logger.warn(
         `Boss shorts planning failed: ${this.getErrorMessage(error)}`,
@@ -1607,14 +1700,19 @@ export class LongToShortService {
     }
   }
 
-  private parseShortsPlan(text: string, durationSeconds: number): BossShort[] {
+  private parseShortsPlan(
+    text: string,
+    durationSeconds: number,
+    settings: BossPlanningSettings,
+    segmentCount: number,
+  ): BossShort[] {
     try {
       const json = this.extractJsonPayload(text);
       const payload: unknown = JSON.parse(json);
 
       if (!Array.isArray(payload)) return [];
 
-      return payload
+      const parsed = payload
         .filter(
           (item): item is {
             segmentIndex: number;
@@ -1624,6 +1722,7 @@ export class LongToShortService {
             description: string;
           } =>
             isRecord(item) &&
+            typeof item.segmentIndex === "number" &&
             typeof item.startSeconds === "number" &&
             typeof item.endSeconds === "number" &&
             typeof item.title === "string" &&
@@ -1631,15 +1730,36 @@ export class LongToShortService {
             item.endSeconds > item.startSeconds,
         )
         .map((item) => ({
-          startSeconds: this.roundTo(Math.max(0, item.startSeconds), 2),
-          endSeconds: this.roundTo(Math.min(durationSeconds, item.endSeconds), 2),
-          title: this.normalizeWhitespace(item.title).slice(0, 60) || "Short Clip",
-          description: item.description.trim().slice(0, 300),
-        }))
+            startSeconds: this.roundTo(Math.max(0, item.startSeconds), 2),
+            endSeconds: this.roundTo(Math.min(durationSeconds, item.endSeconds), 2),
+            segmentIndex: Math.round(item.segmentIndex),
+            title: this.normalizeWhitespace(item.title).slice(0, 60) || "Short Clip",
+            description: item.description.trim().slice(0, 300),
+          }))
         .filter((item) => {
           const dur = item.endSeconds - item.startSeconds;
-          return dur >= 10 && dur <= 92;
+          return (
+            dur >= settings.minShortDurationSeconds &&
+            dur <= settings.maxShortDurationSeconds + 2
+          );
         });
+
+      const grouped = new Map<number, BossShort[]>();
+      for (const item of parsed) {
+        if (item.segmentIndex < 0 || item.segmentIndex >= segmentCount) continue;
+
+        const current = grouped.get(item.segmentIndex) ?? [];
+        if (current.length >= settings.maxShortsPerSegment) continue;
+        current.push({
+          startSeconds: item.startSeconds,
+          endSeconds: item.endSeconds,
+          title: item.title,
+          description: item.description,
+        });
+        grouped.set(item.segmentIndex, current);
+      }
+
+      return [...grouped.values()].flat();
     } catch {
       return [];
     }

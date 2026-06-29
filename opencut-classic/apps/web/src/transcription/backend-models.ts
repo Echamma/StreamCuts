@@ -44,7 +44,7 @@ export const BACKEND_TRANSCRIPTION_MODELS: BackendTranscriptionModel[] = [
 	},
 ];
 
-export const DEFAULT_BACKEND_TRANSCRIPTION_MODEL = "medium";
+export const DEFAULT_BACKEND_TRANSCRIPTION_MODEL = "small";
 
 export function getBackendModel(
 	id: string,
