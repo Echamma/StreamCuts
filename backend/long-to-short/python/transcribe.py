@@ -5,6 +5,44 @@ import sys
 from collections import OrderedDict
 
 
+def _register_nvidia_dll_dirs() -> None:
+    """Make pip-installed cuBLAS/cuDNN DLLs visible to ctranslate2 on Windows.
+
+    The `nvidia-cublas-cu12` and `nvidia-cudnn-cu12` wheels drop their DLLs
+    into ``site-packages/nvidia/<lib>/bin``. Windows does not search those
+    folders by default, and ctranslate2 does not register them either — so
+    a CUDA backend with the wheels installed still fails at runtime with
+    ``cublas64_12.dll is not found``. ``os.add_dll_directory`` (Python 3.8+,
+    Windows only) tells the loader to look there before any later imports.
+
+    Best-effort: missing wheels or missing ``add_dll_directory`` (non-Windows)
+    are silently ignored so the script remains portable.
+    """
+    add_dll_directory = getattr(os, "add_dll_directory", None)
+    if add_dll_directory is None:
+        return
+    try:
+        import importlib.util
+    except ImportError:
+        return
+    for pkg in ("nvidia.cublas", "nvidia.cudnn"):
+        try:
+            spec = importlib.util.find_spec(pkg)
+        except (ImportError, ValueError):
+            continue
+        if not spec or not spec.submodule_search_locations:
+            continue
+        bin_dir = os.path.join(spec.submodule_search_locations[0], "bin")
+        if os.path.isdir(bin_dir):
+            try:
+                add_dll_directory(bin_dir)
+            except (FileNotFoundError, OSError):
+                pass
+
+
+_register_nvidia_dll_dirs()
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", dest="input_path")
