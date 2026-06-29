@@ -38,6 +38,20 @@ import {
 	type BossSettings,
 } from "./boss-store";
 import {
+	EXPORT_PLATFORM_PRESET_IDS,
+	EXPORT_PRESETS,
+	type ExportPlatformPresetId,
+	isExportPlatformPresetId,
+} from "@/export/presets";
+import {
+	Select,
+	SelectContent,
+	SelectItem,
+	SelectTrigger,
+	SelectValue,
+} from "@/components/ui/select";
+import type { TTargetAspect } from "@/project/types";
+import {
 	SparklesIcon,
 	CloudUploadIcon,
 	ArrowLeft01Icon,
@@ -46,6 +60,25 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { cn } from "@/utils/ui";
+
+function getTargetAspectForPlatform({
+	platform,
+}: {
+	platform: ExportPlatformPresetId;
+}): TTargetAspect | null {
+	const preset = EXPORT_PRESETS[platform];
+	const ratio = preset.width / preset.height;
+	const labelByRatio: Array<[TTargetAspect, number]> = [
+		["16:9", 16 / 9],
+		["9:16", 9 / 16],
+		["1:1", 1],
+		["4:5", 4 / 5],
+	];
+	for (const [label, target] of labelByRatio) {
+		if (Math.abs(ratio - target) < 0.01) return label;
+	}
+	return null;
+}
 
 export function BossPanel() {
 	const editor = useEditor();
@@ -211,6 +244,20 @@ export function BossPanel() {
 
 		store.setStep("processing");
 		store.setError(null);
+
+		// Snap the project's targetAspect to the selected platform so the
+		// export pipeline (Pick 1.4) defaults to the right canvas size.
+		const targetAspect = getTargetAspectForPlatform({
+			platform: currentSettings.targetPlatform,
+		});
+		if (
+			targetAspect &&
+			activeProject.settings.targetAspect !== targetAspect
+		) {
+			await editor.project.updateSettings({
+				settings: { targetAspect },
+			});
+		}
 
 		try {
 			// Step 4: Render requested clips
@@ -536,6 +583,42 @@ function PromptStep({
 						{example}
 					</button>
 				))}
+			</div>
+
+			<div className="mb-4 rounded-md border bg-accent/20 p-3">
+				<div className="mb-2 flex flex-col gap-0.5">
+					<p className="text-sm font-medium">Target platform</p>
+					<p className="text-muted-foreground text-xs">
+						Drives the project's target aspect and the default export preset.
+					</p>
+				</div>
+				<Select
+					value={settings.targetPlatform}
+					onValueChange={(value) => {
+						if (isExportPlatformPresetId(value)) {
+							onSettingsChange({ targetPlatform: value });
+						}
+					}}
+				>
+					<SelectTrigger className="w-full">
+						<SelectValue />
+					</SelectTrigger>
+					<SelectContent>
+						{EXPORT_PLATFORM_PRESET_IDS.map((id) => {
+							const preset = EXPORT_PRESETS[id];
+							return (
+								<SelectItem key={id} value={id}>
+									<div className="flex flex-col items-start">
+										<span>{preset.name}</span>
+										<span className="text-muted-foreground text-xs">
+											{preset.description}
+										</span>
+									</div>
+								</SelectItem>
+							);
+						})}
+					</SelectContent>
+				</Select>
 			</div>
 
 			<Section

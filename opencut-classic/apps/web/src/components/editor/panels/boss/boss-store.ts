@@ -5,6 +5,11 @@ import type {
 	BossShort,
 	BossTranscriptSegment,
 } from "@/long-to-short/api";
+import {
+	EXPORT_PLATFORM_PRESET_IDS,
+	type ExportPlatformPresetId,
+	isExportPlatformPresetId,
+} from "@/export/presets";
 
 export const BOSS_VIDEO_ACCEPT =
 	".mp4,.mov,.mkv,.webm,video/mp4,video/quicktime,video/x-matroska,video/webm";
@@ -50,6 +55,9 @@ export interface BossSettings extends BossPlanningSettings {
 	shortsFolderName: string;
 	startOffsetSeconds: number;
 	endOffsetSeconds: number;
+	/** Target social platform for generated shorts. Drives project.targetAspect
+	 * and the default export preset. */
+	targetPlatform: ExportPlatformPresetId;
 }
 
 export interface BossPlannedCuts {
@@ -71,7 +79,10 @@ export const DEFAULT_BOSS_SETTINGS: BossSettings = {
 	shortsFolderName: DEFAULT_BOSS_SHORTS_FOLDER_NAME,
 	startOffsetSeconds: 0,
 	endOffsetSeconds: 0,
+	targetPlatform: "tiktok-shorts",
 };
+
+export { EXPORT_PLATFORM_PRESET_IDS };
 
 interface BossStore {
 	step: BossStep;
@@ -190,6 +201,9 @@ function normalizeBossSettings(settings: Partial<BossSettings>): BossSettings {
 		shortsFolderName: next.shortsFolderName,
 		startOffsetSeconds,
 		endOffsetSeconds,
+		targetPlatform: isExportPlatformPresetId(String(next.targetPlatform))
+			? (next.targetPlatform as ExportPlatformPresetId)
+			: DEFAULT_BOSS_SETTINGS.targetPlatform,
 	};
 }
 
