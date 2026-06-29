@@ -13,6 +13,8 @@ import {
 import type {
 	MediaAssetData,
 	MediaAssetSource,
+	ProjectSnapshotRecord,
+	ProjectSnapshotSource,
 	SessionViewStateRecord,
 	StorageConfig,
 	SerializedProject,
@@ -89,6 +91,7 @@ class StorageService {
 	private projectsAdapter: IndexedDBAdapter<SerializedProject>;
 	private savedSoundsAdapter: IndexedDBAdapter<SavedSoundsData>;
 	private sessionViewStateAdapter: IndexedDBAdapter<SessionViewStateRecord>;
+	private snapshotsAdapter: IndexedDBAdapter<ProjectSnapshotRecord>;
 	private config: StorageConfig;
 	private migrationsPromise: Promise<void> | null = null;
 
@@ -115,6 +118,12 @@ class StorageService {
 		this.sessionViewStateAdapter = new IndexedDBAdapter<SessionViewStateRecord>({
 			dbName: `${this.config.projectsDb}-session-view`,
 			storeName: "session-view-state",
+			version: this.config.version,
+		});
+
+		this.snapshotsAdapter = new IndexedDBAdapter<ProjectSnapshotRecord>({
+			dbName: `${this.config.projectsDb}-snapshots`,
+			storeName: "project-snapshots",
 			version: this.config.version,
 		});
 	}
@@ -311,6 +320,110 @@ class StorageService {
 		await this.sessionViewStateAdapter.remove(projectId);
 	}
 
+	private serializeProjectForSnapshot({
+		project,
+	}: {
+		project: TProject;
+	}): SerializedProject {
+		const duration =
+			project.metadata.duration ??
+			getProjectDurationFromScenes({ scenes: project.scenes });
+		const serializedScenes: SerializedScene[] = project.scenes.map((scene) => ({
+			id: scene.id,
+			name: scene.name,
+			isMain: scene.isMain,
+			tracks: this.stripAudioBuffers({ tracks: scene.tracks }),
+			bookmarks: scene.bookmarks,
+			createdAt: scene.createdAt.toISOString(),
+			updatedAt: scene.updatedAt.toISOString(),
+		}));
+		return {
+			metadata: {
+				id: project.metadata.id,
+				name: project.metadata.name,
+				thumbnail: project.metadata.thumbnail,
+				duration,
+				createdAt: project.metadata.createdAt.toISOString(),
+				updatedAt: project.metadata.updatedAt.toISOString(),
+			},
+			scenes: serializedScenes,
+			currentSceneId: project.currentSceneId,
+			settings: project.settings,
+			version: project.version,
+		};
+	}
+
+	async saveProjectSnapshot({
+		project,
+		snapshotId,
+		source,
+		label,
+	}: {
+		project: TProject;
+		snapshotId: string;
+		source: ProjectSnapshotSource;
+		label?: string;
+	}): Promise<ProjectSnapshotRecord> {
+		const record: ProjectSnapshotRecord = {
+			id: `${project.metadata.id}/${snapshotId}`,
+			projectId: project.metadata.id,
+			snapshotId,
+			savedAt: new Date().toISOString(),
+			source,
+			label: label ?? "",
+			author: "",
+			payload: this.serializeProjectForSnapshot({ project }),
+		};
+		await this.snapshotsAdapter.set({ key: record.id, value: record });
+		return record;
+	}
+
+	async listProjectSnapshots({
+		projectId,
+	}: {
+		projectId: string;
+	}): Promise<ProjectSnapshotRecord[]> {
+		const ids = await this.snapshotsAdapter.list();
+		const prefix = `${projectId}/`;
+		const matching = ids.filter((id) => id.startsWith(prefix));
+		const records: ProjectSnapshotRecord[] = [];
+		for (const id of matching) {
+			const record = await this.snapshotsAdapter.get(id);
+			if (record) records.push(record);
+		}
+		return records.sort((a, b) => b.savedAt.localeCompare(a.savedAt));
+	}
+
+	async getLatestProjectSnapshot({
+		projectId,
+	}: {
+		projectId: string;
+	}): Promise<ProjectSnapshotRecord | null> {
+		const list = await this.listProjectSnapshots({ projectId });
+		return list[0] ?? null;
+	}
+
+	async deleteProjectSnapshot({
+		projectId,
+		snapshotId,
+	}: {
+		projectId: string;
+		snapshotId: string;
+	}): Promise<void> {
+		await this.snapshotsAdapter.remove(`${projectId}/${snapshotId}`);
+	}
+
+	async deleteAllProjectSnapshots({
+		projectId,
+	}: {
+		projectId: string;
+	}): Promise<void> {
+		const snapshots = await this.listProjectSnapshots({ projectId });
+		for (const snapshot of snapshots) {
+			await this.snapshotsAdapter.remove(snapshot.id);
+		}
+	}
+
 	async loadAllProjects(): Promise<TProject[]> {
 		const projectIds = await this.projectsAdapter.list();
 		const projects: TProject[] = [];
@@ -371,6 +484,7 @@ class StorageService {
 		await Promise.all([
 			this.projectsAdapter.remove(id),
 			this.deleteSessionViewState({ projectId: id }),
+			this.deleteAllProjectSnapshots({ projectId: id }),
 		]);
 	}
 
@@ -571,6 +685,7 @@ class StorageService {
 		await Promise.all([
 			this.projectsAdapter.clear(),
 			this.sessionViewStateAdapter.clear(),
+			this.snapshotsAdapter.clear(),
 		]);
 		// project-specific media and timelines cleaned up when projects are deleted
 	}

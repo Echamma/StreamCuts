@@ -77,6 +77,25 @@ export interface SessionViewStateRecord {
 	updatedAt: string;
 }
 
+export type ProjectSnapshotSource = "autosave" | "manual";
+
+export interface ProjectSnapshotRecord {
+	/** Composite key: `${projectId}/${snapshotId}` so a single store fans
+	 * across all projects while keeping per-project lookups cheap via prefix
+	 * iteration. */
+	id: string;
+	projectId: string;
+	snapshotId: string;
+	savedAt: string;
+	source: ProjectSnapshotSource;
+	/** User-supplied label for named versions. Empty for autosaves. */
+	label: string;
+	/** Reserved for the multi-user seam — populated by the auth layer when
+	 * accounts ship. Always empty in v1. */
+	author: string;
+	payload: SerializedProject;
+}
+
 export interface StorageConfig {
 	projectsDb: string;
 	mediaDb: string;

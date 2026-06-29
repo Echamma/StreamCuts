@@ -6,6 +6,7 @@ import { MediaManager } from "./managers/media-manager";
 import { RendererManager } from "./managers/renderer-manager";
 import { CommandManager } from "./managers/commands";
 import { SaveManager } from "./managers/save-manager";
+import { SnapshotManager } from "./managers/snapshot-manager";
 import { AudioManager } from "./managers/audio-manager";
 import { SelectionManager } from "./managers/selection-manager";
 import { ClipboardManager } from "./managers/clipboard-manager";
@@ -26,6 +27,7 @@ export class EditorCore {
 	public readonly media: MediaManager;
 	public readonly renderer: RendererManager;
 	public readonly save: SaveManager;
+	public readonly snapshots: SnapshotManager;
 	public readonly audio: AudioManager;
 	public readonly selection: SelectionManager;
 	public readonly clipboard: ClipboardManager;
@@ -44,6 +46,7 @@ export class EditorCore {
 		this.media = new MediaManager(this);
 		this.renderer = new RendererManager(this);
 		this.save = new SaveManager({ editor: this });
+		this.snapshots = new SnapshotManager({ editor: this });
 		this.audio = new AudioManager(this);
 		this.selection = new SelectionManager(this);
 		this.clipboard = new ClipboardManager(this);
@@ -71,6 +74,7 @@ export class EditorCore {
 			}
 		});
 		this.save.start();
+		this.snapshots.start();
 	}
 
 	static getInstance(): EditorCore {
