@@ -109,26 +109,26 @@ describe("applyExportPreset", () => {
 
 describe("findMatchingPreset", () => {
 	test("returns the preset id when options match a preset exactly", () => {
-		const preset = EXPORT_PRESETS["instagram-reels"];
+		const preset = EXPORT_PRESETS["youtube-1080p"];
 		const options: ExportOptions = {
 			format: preset.format,
 			quality: preset.quality,
 			fps: preset.fps,
 			canvasSizeOverride: { width: preset.width, height: preset.height },
 		};
-		expect(findMatchingPreset({ options })).toBe("instagram-reels");
+		expect(findMatchingPreset({ options })).toBe("youtube-1080p");
 	});
 
 	test("returns null when no canvasSizeOverride is set", () => {
 		expect(findMatchingPreset({ options: DEFAULT_EXPORT_OPTIONS })).toBeNull();
 	});
 
-	test("returns null when fps differs", () => {
-		const preset = EXPORT_PRESETS["tiktok-shorts"];
+	test("returns null when fps differs from every preset at the same canvas size", () => {
+		const preset = EXPORT_PRESETS["instagram-square"];
 		const options: ExportOptions = {
 			format: preset.format,
 			quality: preset.quality,
-			fps: { numerator: 60, denominator: 1 },
+			fps: { numerator: 24, denominator: 1 },
 			canvasSizeOverride: { width: preset.width, height: preset.height },
 		};
 		expect(findMatchingPreset({ options })).toBeNull();
@@ -143,5 +143,18 @@ describe("findMatchingPreset", () => {
 			canvasSizeOverride: { width: 720, height: 1280 },
 		};
 		expect(findMatchingPreset({ options })).toBeNull();
+	});
+
+	test("with two identical-spec presets, returns the first one in declaration order", () => {
+		// tiktok-shorts and instagram-reels share identical specs by design; matching
+		// is canonical to the first-declared so the dropdown shows a stable selection.
+		const preset = EXPORT_PRESETS["instagram-reels"];
+		const options: ExportOptions = {
+			format: preset.format,
+			quality: preset.quality,
+			fps: preset.fps,
+			canvasSizeOverride: { width: preset.width, height: preset.height },
+		};
+		expect(findMatchingPreset({ options })).toBe("tiktok-shorts");
 	});
 });
