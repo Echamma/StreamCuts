@@ -16,6 +16,9 @@ export const ANIMATION_PROPERTY_PATHS = [
 	"background.offsetX",
 	"background.offsetY",
 	"background.cornerRadius",
+	"reframe.x",
+	"reframe.y",
+	"reframe.scale",
 ] as const;
 
 export type AnimationPropertyPath = (typeof ANIMATION_PROPERTY_PATHS)[number];
@@ -25,6 +28,7 @@ export type AnimationPath = string;
 
 export const ANIMATION_PROPERTY_GROUPS = {
 	"transform.scale": ["transform.scaleX", "transform.scaleY"],
+	"reframe.center": ["reframe.x", "reframe.y"],
 } as const satisfies Record<string, ReadonlyArray<AnimationPropertyPath>>;
 
 export type AnimationPropertyGroup = keyof typeof ANIMATION_PROPERTY_GROUPS;
