@@ -18,6 +18,7 @@ import {
 	buildTransformFromParams,
 	readBlendModeFromParams,
 	readOpacityFromParams,
+	readReframeFromParams,
 } from "@/rendering";
 import {
 	getTrackTransitionByElements,
@@ -116,6 +117,7 @@ function buildTrackNodes({
 						trimStart: element.trimStart,
 						trimEnd: element.trimEnd,
 						transform: buildTransformFromParams({ params: element.params }),
+						reframe: readReframeFromParams({ params: element.params }),
 						animations: element.animations,
 						opacity: readOpacityFromParams({ params: element.params }),
 						blendMode: readBlendModeFromParams({ params: element.params }),
@@ -134,6 +136,7 @@ function buildTrackNodes({
 						trimStart: element.trimStart,
 						trimEnd: element.trimEnd,
 						transform: buildTransformFromParams({ params: element.params }),
+						reframe: readReframeFromParams({ params: element.params }),
 						animations: element.animations,
 						opacity: readOpacityFromParams({ params: element.params }),
 						blendMode: readBlendModeFromParams({ params: element.params }),
@@ -298,6 +301,7 @@ function buildVideoLikeNode({
 		trimStart: getAssetSourceStartTime({ asset: mediaAsset }) + element.trimStart,
 		trimEnd: element.trimEnd,
 		transform: buildTransformFromParams({ params: element.params }),
+		reframe: readReframeFromParams({ params: element.params }),
 		animations: element.animations,
 		opacity: readOpacityFromParams({ params: element.params }),
 		blendMode: readBlendModeFromParams({ params: element.params }),

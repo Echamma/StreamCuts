@@ -29,6 +29,7 @@ import type {
 	TextureCanvasDrawFn,
 	TextureUploadDescriptor,
 } from "./types";
+import { isReframeIdentity, REFRAME_IDENTITY } from "@/rendering";
 import { DEFAULT_GRAPHIC_SOURCE_SIZE } from "@/graphics";
 import { gpuRenderer } from "../gpu-renderer";
 
@@ -486,18 +487,28 @@ function computeVisualTransform({
 	sourceWidth: number;
 	sourceHeight: number;
 }): QuadTransformDescriptor {
-	const containScale = Math.min(
-		renderer.width / sourceWidth,
-		renderer.height / sourceHeight,
-	);
-	const scaledWidth = sourceWidth * containScale * resolved.transform.scaleX;
-	const scaledHeight = sourceHeight * containScale * resolved.transform.scaleY;
+	const reframe = resolved.reframe ?? REFRAME_IDENTITY;
+	// At identity, fit = contain — preserves legacy letterbox behavior bit-for-bit.
+	// Non-identity reframe switches to cover×zoom so the (x,y) anchor can pan a
+	// cropped region of the source frame into a differently-shaped canvas.
+	const fitScale = isReframeIdentity(reframe)
+		? Math.min(renderer.width / sourceWidth, renderer.height / sourceHeight)
+		: Math.max(renderer.width / sourceWidth, renderer.height / sourceHeight) *
+			reframe.scale;
+	const scaledWidth = sourceWidth * fitScale * resolved.transform.scaleX;
+	const scaledHeight = sourceHeight * fitScale * resolved.transform.scaleY;
 	const absWidth = Math.abs(scaledWidth);
 	const absHeight = Math.abs(scaledHeight);
+	// Pan the source so its normalized anchor (reframe.x, reframe.y) lands at the
+	// canvas center. At identity (0.5, 0.5) this is zero.
+	const reframePanX = (0.5 - reframe.x) * sourceWidth * fitScale;
+	const reframePanY = (0.5 - reframe.y) * sourceHeight * fitScale;
 
 	return {
-		centerX: renderer.width / 2 + resolved.transform.position.x,
-		centerY: renderer.height / 2 + resolved.transform.position.y,
+		centerX:
+			renderer.width / 2 + reframePanX + resolved.transform.position.x,
+		centerY:
+			renderer.height / 2 + reframePanY + resolved.transform.position.y,
 		width: absWidth,
 		height: absHeight,
 		rotationDegrees: resolved.transform.rotate,

@@ -1,5 +1,13 @@
 import type { ParamValues } from "@/params";
 
+export {
+	REFRAME_IDENTITY,
+	isReframeIdentity,
+	readReframeFromParams,
+	type Reframe,
+} from "./reframe";
+export { resolveReframeAtTime } from "./reframe-resolve";
+
 export interface Transform {
 	scaleX: number;
 	scaleY: number;

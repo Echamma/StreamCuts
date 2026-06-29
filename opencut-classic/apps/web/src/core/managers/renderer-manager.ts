@@ -16,6 +16,7 @@ import {
 	TimelineAudioRenderCancelledError,
 } from "@/media/audio";
 import { calculateTotalDuration, type SceneTracks } from "@/timeline";
+import { resolveExportCanvasSize } from "@/project/types";
 import type { MediaAsset } from "@/media/types";
 import { formatTimecode } from "opencut-wasm";
 import { downloadBlob } from "@/utils/browser";
@@ -180,8 +181,10 @@ export class RendererManager {
 			}
 
 			const exportFps = fps ?? activeProject.settings.fps;
-			const canvasSize =
-				canvasSizeOverride ?? activeProject.settings.canvasSize;
+			const canvasSize = resolveExportCanvasSize({
+				project: activeProject,
+				canvasSizeOverride,
+			});
 
 			const shouldIncludeAudio =
 				!!includeAudio && timelineHasAudio({ tracks, mediaAssets });

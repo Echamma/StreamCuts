@@ -18,6 +18,11 @@ import {
 	measureTextElement,
 } from "@/text/measure-element";
 import { resolveColorAtTime, resolveOpacityAtTime } from "@/animation/values";
+import {
+	REFRAME_IDENTITY,
+	isReframeIdentity,
+	resolveReframeAtTime,
+} from "@/rendering";
 import { resolveTransformAtTime } from "@/rendering/animation-values";
 import { videoCache } from "@/services/video-cache/service";
 import type { CanvasRenderer } from "./canvas-renderer";
@@ -169,25 +174,38 @@ function resolveVisualState({
 		animations: params.animations,
 		localTime,
 	});
+	const reframe = params.reframe
+		? resolveReframeAtTime({
+				baseReframe: params.reframe,
+				animations: params.animations,
+				localTime,
+			})
+		: REFRAME_IDENTITY;
 	const opacity = resolveOpacityAtTime({
 		baseOpacity: params.opacity,
 		animations: params.animations,
 		localTime,
 	});
-	const containScale = Math.min(
-		context.renderer.width / sourceWidth,
-		context.renderer.height / sourceHeight,
-	);
+	const fitScale = isReframeIdentity(reframe)
+		? Math.min(
+				context.renderer.width / sourceWidth,
+				context.renderer.height / sourceHeight,
+			)
+		: Math.max(
+				context.renderer.width / sourceWidth,
+				context.renderer.height / sourceHeight,
+			) * reframe.scale;
 	const effectWidth = Math.round(
-		Math.abs(sourceWidth * containScale * transform.scaleX),
+		Math.abs(sourceWidth * fitScale * transform.scaleX),
 	);
 	const effectHeight = Math.round(
-		Math.abs(sourceHeight * containScale * transform.scaleY),
+		Math.abs(sourceHeight * fitScale * transform.scaleY),
 	);
 
 	return {
 		localTime,
 		transform,
+		reframe,
 		opacity,
 		effectPasses: resolveEffectPassGroups({
 			effects: params.effects,
