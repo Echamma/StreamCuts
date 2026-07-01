@@ -1,5 +1,6 @@
 import type { SceneTracks, TimelineTrack } from "@/timeline";
 import type { MediaAsset } from "@/media/types";
+import { getAssetSourceStartTime } from "@/media/asset-source";
 import { RootNode } from "./nodes/root-node";
 import { VideoNode } from "./nodes/video-node";
 import { ImageNode } from "./nodes/image-node";
@@ -9,6 +10,7 @@ import { GraphicNode } from "./nodes/graphic-node";
 import { ColorNode } from "./nodes/color-node";
 import { BlurBackgroundNode } from "./nodes/blur-background-node";
 import { EffectLayerNode } from "./nodes/effect-layer-node";
+import { TransitionNode } from "./nodes/transition-node";
 import type { AnyBaseNode } from "./nodes/base-node";
 import type { TBackground, TCanvasSize } from "@/project/types";
 import { DEFAULT_BACKGROUND_BLUR_INTENSITY } from "@/background/blur";
@@ -16,7 +18,14 @@ import {
 	buildTransformFromParams,
 	readBlendModeFromParams,
 	readOpacityFromParams,
+	readReframeFromParams,
 } from "@/rendering";
+import {
+	getTrackTransitionByElements,
+	getTransitionWindow,
+	transitionRegistry,
+} from "@/transitions";
+import type { ImageElement, VideoElement, VideoTrack } from "@/timeline";
 
 const PREVIEW_MAX_IMAGE_SIZE = 2048;
 
@@ -44,6 +53,18 @@ function buildTrackNodes({
 	const nodes: AnyBaseNode[] = [];
 
 	for (const track of tracks) {
+		if (track.type === "video") {
+			nodes.push(
+				...buildVideoTrackNodes({
+					track,
+					mediaMap,
+					canvasSize,
+					isPreview,
+				}),
+			);
+			continue;
+		}
+
 		const elements = getVisibleSortedElements({ track });
 
 		for (const element of elements) {
@@ -60,50 +81,13 @@ function buildTrackNodes({
 			}
 
 			if (element.type === "video" || element.type === "image") {
-				const mediaAsset = mediaMap.get(element.mediaId);
-				if (!mediaAsset?.file || !mediaAsset?.url) {
-					continue;
-				}
-
-				if (element.type === "video" && mediaAsset.type === "video") {
-					nodes.push(
-						new VideoNode({
-							mediaId: mediaAsset.id,
-							url: mediaAsset.url,
-							file: mediaAsset.file,
-							duration: element.duration,
-							timeOffset: element.startTime,
-							trimStart: element.trimStart,
-							trimEnd: element.trimEnd,
-							retime: element.retime,
-							transform: buildTransformFromParams({ params: element.params }),
-							animations: element.animations,
-							opacity: readOpacityFromParams({ params: element.params }),
-							blendMode: readBlendModeFromParams({ params: element.params }),
-							effects: element.effects ?? [],
-							masks: element.masks ?? [],
-						}),
-					);
-				}
-				if (element.type === "image" && mediaAsset.type === "image") {
-					nodes.push(
-						new ImageNode({
-							url: mediaAsset.url,
-							duration: element.duration,
-							timeOffset: element.startTime,
-							trimStart: element.trimStart,
-							trimEnd: element.trimEnd,
-							transform: buildTransformFromParams({ params: element.params }),
-							animations: element.animations,
-							opacity: readOpacityFromParams({ params: element.params }),
-							blendMode: readBlendModeFromParams({ params: element.params }),
-							effects: element.effects ?? [],
-							masks: element.masks ?? [],
-							...(isPreview && {
-								maxSourceSize: PREVIEW_MAX_IMAGE_SIZE,
-							}),
-						}),
-					);
+				const node = buildVideoLikeNode({
+					element,
+					mediaMap,
+					isPreview,
+				});
+				if (node) {
+					nodes.push(node);
 				}
 			}
 
@@ -133,6 +117,7 @@ function buildTrackNodes({
 						trimStart: element.trimStart,
 						trimEnd: element.trimEnd,
 						transform: buildTransformFromParams({ params: element.params }),
+						reframe: readReframeFromParams({ params: element.params }),
 						animations: element.animations,
 						opacity: readOpacityFromParams({ params: element.params }),
 						blendMode: readBlendModeFromParams({ params: element.params }),
@@ -151,6 +136,7 @@ function buildTrackNodes({
 						trimStart: element.trimStart,
 						trimEnd: element.trimEnd,
 						transform: buildTransformFromParams({ params: element.params }),
+						reframe: readReframeFromParams({ params: element.params }),
 						animations: element.animations,
 						opacity: readOpacityFromParams({ params: element.params }),
 						blendMode: readBlendModeFromParams({ params: element.params }),
@@ -163,6 +149,187 @@ function buildTrackNodes({
 	}
 
 	return nodes;
+}
+
+function buildVideoTrackNodes({
+	track,
+	mediaMap,
+	canvasSize,
+	isPreview,
+}: {
+	track: VideoTrack;
+	mediaMap: Map<string, MediaAsset>;
+	canvasSize: TCanvasSize;
+	isPreview?: boolean;
+}): AnyBaseNode[] {
+	const elements = getVisibleSortedElements({ track });
+	const nodes: AnyBaseNode[] = [];
+
+	for (let index = 0; index < elements.length; index++) {
+		const element = elements[index];
+		const previousElement = elements[index - 1];
+		const nextElement = elements[index + 1];
+		if (element.type !== "video" && element.type !== "image") {
+			continue;
+		}
+
+		let visibleEndTime: number | undefined;
+		let playbackStartTime: number | undefined;
+		let transitionNode: TransitionNode | null = null;
+
+		if (
+			previousElement &&
+			(previousElement.type === "video" || previousElement.type === "image")
+		) {
+			const previousTransition = getTrackTransitionByElements({
+				track,
+				fromElementId: previousElement.id,
+				toElementId: element.id,
+			});
+			const previousDefinition =
+				previousTransition != null
+					? transitionRegistry.get(previousTransition.type)
+					: null;
+
+			if (previousTransition && previousDefinition) {
+				playbackStartTime = getTransitionWindow({
+					transition: previousTransition,
+					cutTime: element.startTime,
+				}).startTime;
+			}
+		}
+
+		if (
+			nextElement &&
+			(nextElement.type === "video" || nextElement.type === "image")
+		) {
+			const transition = getTrackTransitionByElements({
+				track,
+				fromElementId: element.id,
+				toElementId: nextElement.id,
+			});
+			const definition =
+				transition != null ? transitionRegistry.get(transition.type) : null;
+
+			if (transition && definition) {
+				const { startTime } = getTransitionWindow({
+					transition,
+					cutTime: nextElement.startTime,
+				});
+				visibleEndTime = startTime;
+
+				const outgoingNode = buildVideoLikeNode({
+					element,
+					mediaMap,
+					isPreview,
+				});
+				const incomingNode = buildVideoLikeNode({
+					element: nextElement,
+					mediaMap,
+					isPreview,
+					timeOffsetOverride: startTime,
+					durationOverride: transition.duration,
+					playbackStartTimeOverride: startTime,
+				});
+
+				if (
+					outgoingNode &&
+					incomingNode &&
+					(outgoingNode instanceof VideoNode ||
+						outgoingNode instanceof ImageNode) &&
+					(incomingNode instanceof VideoNode ||
+						incomingNode instanceof ImageNode)
+				) {
+					transitionNode = new TransitionNode({
+						timeOffset: startTime,
+						duration: transition.duration,
+						definition,
+						params: transition.params ?? {},
+						outgoingNode,
+						incomingNode,
+					});
+				}
+			}
+		}
+
+		const regularNode = buildVideoLikeNode({
+			element,
+			mediaMap,
+			isPreview,
+			visibleEndTime,
+			playbackStartTimeOverride: playbackStartTime,
+		});
+		if (regularNode) {
+			nodes.push(regularNode);
+		}
+		if (transitionNode) {
+			nodes.push(transitionNode);
+		}
+	}
+
+	return nodes;
+}
+
+function buildVideoLikeNode({
+	element,
+	mediaMap,
+	isPreview,
+	visibleEndTime,
+	timeOffsetOverride,
+	durationOverride,
+	playbackStartTimeOverride,
+}: {
+	element: VideoElement | ImageElement;
+	mediaMap: Map<string, MediaAsset>;
+	isPreview?: boolean;
+	visibleEndTime?: number;
+	timeOffsetOverride?: number;
+	durationOverride?: number;
+	playbackStartTimeOverride?: number;
+}): VideoNode | ImageNode | null {
+	const mediaAsset = mediaMap.get(element.mediaId);
+	if (!mediaAsset?.file || !mediaAsset?.url) {
+		return null;
+	}
+
+	const commonParams = {
+		duration: durationOverride ?? element.duration,
+		timeOffset: timeOffsetOverride ?? element.startTime,
+		playbackStartTime: playbackStartTimeOverride,
+		visibleStartTime: timeOffsetOverride,
+		visibleEndTime,
+		trimStart: getAssetSourceStartTime({ asset: mediaAsset }) + element.trimStart,
+		trimEnd: element.trimEnd,
+		transform: buildTransformFromParams({ params: element.params }),
+		reframe: readReframeFromParams({ params: element.params }),
+		animations: element.animations,
+		opacity: readOpacityFromParams({ params: element.params }),
+		blendMode: readBlendModeFromParams({ params: element.params }),
+		effects: element.effects ?? [],
+		masks: element.masks ?? [],
+	};
+
+	if (element.type === "video" && mediaAsset.type === "video") {
+		return new VideoNode({
+			mediaId: mediaAsset.id,
+			url: mediaAsset.url,
+			file: mediaAsset.file,
+			retime: element.retime,
+			...commonParams,
+		});
+	}
+
+	if (element.type === "image" && mediaAsset.type === "image") {
+		return new ImageNode({
+			url: mediaAsset.url,
+			...(isPreview && {
+				maxSourceSize: PREVIEW_MAX_IMAGE_SIZE,
+			}),
+			...commonParams,
+		});
+	}
+
+	return null;
 }
 
 function buildBlurBackgroundNodes({
@@ -203,7 +370,8 @@ function buildBlurBackgroundNodes({
 				mediaType: mediaAsset.type,
 				duration: element.duration,
 				timeOffset: element.startTime,
-				trimStart: element.trimStart,
+				trimStart:
+					getAssetSourceStartTime({ asset: mediaAsset }) + element.trimStart,
 				trimEnd: element.trimEnd,
 				retime: element.type === "video" ? element.retime : undefined,
 				blurIntensity,

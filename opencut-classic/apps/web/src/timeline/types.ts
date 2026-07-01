@@ -36,6 +36,7 @@ interface BaseTrack {
 export interface VideoTrack extends BaseTrack {
 	type: "video";
 	elements: (VideoElement | ImageElement)[];
+	transitions?: TrackTransition[];
 	muted: boolean;
 	hidden: boolean;
 }
@@ -159,6 +160,16 @@ export interface GraphicElement extends BaseTimelineElement {
 export interface EffectElement extends BaseTimelineElement {
 	type: "effect";
 	effectType: string;
+}
+
+export interface TrackTransition {
+	id: string;
+	type: string;
+	fromElementId: string;
+	toElementId: string;
+	duration: MediaTime;
+	enabled: boolean;
+	params?: ParamValues;
 }
 
 export type ElementUpdatePatch = { params?: Partial<ParamValues> };

@@ -7,6 +7,7 @@ import type {
 	TimelineTrack,
 	TimelineElement,
 	RetimeConfig,
+	VideoTrack,
 } from "@/timeline";
 import { calculateTotalDuration } from "@/timeline";
 import { TimelineDragSource } from "@/timeline/drag-source";
@@ -63,6 +64,11 @@ import type {
 	PlannedElementMove,
 	PlannedTrackCreation,
 } from "@/timeline/group-move";
+import {
+	getAdjacentVideoElements,
+	removeTrackTransition,
+	upsertTrackTransition,
+} from "@/transitions";
 
 export class TimelineManager {
 	private listeners = new Set<() => void>();
@@ -270,6 +276,93 @@ export class TimelineManager {
 			elementId,
 		});
 		this.editor.command.execute({ command });
+	}
+
+	setTransitionToNextClip({
+		trackId,
+		elementId,
+		type,
+	}: {
+		trackId: string;
+		elementId: string;
+		type: string;
+	}): void {
+		const currentTracks = this.editor.scenes.getActiveSceneOrNull()?.tracks;
+		const track = this.getTrackById({ trackId });
+		if (!currentTracks || !track || track.type !== "video") {
+			return;
+		}
+
+		const adjacent = getAdjacentVideoElements({
+			track: track as VideoTrack,
+			elementId,
+		});
+		if (!adjacent) {
+			return;
+		}
+
+		const nextTrack: VideoTrack = {
+			...track,
+			transitions: upsertTrackTransition({
+				track: track as VideoTrack,
+				from: adjacent.from,
+				to: adjacent.to,
+				type,
+			}),
+		};
+		const nextTracks = this.replaceTrack({
+			tracks: currentTracks,
+			trackId,
+			nextTrack,
+		});
+		this.editor.command.execute({
+			command: new TracksSnapshotCommand({
+				before: currentTracks,
+				after: nextTracks,
+			}),
+		});
+	}
+
+	removeTransitionToNextClip({
+		trackId,
+		elementId,
+	}: {
+		trackId: string;
+		elementId: string;
+	}): void {
+		const currentTracks = this.editor.scenes.getActiveSceneOrNull()?.tracks;
+		const track = this.getTrackById({ trackId });
+		if (!currentTracks || !track || track.type !== "video") {
+			return;
+		}
+
+		const adjacent = getAdjacentVideoElements({
+			track: track as VideoTrack,
+			elementId,
+		});
+		if (!adjacent) {
+			return;
+		}
+
+		const nextTrack: VideoTrack = {
+			...track,
+			transitions: removeTrackTransition({
+				track: track as VideoTrack,
+				fromElementId: adjacent.from.id,
+				toElementId: adjacent.to.id,
+			}),
+		};
+		const nextTracks = this.replaceTrack({
+			tracks: currentTracks,
+			trackId,
+			nextTrack,
+		});
+		this.editor.command.execute({
+			command: new TracksSnapshotCommand({
+				before: currentTracks,
+				after: nextTracks,
+			}),
+		});
 	}
 
 	updateElements({
@@ -931,5 +1024,32 @@ export class TimelineManager {
 		this.previewTracks = null;
 		this.editor.scenes.updateSceneTracks({ tracks: newTracks });
 		this.notify();
+	}
+
+	private replaceTrack({
+		tracks,
+		trackId,
+		nextTrack,
+	}: {
+		tracks: SceneTracks;
+		trackId: string;
+		nextTrack: TimelineTrack;
+	}): SceneTracks {
+		if (tracks.main.id === trackId && nextTrack.type === "video") {
+			return {
+				...tracks,
+				main: nextTrack,
+			};
+		}
+
+		return {
+			...tracks,
+			overlay: tracks.overlay.map((track) =>
+				track.id === trackId ? (nextTrack as typeof track) : track,
+			),
+			audio: tracks.audio.map((track) =>
+				track.id === trackId ? (nextTrack as typeof track) : track,
+			),
+		};
 	}
 }

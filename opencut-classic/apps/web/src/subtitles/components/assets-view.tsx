@@ -227,6 +227,7 @@ export function Captions() {
 					audioBlob: chunk.blob,
 					language: selectedLanguage === "auto" ? undefined : selectedLanguage,
 					model: selectedModel,
+					profile: "captions",
 				});
 
 				transcribedChunkCount += 1;

@@ -1,6 +1,6 @@
 import { DEFAULT_NEW_ELEMENT_DURATION } from "@/timeline/creation";
 import type { TTimelineViewState } from "@/project/types";
-import type { BlendMode, Transform } from "@/rendering";
+import { REFRAME_IDENTITY, type BlendMode, type Transform } from "@/rendering";
 import { ZERO_MEDIA_TIME } from "@/wasm";
 import type { TextElement } from "./types";
 
@@ -14,6 +14,8 @@ const defaultTransform: Transform = {
 const defaultOpacity = 1;
 const defaultBlendMode: BlendMode = "normal";
 const defaultVolume = 0;
+
+const defaultReframe = REFRAME_IDENTITY;
 
 const defaultTextLetterSpacing = 0;
 const defaultTextLineHeight = 1.2;
@@ -75,6 +77,7 @@ export const DEFAULTS = {
 		opacity: defaultOpacity,
 		blendMode: defaultBlendMode,
 		volume: defaultVolume,
+		reframe: defaultReframe,
 	},
 	text: {
 		letterSpacing: defaultTextLetterSpacing,

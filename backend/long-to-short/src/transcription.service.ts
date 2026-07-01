@@ -6,10 +6,18 @@ import {
   OnModuleDestroy,
 } from '@nestjs/common'
 import { randomUUID } from 'node:crypto'
-import { ChildProcessWithoutNullStreams, spawn } from 'node:child_process'
-import { existsSync, unlinkSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { ChildProcessWithoutNullStreams, execFile, spawn } from 'node:child_process'
+import ffmpegPath from 'ffmpeg-static'
+import { existsSync, mkdirSync, unlinkSync } from 'node:fs'
+import { extname, join, resolve } from 'node:path'
 import { createInterface } from 'node:readline'
+import { promisify } from 'node:util'
+
+const execFileAsync = promisify(execFile)
+const dataDirectory = resolve(process.cwd(), 'data')
+const transcriptionTempDirectory = join(dataDirectory, 'transcription')
+
+export type TranscriptionProfile = 'captions' | 'longform'
 
 export type TranscriptionWord = {
   word: string
@@ -58,6 +66,29 @@ type PythonWorker = {
   pendingRequests: Map<string, PendingWorkerRequest>
 }
 
+type ResolvedTranscriptionRequest = {
+  language?: string
+  model: string
+  profile: TranscriptionProfile
+  beamSize: number
+  wordTimestamps: boolean
+  batchSize: number
+  device?: TranscriptionDevice
+  computeType?: string
+}
+
+export const TRANSCRIPTION_DEVICES = ['auto', 'cuda', 'cpu'] as const
+export type TranscriptionDevice = (typeof TRANSCRIPTION_DEVICES)[number]
+
+export function isTranscriptionDevice(value: unknown): value is TranscriptionDevice {
+  return typeof value === 'string' && (TRANSCRIPTION_DEVICES as readonly string[]).includes(value)
+}
+
+type PreparedTranscriptionInput = {
+  inputPath: string
+  deleteAfter: boolean
+}
+
 @Injectable()
 export class TranscriptionService implements OnModuleDestroy {
   private readonly logger = new Logger(TranscriptionService.name)
@@ -70,10 +101,11 @@ export class TranscriptionService implements OnModuleDestroy {
     input: {
       language?: string
       model?: string
+      profile?: TranscriptionProfile
     },
   ) {
     if (!file) {
-      throw new BadRequestException('An audio file is required.')
+      throw new BadRequestException('An audio or video file is required.')
     }
 
     try {
@@ -82,6 +114,7 @@ export class TranscriptionService implements OnModuleDestroy {
         originalName: file.originalname,
         language: input.language,
         model: input.model,
+        profile: input.profile ?? 'captions',
         deleteAfter: true,
       })
     } catch (error) {
@@ -101,13 +134,19 @@ export class TranscriptionService implements OnModuleDestroy {
     originalName,
     language,
     model,
+    profile = 'longform',
     deleteAfter = false,
+    device,
+    computeType,
   }: {
     inputPath: string
     originalName: string
     language?: string
     model?: string
+    profile?: TranscriptionProfile
     deleteAfter?: boolean
+    device?: TranscriptionDevice
+    computeType?: string
   }) {
     if (!existsSync(this.scriptPath)) {
       throw new InternalServerErrorException(
@@ -115,20 +154,36 @@ export class TranscriptionService implements OnModuleDestroy {
       )
     }
 
-    const normalizedLanguage = this.normalizeLanguage(language)
-    const normalizedModel = this.normalizeModel(model)
+    const request = this.resolveTranscriptionRequest({
+      language,
+      model,
+      profile,
+      device,
+      computeType,
+    })
+    let preparedInput: PreparedTranscriptionInput | null = null
 
     try {
       this.logger.log(
-        `Starting backend transcription for ${originalName}${normalizedModel ? ` with model "${normalizedModel}"` : ''}.`,
+        `Starting backend transcription for ${originalName} with profile "${request.profile}", model "${request.model}", beam ${request.beamSize}, word timestamps ${request.wordTimestamps}, batch size ${request.batchSize}, device "${request.device ?? 'env-default'}", computeType "${request.computeType ?? 'env-default'}".`,
       )
+
+      preparedInput = await this.prepareInputForTranscription({
+        inputPath,
+        originalName,
+      })
 
       const worker = await this.ensureWorker()
       const payload = await this.sendWorkerRequest(worker, {
         action: 'transcribe',
-        input_path: inputPath,
-        language: normalizedLanguage ?? null,
-        model: normalizedModel ?? null,
+        input_path: preparedInput.inputPath,
+        language: request.language ?? null,
+        model: request.model,
+        beam_size: request.beamSize,
+        word_timestamps: request.wordTimestamps,
+        batch_size: request.batchSize,
+        device: request.device,
+        compute_type: request.computeType,
       })
       const result = this.parseTranscriptionResult(payload)
 
@@ -137,6 +192,9 @@ export class TranscriptionService implements OnModuleDestroy {
       )
       return result
     } finally {
+      if (preparedInput?.deleteAfter) {
+        this.deleteTempFile(preparedInput.inputPath)
+      }
       if (deleteAfter) {
         this.deleteTempFile(inputPath)
       }
@@ -220,8 +278,199 @@ export class TranscriptionService implements OnModuleDestroy {
     return trimmed || undefined
   }
 
+  private normalizeProfile(profile?: string): TranscriptionProfile {
+    return profile === 'captions' ? 'captions' : 'longform'
+  }
+
+  private resolveTranscriptionRequest({
+    language,
+    model,
+    profile,
+    device,
+    computeType,
+  }: {
+    language?: string
+    model?: string
+    profile?: TranscriptionProfile
+    device?: TranscriptionDevice
+    computeType?: string
+  }): ResolvedTranscriptionRequest {
+    const resolvedProfile = this.normalizeProfile(profile)
+
+    return {
+      language: this.normalizeLanguage(language),
+      model:
+        this.normalizeModel(model) ?? this.getProfileDefaultModel(resolvedProfile),
+      profile: resolvedProfile,
+      beamSize: this.getProfileBeamSize(resolvedProfile),
+      wordTimestamps: this.getProfileWordTimestamps(resolvedProfile),
+      batchSize: this.getProfileBatchSize(resolvedProfile),
+      device: device && isTranscriptionDevice(device) ? device : undefined,
+      computeType: typeof computeType === 'string' && computeType.trim()
+        ? computeType.trim()
+        : undefined,
+    }
+  }
+
+  private getProfileDefaultModel(profile: TranscriptionProfile) {
+    if (profile === 'captions') {
+      return this.getStringEnv('FASTER_WHISPER_CAPTION_MODEL') ?? 'small'
+    }
+
+    return (
+      this.getStringEnv('FASTER_WHISPER_LONGFORM_MODEL') ??
+      this.getStringEnv('FASTER_WHISPER_MODEL') ??
+      'medium'
+    )
+  }
+
+  private getProfileBeamSize(profile: TranscriptionProfile) {
+    if (profile === 'captions') {
+      return this.getPositiveIntEnv('FASTER_WHISPER_CAPTION_BEAM_SIZE') ?? 2
+    }
+
+    return (
+      this.getPositiveIntEnv('FASTER_WHISPER_LONGFORM_BEAM_SIZE') ??
+      this.getPositiveIntEnv('FASTER_WHISPER_BEAM_SIZE') ??
+      5
+    )
+  }
+
+  private getProfileWordTimestamps(profile: TranscriptionProfile) {
+    if (profile === 'captions') {
+      return (
+        this.getBooleanEnv('FASTER_WHISPER_CAPTION_WORD_TIMESTAMPS') ?? true
+      )
+    }
+
+    return (
+      this.getBooleanEnv('FASTER_WHISPER_LONGFORM_WORD_TIMESTAMPS') ?? false
+    )
+  }
+
+  private getProfileBatchSize(profile: TranscriptionProfile) {
+    if (profile === 'captions') {
+      return this.getPositiveIntEnv('FASTER_WHISPER_CAPTION_BATCH_SIZE') ?? 1
+    }
+
+    return this.getPositiveIntEnv('FASTER_WHISPER_LONGFORM_BATCH_SIZE') ?? 4
+  }
+
+  private getStringEnv(name: string) {
+    const raw = process.env[name]
+    if (!raw) {
+      return undefined
+    }
+
+    const trimmed = raw.trim()
+    return trimmed || undefined
+  }
+
+  private getPositiveIntEnv(name: string) {
+    const raw = this.getStringEnv(name)
+    if (!raw) {
+      return undefined
+    }
+
+    const value = Number.parseInt(raw, 10)
+    return Number.isInteger(value) && value > 0 ? value : undefined
+  }
+
+  private getBooleanEnv(name: string) {
+    const raw = this.getStringEnv(name)
+    if (!raw) {
+      return undefined
+    }
+
+    if (raw === '1' || raw.toLowerCase() === 'true') {
+      return true
+    }
+
+    if (raw === '0' || raw.toLowerCase() === 'false') {
+      return false
+    }
+
+    return undefined
+  }
+
+  private async prepareInputForTranscription({
+    inputPath,
+    originalName,
+  }: {
+    inputPath: string
+    originalName: string
+  }): Promise<PreparedTranscriptionInput> {
+    const extension = extname(originalName || inputPath).toLowerCase()
+    if (extension === '.wav' || extension === '.wave') {
+      return { inputPath, deleteAfter: false }
+    }
+
+    if (!ffmpegPath) {
+      throw new InternalServerErrorException(
+        'The bundled ffmpeg binary is unavailable. Reinstall backend dependencies.',
+      )
+    }
+
+    mkdirSync(transcriptionTempDirectory, { recursive: true })
+    const outputPath = join(
+      transcriptionTempDirectory,
+      `${randomUUID()}-transcription.wav`,
+    )
+
+    try {
+      const { stderr } = await execFileAsync(
+        ffmpegPath,
+        [
+          '-y',
+          '-i',
+          inputPath,
+          '-vn',
+          '-acodec',
+          'pcm_s16le',
+          '-ar',
+          '16000',
+          '-ac',
+          '1',
+          outputPath,
+        ],
+        { windowsHide: true },
+      )
+
+      if (!existsSync(outputPath)) {
+        throw new InternalServerErrorException(
+          'FFmpeg did not produce a transcription WAV file.',
+        )
+      }
+
+      if (stderr?.trim()) {
+        this.logger.debug(`FFmpeg transcription prep output: ${stderr.trim()}`)
+      }
+
+      return {
+        inputPath: outputPath,
+        deleteAfter: true,
+      }
+    } catch (error) {
+      this.deleteTempFile(outputPath)
+
+      if (error instanceof InternalServerErrorException) {
+        throw error
+      }
+
+      const message =
+        isRecord(error) && typeof error.message === 'string' && error.message.trim()
+          ? error.message.trim()
+          : 'FFmpeg failed to prepare audio for transcription.'
+      throw new InternalServerErrorException(message)
+    }
+  }
+
   private parseTranscriptionResult(payload: unknown): TranscriptionResult {
-    if (!isRecord(payload) || typeof payload.text !== 'string' || typeof payload.language !== 'string') {
+    if (
+      !isRecord(payload) ||
+      typeof payload.text !== 'string' ||
+      typeof payload.language !== 'string'
+    ) {
       throw new InternalServerErrorException(
         'Python transcription returned an invalid payload.',
       )

@@ -3,14 +3,20 @@
 import { useSyncExternalStore } from "react";
 import { generateUUID } from "@/utils/id";
 import type { ParamValues } from "@/params";
+import type { CaptionAnimationConfig } from "./animation/types";
+import { BAKED_CAPTION_PRESETS } from "./animation/presets";
 
 const STORAGE_KEY = "caption-style-presets";
+const SEED_FLAG_KEY = "caption-style-presets-seeded";
 
 export interface CaptionStylePreset {
 	id: string;
 	name: string;
 	// Style params only — excludes content, transform, opacity, blendMode
 	params: Partial<ParamValues>;
+	/** Optional word-by-word animation. When absent, the preset renders as a
+	 * static caption — backwards-compatible with v1 presets. */
+	animation?: CaptionAnimationConfig;
 }
 
 let cachedPresets: CaptionStylePreset[] | null = null;
@@ -113,5 +119,23 @@ export function updateCaptionStylePreset({
 
 export function deleteCaptionStylePreset({ id }: { id: string }): void {
 	writeToStorage({ presets: getSnapshot().filter((p) => p.id !== id) });
+	notify();
+}
+
+/** Seed the six baked presets into the user's preset list on first run.
+ * Idempotent — the seed flag in localStorage prevents re-seeding even if the
+ * user deletes some presets. Safe to call on every app load. */
+export function seedBakedCaptionPresets(): void {
+	if (typeof window === "undefined") return;
+	if (localStorage.getItem(SEED_FLAG_KEY)) return;
+	const existing = getSnapshot();
+	const seeded: CaptionStylePreset[] = BAKED_CAPTION_PRESETS.map((p) => ({
+		id: p.id,
+		name: p.name,
+		params: p.params,
+		animation: p.animation,
+	}));
+	writeToStorage({ presets: [...seeded, ...existing] });
+	localStorage.setItem(SEED_FLAG_KEY, "1");
 	notify();
 }

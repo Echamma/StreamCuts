@@ -12,6 +12,9 @@ import {
 } from "./quota";
 import type {
 	MediaAssetData,
+	MediaAssetSource,
+	ProjectSnapshotRecord,
+	ProjectSnapshotSource,
 	SessionViewStateRecord,
 	StorageConfig,
 	SerializedProject,
@@ -25,6 +28,37 @@ import {
 import type { Bookmark, SceneTracks, TScene } from "@/timeline";
 import { roundMediaTime } from "@/wasm";
 import { measureSpanAsync } from "@/diagnostics/render-perf";
+import { FILE_MEDIA_ASSET_SOURCE } from "@/media/asset-source";
+
+function normalizeMediaAssetSource({
+	source,
+}: {
+	source?: MediaAssetSource;
+}): MediaAssetSource {
+	return source ?? FILE_MEDIA_ASSET_SOURCE;
+}
+
+async function createMediaAssetUrl({
+	file,
+	type,
+}: {
+	file: File;
+	type: MediaAsset["type"];
+}): Promise<string> {
+	if (type === "image" && (!file.type || file.type === "")) {
+		try {
+			const text = await file.text();
+			if (text.trim().startsWith("<svg")) {
+				const svgBlob = new Blob([text], { type: "image/svg+xml" });
+				return URL.createObjectURL(svgBlob);
+			}
+		} catch {
+			// Fall back to the original file object URL below.
+		}
+	}
+
+	return URL.createObjectURL(file);
+}
 
 function normalizeBookmarks({ raw }: { raw: unknown }): Bookmark[] {
 	if (!Array.isArray(raw)) return [];
@@ -57,6 +91,7 @@ class StorageService {
 	private projectsAdapter: IndexedDBAdapter<SerializedProject>;
 	private savedSoundsAdapter: IndexedDBAdapter<SavedSoundsData>;
 	private sessionViewStateAdapter: IndexedDBAdapter<SessionViewStateRecord>;
+	private snapshotsAdapter: IndexedDBAdapter<ProjectSnapshotRecord>;
 	private config: StorageConfig;
 	private migrationsPromise: Promise<void> | null = null;
 
@@ -83,6 +118,12 @@ class StorageService {
 		this.sessionViewStateAdapter = new IndexedDBAdapter<SessionViewStateRecord>({
 			dbName: `${this.config.projectsDb}-session-view`,
 			storeName: "session-view-state",
+			version: this.config.version,
+		});
+
+		this.snapshotsAdapter = new IndexedDBAdapter<ProjectSnapshotRecord>({
+			dbName: `${this.config.projectsDb}-snapshots`,
+			storeName: "project-snapshots",
 			version: this.config.version,
 		});
 	}
@@ -279,6 +320,110 @@ class StorageService {
 		await this.sessionViewStateAdapter.remove(projectId);
 	}
 
+	private serializeProjectForSnapshot({
+		project,
+	}: {
+		project: TProject;
+	}): SerializedProject {
+		const duration =
+			project.metadata.duration ??
+			getProjectDurationFromScenes({ scenes: project.scenes });
+		const serializedScenes: SerializedScene[] = project.scenes.map((scene) => ({
+			id: scene.id,
+			name: scene.name,
+			isMain: scene.isMain,
+			tracks: this.stripAudioBuffers({ tracks: scene.tracks }),
+			bookmarks: scene.bookmarks,
+			createdAt: scene.createdAt.toISOString(),
+			updatedAt: scene.updatedAt.toISOString(),
+		}));
+		return {
+			metadata: {
+				id: project.metadata.id,
+				name: project.metadata.name,
+				thumbnail: project.metadata.thumbnail,
+				duration,
+				createdAt: project.metadata.createdAt.toISOString(),
+				updatedAt: project.metadata.updatedAt.toISOString(),
+			},
+			scenes: serializedScenes,
+			currentSceneId: project.currentSceneId,
+			settings: project.settings,
+			version: project.version,
+		};
+	}
+
+	async saveProjectSnapshot({
+		project,
+		snapshotId,
+		source,
+		label,
+	}: {
+		project: TProject;
+		snapshotId: string;
+		source: ProjectSnapshotSource;
+		label?: string;
+	}): Promise<ProjectSnapshotRecord> {
+		const record: ProjectSnapshotRecord = {
+			id: `${project.metadata.id}/${snapshotId}`,
+			projectId: project.metadata.id,
+			snapshotId,
+			savedAt: new Date().toISOString(),
+			source,
+			label: label ?? "",
+			author: "",
+			payload: this.serializeProjectForSnapshot({ project }),
+		};
+		await this.snapshotsAdapter.set({ key: record.id, value: record });
+		return record;
+	}
+
+	async listProjectSnapshots({
+		projectId,
+	}: {
+		projectId: string;
+	}): Promise<ProjectSnapshotRecord[]> {
+		const ids = await this.snapshotsAdapter.list();
+		const prefix = `${projectId}/`;
+		const matching = ids.filter((id) => id.startsWith(prefix));
+		const records: ProjectSnapshotRecord[] = [];
+		for (const id of matching) {
+			const record = await this.snapshotsAdapter.get(id);
+			if (record) records.push(record);
+		}
+		return records.sort((a, b) => b.savedAt.localeCompare(a.savedAt));
+	}
+
+	async getLatestProjectSnapshot({
+		projectId,
+	}: {
+		projectId: string;
+	}): Promise<ProjectSnapshotRecord | null> {
+		const list = await this.listProjectSnapshots({ projectId });
+		return list[0] ?? null;
+	}
+
+	async deleteProjectSnapshot({
+		projectId,
+		snapshotId,
+	}: {
+		projectId: string;
+		snapshotId: string;
+	}): Promise<void> {
+		await this.snapshotsAdapter.remove(`${projectId}/${snapshotId}`);
+	}
+
+	async deleteAllProjectSnapshots({
+		projectId,
+	}: {
+		projectId: string;
+	}): Promise<void> {
+		const snapshots = await this.listProjectSnapshots({ projectId });
+		for (const snapshot of snapshots) {
+			await this.snapshotsAdapter.remove(snapshot.id);
+		}
+	}
+
 	async loadAllProjects(): Promise<TProject[]> {
 		const projectIds = await this.projectsAdapter.list();
 		const projects: TProject[] = [];
@@ -339,6 +484,7 @@ class StorageService {
 		await Promise.all([
 			this.projectsAdapter.remove(id),
 			this.deleteSessionViewState({ projectId: id }),
+			this.deleteAllProjectSnapshots({ projectId: id }),
 		]);
 	}
 
@@ -351,41 +497,50 @@ class StorageService {
 	}): Promise<void> {
 		const { mediaMetadataAdapter, mediaAssetsAdapter } =
 			this.getProjectMediaAdapters({ projectId });
+		const source = normalizeMediaAssetSource({ source: mediaAsset.source });
 
 		const metadata: MediaAssetData = {
 			id: mediaAsset.id,
 			name: mediaAsset.name,
 			type: mediaAsset.type,
-			size: mediaAsset.file.size,
-			lastModified: mediaAsset.file.lastModified,
+			size: mediaAsset.size,
+			lastModified: mediaAsset.lastModified,
 			width: mediaAsset.width,
 			height: mediaAsset.height,
 			duration: mediaAsset.duration,
+			fps: mediaAsset.fps,
+			hasAudio: mediaAsset.hasAudio,
 			thumbnailUrl: mediaAsset.thumbnailUrl,
 			ephemeral: mediaAsset.ephemeral,
 			socialCopy: mediaAsset.socialCopy,
+			folderId: mediaAsset.folderId,
 			sceneId: mediaAsset.sceneId,
+			source,
 		};
 
 		try {
-			await mediaAssetsAdapter.set({
-				key: mediaAsset.id,
-				value: mediaAsset.file,
-			});
+			if (source.kind === "file") {
+				await mediaAssetsAdapter.set({
+					key: mediaAsset.id,
+					value: mediaAsset.file,
+				});
+			}
 			await mediaMetadataAdapter.set({
 				key: mediaAsset.id,
 				value: metadata,
 			});
 		} catch (error) {
 			try {
-				await mediaAssetsAdapter.remove(mediaAsset.id);
+				if (source.kind === "file") {
+					await mediaAssetsAdapter.remove(mediaAsset.id);
+				}
 			} catch {
 				// Ignore cleanup failures so the original storage error is preserved.
 			}
 
-			if (this.isQuotaExceededError({ error })) {
+			if (source.kind === "file" && this.isQuotaExceededError({ error })) {
 				throw new StorageQuotaExceededError({
-					requiredBytes: mediaAsset.file.size,
+					requiredBytes: mediaAsset.size,
 				});
 			}
 
@@ -403,44 +558,71 @@ class StorageService {
 		const { mediaMetadataAdapter, mediaAssetsAdapter } =
 			this.getProjectMediaAdapters({ projectId });
 
-		const [file, metadata] = await Promise.all([
-			mediaAssetsAdapter.get(id),
+		const [metadata, file] = await Promise.all([
 			mediaMetadataAdapter.get(id),
+			mediaAssetsAdapter.get(id),
 		]);
 
-		if (!file || !metadata) return null;
+		if (!metadata) return null;
 
-		let url: string;
-		if (metadata.type === "image" && (!file.type || file.type === "")) {
-			try {
-				const text = await file.text();
-				if (text.trim().startsWith("<svg")) {
-					const svgBlob = new Blob([text], { type: "image/svg+xml" });
-					url = URL.createObjectURL(svgBlob);
-				} else {
-					url = URL.createObjectURL(file);
-				}
-			} catch {
-				url = URL.createObjectURL(file);
-			}
-		} else {
-			url = URL.createObjectURL(file);
-		}
+		const source = normalizeMediaAssetSource({ source: metadata.source });
+		const resolvedFile =
+			source.kind === "file"
+				? file
+				: await mediaAssetsAdapter.get(source.rootSourceAssetId);
+		if (!resolvedFile) return null;
+
+		const url = await createMediaAssetUrl({
+			file: resolvedFile,
+			type: metadata.type,
+		});
 
 		return {
 			id: metadata.id,
 			name: metadata.name,
 			type: metadata.type,
-			file,
+			size: metadata.size,
+			lastModified: metadata.lastModified,
+			file: resolvedFile,
 			url,
 			width: metadata.width,
 			height: metadata.height,
 			duration: metadata.duration,
+			fps: metadata.fps,
+			hasAudio: metadata.hasAudio,
 			thumbnailUrl: metadata.thumbnailUrl,
 			ephemeral: metadata.ephemeral,
 			socialCopy: metadata.socialCopy,
+			folderId: metadata.folderId,
 			sceneId: metadata.sceneId,
+			source,
 		};
+	}
+
+	/**
+	 * Re-acquire a fresh File handle for a stored media asset straight from
+	 * OPFS. The File snapshots cached on in-memory assets (captured at project
+	 * load) can go stale and throw NotReadableError when read much later, so
+	 * callers that need to read raw bytes on demand should re-fetch here.
+	 */
+	async loadMediaAssetFile({
+		projectId,
+		id,
+	}: {
+		projectId: string;
+		id: string;
+	}): Promise<File | null> {
+		const { mediaMetadataAdapter, mediaAssetsAdapter } =
+			this.getProjectMediaAdapters({ projectId });
+		const metadata = await mediaMetadataAdapter.get(id);
+		if (!metadata) {
+			return null;
+		}
+
+		const source = normalizeMediaAssetSource({ source: metadata.source });
+		return source.kind === "file"
+			? mediaAssetsAdapter.get(id)
+			: mediaAssetsAdapter.get(source.rootSourceAssetId);
 	}
 
 	async loadAllMediaAssets({
@@ -474,9 +656,13 @@ class StorageService {
 	}): Promise<void> {
 		const { mediaMetadataAdapter, mediaAssetsAdapter } =
 			this.getProjectMediaAdapters({ projectId });
+		const metadata = await mediaMetadataAdapter.get(id);
+		const source = normalizeMediaAssetSource({ source: metadata?.source });
 
 		await Promise.all([
-			mediaAssetsAdapter.remove(id),
+			source.kind === "file"
+				? mediaAssetsAdapter.remove(id)
+				: Promise.resolve(),
 			mediaMetadataAdapter.remove(id),
 		]);
 	}
@@ -499,6 +685,7 @@ class StorageService {
 		await Promise.all([
 			this.projectsAdapter.clear(),
 			this.sessionViewStateAdapter.clear(),
+			this.snapshotsAdapter.clear(),
 		]);
 		// project-specific media and timelines cleaned up when projects are deleted
 	}

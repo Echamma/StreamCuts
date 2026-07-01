@@ -27,6 +27,7 @@ export interface ExportOptions {
 	quality: ExportQuality;
 	fps?: FrameRate;
 	includeAudio?: boolean;
+	canvasSizeOverride?: { width: number; height: number };
 	sceneTarget?: ExportSceneTarget;
 	outputTarget?: ExportOutputTarget;
 }

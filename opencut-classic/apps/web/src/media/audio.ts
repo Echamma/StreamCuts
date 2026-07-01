@@ -7,6 +7,10 @@ import type {
 } from "@/timeline";
 import { shouldMaintainPitch } from "@/retime/rate";
 import type { MediaAsset } from "@/media/types";
+import {
+	getAssetSourceStartTime,
+	getWaveformSourceKeyForAsset,
+} from "@/media/asset-source";
 import { applyAudioMasteringToBuffer } from "@/media/audio-mastering";
 import type { AudioCapableElement } from "@/timeline/audio-state";
 import {
@@ -167,12 +171,15 @@ export async function collectAudioElements({
 					audioContext,
 				}).then((audioBuffer) => {
 					if (!audioBuffer) return null;
+					const sourceStartTime = mediaAsset
+						? getAssetSourceStartTime({ asset: mediaAsset })
+						: 0;
 					return {
 						timelineElement: element,
 						buffer: audioBuffer,
 						startTime: element.startTime / TICKS_PER_SECOND,
 						duration: element.duration / TICKS_PER_SECOND,
-						trimStart: element.trimStart / TICKS_PER_SECOND,
+						trimStart: (sourceStartTime + element.trimStart) / TICKS_PER_SECOND,
 						trimEnd: element.trimEnd / TICKS_PER_SECOND,
 						volume: resolveEffectiveAudioGain({
 							element,
@@ -201,7 +208,10 @@ export async function collectAudioElements({
 						buffer: audioBuffer,
 						startTime: element.startTime / TICKS_PER_SECOND,
 						duration: element.duration / TICKS_PER_SECOND,
-						trimStart: element.trimStart / TICKS_PER_SECOND,
+						trimStart:
+							(getAssetSourceStartTime({ asset: mediaAsset }) +
+								element.trimStart) /
+							TICKS_PER_SECOND,
 						trimEnd: element.trimEnd / TICKS_PER_SECOND,
 						volume: resolveEffectiveAudioGain({
 							element,
@@ -469,7 +479,9 @@ function collectMediaAudioSource({
 		file: mediaAsset.file,
 		startTime: element.startTime / TICKS_PER_SECOND,
 		duration: element.duration / TICKS_PER_SECOND,
-		trimStart: element.trimStart / TICKS_PER_SECOND,
+		trimStart:
+			(getAssetSourceStartTime({ asset: mediaAsset }) + element.trimStart) /
+			TICKS_PER_SECOND,
 		trimEnd: element.trimEnd / TICKS_PER_SECOND,
 		volume,
 		retime: element.retime,
@@ -490,11 +502,13 @@ function collectMediaAudioClip({
 	return {
 		timelineElement: element,
 		id: element.id,
-		sourceKey: mediaAsset.id,
+		sourceKey: getWaveformSourceKeyForAsset({ asset: mediaAsset }),
 		file: mediaAsset.file,
 		startTime: element.startTime / TICKS_PER_SECOND,
 		duration: element.duration / TICKS_PER_SECOND,
-		trimStart: element.trimStart / TICKS_PER_SECOND,
+		trimStart:
+			(getAssetSourceStartTime({ asset: mediaAsset }) + element.trimStart) /
+			TICKS_PER_SECOND,
 		trimEnd: element.trimEnd / TICKS_PER_SECOND,
 		volume,
 		muted,

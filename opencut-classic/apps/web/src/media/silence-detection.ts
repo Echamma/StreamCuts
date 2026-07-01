@@ -1,11 +1,14 @@
 import type { SceneTracks } from "@/timeline";
 import type { MediaAsset } from "@/media/types";
+import {
+	getAssetSourceStartTime,
+	getWaveformSourceKeyForAsset,
+} from "@/media/asset-source";
 import { collectAudibleCandidates } from "@/media/audio";
 import { waveformCache } from "@/services/waveform-cache/service";
-import { buildWaveformSourceKey } from "@/media/waveform-summary";
 import { getSourceTimeAtClipTime } from "@/retime";
 import { isRetimableElement, hasMediaId } from "@/timeline";
-import { TICKS_PER_SECOND } from "@/wasm";
+import { roundMediaTime, TICKS_PER_SECOND } from "@/wasm";
 import { calculateTotalDuration } from "@/timeline";
 import type { MediaTime } from "@/wasm";
 
@@ -45,7 +48,7 @@ export async function detectSilentRanges({
 	await Promise.all(
 		candidates.map(async ({ element, mediaAsset }) => {
 			if (!hasMediaId(element) || !mediaAsset) return;
-			const sourceKey = buildWaveformSourceKey({ kind: "media", id: mediaAsset.id });
+			const sourceKey = getWaveformSourceKeyForAsset({ asset: mediaAsset });
 			if (waveformMap.has(sourceKey)) return;
 			try {
 				const summary = await waveformCache.getSourceSummary({
@@ -71,7 +74,10 @@ export async function detectSilentRanges({
 	for (const { element, mediaAsset } of candidates) {
 		const eStartSecs = element.startTime / TICKS_PER_SECOND;
 		const eEndSecs = (element.startTime + element.duration) / TICKS_PER_SECOND;
-		const trimStartSecs = element.trimStart / TICKS_PER_SECOND;
+		const trimStartSecs =
+			((mediaAsset ? getAssetSourceStartTime({ asset: mediaAsset }) : 0) +
+				element.trimStart) /
+			TICKS_PER_SECOND;
 		const retime = isRetimableElement(element) ? element.retime : undefined;
 
 		const startSlot = Math.max(0, Math.floor(eStartSecs / GRID_RESOLUTION_SECONDS));
@@ -79,7 +85,7 @@ export async function detectSilentRanges({
 
 		const sourceKey =
 			hasMediaId(element) && mediaAsset
-				? buildWaveformSourceKey({ kind: "media", id: mediaAsset.id })
+				? getWaveformSourceKeyForAsset({ asset: mediaAsset })
 				: null;
 		const summary = sourceKey ? waveformMap.get(sourceKey) : undefined;
 
@@ -128,12 +134,12 @@ export async function detectSilentRanges({
 				const len = slot - silenceStart;
 				if (len >= minSlots) {
 					silentRanges.push({
-						start: Math.round(
-							silenceStart * GRID_RESOLUTION_SECONDS * TICKS_PER_SECOND,
-						) as MediaTime,
-						end: Math.round(
-							slot * GRID_RESOLUTION_SECONDS * TICKS_PER_SECOND,
-						) as MediaTime,
+						start: roundMediaTime({
+							time: silenceStart * GRID_RESOLUTION_SECONDS * TICKS_PER_SECOND,
+						}),
+						end: roundMediaTime({
+							time: slot * GRID_RESOLUTION_SECONDS * TICKS_PER_SECOND,
+						}),
 					});
 				}
 				silenceStart = null;

@@ -18,6 +18,11 @@ import {
 	measureTextElement,
 } from "@/text/measure-element";
 import { resolveColorAtTime, resolveOpacityAtTime } from "@/animation/values";
+import {
+	REFRAME_IDENTITY,
+	isReframeIdentity,
+	resolveReframeAtTime,
+} from "@/rendering";
 import { resolveTransformAtTime } from "@/rendering/animation-values";
 import { videoCache } from "@/services/video-cache/service";
 import type { CanvasRenderer } from "./canvas-renderer";
@@ -38,6 +43,10 @@ import {
 import { ImageNode, loadImageSource } from "./nodes/image-node";
 import { StickerNode, loadStickerSource } from "./nodes/sticker-node";
 import { TextNode, type ResolvedTextNodeState } from "./nodes/text-node";
+import {
+	TransitionNode,
+	type ResolvedTransitionNodeState,
+} from "./nodes/transition-node";
 import { VideoNode } from "./nodes/video-node";
 import type {
 	ResolvedVisualNodeState,
@@ -85,6 +94,8 @@ async function resolveNode({
 		node.resolved = resolveGraphicNode({ node, context });
 	} else if (node instanceof TextNode) {
 		node.resolved = resolveTextNode({ node, context });
+	} else if (node instanceof TransitionNode) {
+		node.resolved = await resolveTransitionNode({ node, context });
 	} else if (node instanceof BlurBackgroundNode) {
 		node.resolved = await resolveBlurBackgroundNode({ node, context });
 	} else if (node instanceof EffectLayerNode) {
@@ -139,14 +150,23 @@ function resolveVisualState({
 	sourceWidth: number;
 	sourceHeight: number;
 }): ResolvedVisualNodeState | null {
-	const clipTime = context.time - params.timeOffset;
+	if (
+		(params.visibleStartTime != null &&
+			context.time < params.visibleStartTime) ||
+		(params.visibleEndTime != null && context.time >= params.visibleEndTime)
+	) {
+		return null;
+	}
+
+	const playbackStartTime = params.playbackStartTime ?? params.timeOffset;
+	const clipTime = context.time - playbackStartTime;
 	if (clipTime < 0 || clipTime >= params.duration) {
 		return null;
 	}
 
 	const localTime = getElementLocalTime({
 		timelineTime: context.time,
-		elementStartTime: params.timeOffset,
+		elementStartTime: playbackStartTime,
 		elementDuration: params.duration,
 	});
 	const transform = resolveTransformAtTime({
@@ -154,25 +174,38 @@ function resolveVisualState({
 		animations: params.animations,
 		localTime,
 	});
+	const reframe = params.reframe
+		? resolveReframeAtTime({
+				baseReframe: params.reframe,
+				animations: params.animations,
+				localTime,
+			})
+		: REFRAME_IDENTITY;
 	const opacity = resolveOpacityAtTime({
 		baseOpacity: params.opacity,
 		animations: params.animations,
 		localTime,
 	});
-	const containScale = Math.min(
-		context.renderer.width / sourceWidth,
-		context.renderer.height / sourceHeight,
-	);
+	const fitScale = isReframeIdentity(reframe)
+		? Math.min(
+				context.renderer.width / sourceWidth,
+				context.renderer.height / sourceHeight,
+			)
+		: Math.max(
+				context.renderer.width / sourceWidth,
+				context.renderer.height / sourceHeight,
+			) * reframe.scale;
 	const effectWidth = Math.round(
-		Math.abs(sourceWidth * containScale * transform.scaleX),
+		Math.abs(sourceWidth * fitScale * transform.scaleX),
 	);
 	const effectHeight = Math.round(
-		Math.abs(sourceHeight * containScale * transform.scaleY),
+		Math.abs(sourceHeight * fitScale * transform.scaleY),
 	);
 
 	return {
 		localTime,
 		transform,
+		reframe,
 		opacity,
 		effectPasses: resolveEffectPassGroups({
 			effects: params.effects,
@@ -191,7 +224,23 @@ async function resolveVideoNode({
 	node: VideoNode;
 	context: ResolveContext;
 }): Promise<ResolvedVisualSourceNodeState | null> {
-	const clipTime = context.time - node.params.timeOffset;
+	return resolveVisualSourceNode({ node, context });
+}
+
+async function resolveVisualSourceNode({
+	node,
+	context,
+}: {
+	node: VideoNode | ImageNode;
+	context: ResolveContext;
+}): Promise<ResolvedVisualSourceNodeState | null> {
+	if (node instanceof ImageNode) {
+		return resolveImageNode({ node, context });
+	}
+
+	const playbackStartTime =
+		node.params.playbackStartTime ?? node.params.timeOffset;
+	const clipTime = context.time - playbackStartTime;
 	if (clipTime < 0 || clipTime >= node.params.duration) {
 		return null;
 	}
@@ -205,7 +254,9 @@ async function resolveVideoNode({
 	const frame = await videoCache.getFrameAt({
 		mediaId: node.params.mediaId,
 		file: node.params.file,
-		time: mediaTimeToSeconds({ time: roundMediaTime({ time: sourceTimeTicks }) }),
+		time: mediaTimeToSeconds({
+			time: roundMediaTime({ time: sourceTimeTicks }),
+		}),
 	});
 	if (!frame) {
 		return null;
@@ -255,6 +306,43 @@ async function resolveImageNode({
 		source: source.source,
 		sourceWidth: source.width,
 		sourceHeight: source.height,
+	};
+}
+
+async function resolveTransitionNode({
+	node,
+	context,
+}: {
+	node: TransitionNode;
+	context: ResolveContext;
+}): Promise<ResolvedTransitionNodeState | null> {
+	const localTime = context.time - node.params.timeOffset;
+	if (localTime < 0 || localTime >= node.params.duration) {
+		return null;
+	}
+
+	const progress = Math.max(0, Math.min(1, localTime / node.params.duration));
+	const [outgoing, incoming] = await Promise.all([
+		resolveVisualSourceNode({
+			node: node.params.outgoingNode,
+			context,
+		}),
+		resolveVisualSourceNode({
+			node: node.params.incomingNode,
+			context,
+		}),
+	]);
+
+	if (!outgoing && !incoming) {
+		return null;
+	}
+
+	return {
+		progress,
+		definition: node.params.definition,
+		params: node.params.params,
+		outgoing,
+		incoming,
 	};
 }
 
@@ -426,7 +514,9 @@ async function resolveBackdropSource({
 		const frame = await videoCache.getFrameAt({
 			mediaId: node.params.mediaId,
 			file: node.params.file,
-			time: mediaTimeToSeconds({ time: roundMediaTime({ time: sourceTimeTicks }) }),
+			time: mediaTimeToSeconds({
+				time: roundMediaTime({ time: sourceTimeTicks }),
+			}),
 		});
 		if (!frame) {
 			return null;

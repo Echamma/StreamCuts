@@ -11,11 +11,18 @@ import { diskStorage, memoryStorage } from "multer";
 import { BossService } from "./boss.service";
 import {
   LongToShortService,
+  DEFAULT_BOSS_PLANNING_SETTINGS,
   getUploadDirectory,
   type BossChapter,
   type BossShort,
   type BossHighlight,
+  type BossPlanningSettings,
 } from "./long-to-short.service";
+import {
+  TRANSCRIPTION_DEVICES,
+  isTranscriptionDevice,
+  type TranscriptionDevice,
+} from "./transcription.service";
 
 const MEDIA_MULTER_OPTIONS = {
   storage: memoryStorage(),
@@ -46,11 +53,36 @@ export class BossController {
   }
 
   @Post("/api/boss/transcribe")
-  bossTranscribe(@Body("jobId") jobId: unknown) {
+  bossTranscribe(@Body() body: unknown) {
+    if (!isRecord(body)) {
+      throw new BadRequestException("Invalid request body.");
+    }
+    const { jobId, device, model, computeType } = body as Record<string, unknown>;
     if (typeof jobId !== "string" || !jobId.trim()) {
       throw new BadRequestException("jobId is required.");
     }
-    return this.longToShortService.bossTranscribe({ jobId: jobId.trim() });
+    let parsedDevice: TranscriptionDevice | undefined;
+    if (device !== undefined && device !== null) {
+      if (!isTranscriptionDevice(device)) {
+        throw new BadRequestException(
+          `device must be one of ${TRANSCRIPTION_DEVICES.join(", ")} when provided.`,
+        );
+      }
+      parsedDevice = device;
+    }
+    const parsedModel =
+      typeof model === "string" && model.trim() ? model.trim() : undefined;
+    const parsedComputeType =
+      typeof computeType === "string" && computeType.trim()
+        ? computeType.trim()
+        : undefined;
+
+    return this.longToShortService.bossTranscribe({
+      jobId: jobId.trim(),
+      device: parsedDevice,
+      model: parsedModel,
+      computeType: parsedComputeType,
+    });
   }
 
   @Post("/api/boss/plan-cuts")
@@ -83,12 +115,16 @@ export class BossController {
           typeof s.text === "string",
       )
       .map((s) => ({ start: s.start, end: s.end, text: s.text }));
+    const parsedSettings = parseBossPlanningSettings(
+      isRecord(body.settings) ? body.settings : undefined,
+    );
 
     return this.longToShortService.bossPlanCuts({
       jobId: jobId.trim(),
       prompt: prompt.trim(),
       segments: parsedSegments,
       durationSeconds: duration,
+      settings: parsedSettings,
     });
   }
 
@@ -321,4 +357,97 @@ export class BossController {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function clampInteger(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, Math.round(value)));
+}
+
+function parseBossPlanningSettings(
+  settings?: Record<string, unknown>,
+): BossPlanningSettings {
+  const minChapters = parseIntegerSetting({
+    value: settings?.minChapters,
+    fallback: DEFAULT_BOSS_PLANNING_SETTINGS.minChapters,
+    min: 1,
+    max: 20,
+    field: "settings.minChapters",
+  });
+  const maxChapters = parseIntegerSetting({
+    value: settings?.maxChapters,
+    fallback: DEFAULT_BOSS_PLANNING_SETTINGS.maxChapters,
+    min: minChapters,
+    max: 20,
+    field: "settings.maxChapters",
+  });
+  const minChapterDurationSeconds = parseIntegerSetting({
+    value: settings?.minChapterDurationSeconds,
+    fallback: DEFAULT_BOSS_PLANNING_SETTINGS.minChapterDurationSeconds,
+    min: 5,
+    max: 3600,
+    field: "settings.minChapterDurationSeconds",
+  });
+  const minShortsPerSegment = parseIntegerSetting({
+    value: settings?.minShortsPerSegment,
+    fallback: DEFAULT_BOSS_PLANNING_SETTINGS.minShortsPerSegment,
+    min: 1,
+    max: 5,
+    field: "settings.minShortsPerSegment",
+  });
+  const maxShortsPerSegment = parseIntegerSetting({
+    value: settings?.maxShortsPerSegment,
+    fallback: DEFAULT_BOSS_PLANNING_SETTINGS.maxShortsPerSegment,
+    min: minShortsPerSegment,
+    max: 5,
+    field: "settings.maxShortsPerSegment",
+  });
+  const minShortDurationSeconds = parseIntegerSetting({
+    value: settings?.minShortDurationSeconds,
+    fallback: DEFAULT_BOSS_PLANNING_SETTINGS.minShortDurationSeconds,
+    min: 5,
+    max: 180,
+    field: "settings.minShortDurationSeconds",
+  });
+  const maxShortDurationSeconds = parseIntegerSetting({
+    value: settings?.maxShortDurationSeconds,
+    fallback: DEFAULT_BOSS_PLANNING_SETTINGS.maxShortDurationSeconds,
+    min: minShortDurationSeconds,
+    max: 180,
+    field: "settings.maxShortDurationSeconds",
+  });
+
+  return {
+    minChapters,
+    maxChapters,
+    minChapterDurationSeconds,
+    minShortsPerSegment,
+    maxShortsPerSegment,
+    minShortDurationSeconds,
+    maxShortDurationSeconds,
+  };
+}
+
+function parseIntegerSetting({
+  value,
+  fallback,
+  min,
+  max,
+  field,
+}: {
+  value: unknown;
+  fallback: number;
+  min: number;
+  max: number;
+  field: string;
+}) {
+  if (value === undefined) {
+    return fallback;
+  }
+
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    throw new BadRequestException(`${field} must be a number.`);
+  }
+
+  return clampInteger(parsed, min, max);
 }

@@ -21,20 +21,17 @@ import { TIMELINE_ZOOM_MAX } from "@/timeline/scale";
 import { sliderToZoom, zoomToSlider } from "@/timeline/zoom-utils";
 import { ScenesView } from "@/components/editor/scenes-view";
 import { type TActionWithOptionalArgs, invokeAction } from "@/actions";
-import { processMediaAssets } from "@/media/processing";
-import { extractMediaClip } from "@/media/clip-extraction";
-import { getSourceSpanAtClipTime } from "@/retime";
+import { saveTimelineClipToAssets } from "@/media/save-selected-clip";
 import {
 	canToggleSourceAudio,
 	getSourceAudioActionLabel,
 	isSourceAudioSeparated,
 } from "@/timeline/audio-separation";
-import { hasMediaId, isRetimableElement } from "@/timeline";
+import { hasMediaId } from "@/timeline";
 import { cn } from "@/utils/ui";
 import { useTimelineStore } from "@/timeline/timeline-store";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { toast } from "sonner";
-import { TICKS_PER_SECOND } from "@/wasm";
 import {
 	AudioWave01Icon,
 	Bookmark02Icon,
@@ -180,55 +177,19 @@ function ToolbarLeftSection() {
 			return;
 		}
 
-		const element = selectedElement.element;
-		const startSeconds = element.trimStart / TICKS_PER_SECOND;
-		const durationSeconds = getSourceSpanAtClipTime({
-			clipTime: element.duration / TICKS_PER_SECOND,
-			retime: isRetimableElement(element) ? element.retime : undefined,
-		});
-
-		if (durationSeconds <= 0) {
-			toast.error("The selected clip has no visible duration.");
-			return;
-		}
-
 		setIsSavingSelectionClip(true);
 
 		try {
-			const clipFile = await extractMediaClip({
-				file: selectedMediaAsset.file,
-				kind: element.type === "video" ? "video" : "audio",
-				startSeconds,
-				durationSeconds,
-				baseName: element.name || selectedMediaAsset.name,
-				retimeRate: isRetimableElement(element)
-					? element.retime?.rate
-					: undefined,
-				includeAudio:
-					element.type === "video" && selectedMediaAsset.hasAudio === true,
-			});
-			const processedAssets = await processMediaAssets({ files: [clipFile] });
-			const processedAsset = processedAssets[0];
-
-			if (!processedAsset) {
-				throw new Error("The selected clip could not be processed.");
-			}
-
-			const importedAsset = await editor.media.addMediaAsset({
+			const importedAsset = await saveTimelineClipToAssets({
+				editor,
 				projectId: activeProject.metadata.id,
-				asset: {
-					...processedAsset,
-					socialCopy: selectedMediaAsset.socialCopy,
-				},
+				element: selectedElement.element,
+				mediaAsset: selectedMediaAsset,
 			});
-
-			if (!importedAsset) {
-				throw new Error("The selected clip could not be saved to media.");
-			}
 
 			useAssetsPanelStore.getState().requestRevealMedia(importedAsset.id);
 			toast.success(
-				`${element.name || selectedMediaAsset.name} saved to Assets.`,
+				`${selectedElement.element.name || selectedMediaAsset.name} saved to Assets.`,
 			);
 		} catch (error) {
 			const message =

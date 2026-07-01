@@ -15,6 +15,10 @@ import { ImageNode } from "../nodes/image-node";
 import { RootNode } from "../nodes/root-node";
 import { StickerNode } from "../nodes/sticker-node";
 import { renderTextToContext, TextNode } from "../nodes/text-node";
+import {
+	TransitionNode,
+	type ResolvedTransitionNodeState,
+} from "../nodes/transition-node";
 import { VideoNode } from "../nodes/video-node";
 import type { ResolvedVisualSourceNodeState } from "../nodes/visual-node";
 import type {
@@ -25,7 +29,9 @@ import type {
 	TextureCanvasDrawFn,
 	TextureUploadDescriptor,
 } from "./types";
+import { isReframeIdentity, REFRAME_IDENTITY } from "@/rendering";
 import { DEFAULT_GRAPHIC_SOURCE_SIZE } from "@/graphics";
+import { gpuRenderer } from "../gpu-renderer";
 
 export async function buildFrameDescriptor({
 	node,
@@ -178,6 +184,17 @@ async function collectNode({
 		return;
 	}
 
+	if (node instanceof TransitionNode) {
+		collectTransitionNode({
+			node,
+			renderer,
+			path,
+			items,
+			textures,
+		});
+		return;
+	}
+
 	if (
 		node instanceof VideoNode ||
 		node instanceof ImageNode ||
@@ -203,6 +220,53 @@ async function collectNode({
 			textures,
 		});
 	}
+}
+
+function collectTransitionNode({
+	node,
+	renderer,
+	path,
+	items,
+	textures,
+}: {
+	node: TransitionNode;
+	renderer: CanvasRenderer;
+	path: string;
+	items: FrameItemDescriptor[];
+	textures: Map<string, TextureUploadDescriptor>;
+}) {
+	if (!node.resolved) {
+		return;
+	}
+	const resolved = node.resolved;
+
+	const textureId = `${path}:transition`;
+	const contentHash = `transition:${node.params.definition.type}:${resolved.progress}:${hashTransitionSource(
+		resolved,
+	)}`;
+	textures.set(textureId, {
+		kind: "rendered",
+		id: textureId,
+		contentHash,
+		width: renderer.width,
+		height: renderer.height,
+		draw: (ctx) => {
+			renderTransitionNodeToContext({
+				ctx,
+				renderer,
+				resolved,
+			});
+		},
+	});
+	items.push({
+		type: "layer",
+		textureId,
+		transform: fullCanvasTransform(renderer),
+		opacity: 1,
+		blendMode: "normal",
+		effectPassGroups: [],
+		mask: null,
+	});
 }
 
 async function collectVisualSourceNode({
@@ -324,6 +388,94 @@ function collectTextNode({
 	});
 }
 
+function renderTransitionNodeToContext({
+	ctx,
+	renderer,
+	resolved,
+}: {
+	ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
+	renderer: CanvasRenderer;
+	resolved: ResolvedTransitionNodeState;
+}) {
+	const fromCanvas =
+		resolved.outgoing != null
+			? renderResolvedVisualSourceToCanvas({
+					renderer,
+					resolved: resolved.outgoing,
+				})
+			: null;
+	const toCanvas =
+		resolved.incoming != null
+			? renderResolvedVisualSourceToCanvas({
+					renderer,
+					resolved: resolved.incoming,
+				})
+			: null;
+
+	ctx.clearRect(0, 0, renderer.width, renderer.height);
+	if (!fromCanvas && !toCanvas) {
+		return;
+	}
+	if (!fromCanvas && toCanvas) {
+		ctx.drawImage(toCanvas, 0, 0, renderer.width, renderer.height);
+		return;
+	}
+	if (fromCanvas && !toCanvas) {
+		ctx.drawImage(fromCanvas, 0, 0, renderer.width, renderer.height);
+		return;
+	}
+
+	resolved.definition.render({
+		context: ctx,
+		from: fromCanvas as CanvasImageSource,
+		to: toCanvas as CanvasImageSource,
+		width: renderer.width,
+		height: renderer.height,
+		progress: resolved.progress,
+		params: resolved.params,
+	});
+}
+
+function renderResolvedVisualSourceToCanvas({
+	renderer,
+	resolved,
+}: {
+	renderer: CanvasRenderer;
+	resolved: ResolvedVisualSourceNodeState;
+}): OffscreenCanvas {
+	let canvas = createCanvasSurface({
+		width: renderer.width,
+		height: renderer.height,
+	}).canvas;
+	const context = canvas.getContext("2d");
+	if (!context) {
+		return canvas;
+	}
+
+	const transform = computeVisualTransform({
+		renderer,
+		resolved,
+		sourceWidth: resolved.sourceWidth,
+		sourceHeight: resolved.sourceHeight,
+	});
+	drawTransformedCanvas({
+		ctx: context,
+		source: resolved.source,
+		transform,
+	});
+
+	for (const passes of resolved.effectPasses) {
+		canvas = gpuRenderer.applyEffect({
+			source: canvas,
+			width: renderer.width,
+			height: renderer.height,
+			passes,
+		});
+	}
+
+	return canvas;
+}
+
 function computeVisualTransform({
 	renderer,
 	resolved,
@@ -335,18 +487,28 @@ function computeVisualTransform({
 	sourceWidth: number;
 	sourceHeight: number;
 }): QuadTransformDescriptor {
-	const containScale = Math.min(
-		renderer.width / sourceWidth,
-		renderer.height / sourceHeight,
-	);
-	const scaledWidth = sourceWidth * containScale * resolved.transform.scaleX;
-	const scaledHeight = sourceHeight * containScale * resolved.transform.scaleY;
+	const reframe = resolved.reframe ?? REFRAME_IDENTITY;
+	// At identity, fit = contain — preserves legacy letterbox behavior bit-for-bit.
+	// Non-identity reframe switches to cover×zoom so the (x,y) anchor can pan a
+	// cropped region of the source frame into a differently-shaped canvas.
+	const fitScale = isReframeIdentity(reframe)
+		? Math.min(renderer.width / sourceWidth, renderer.height / sourceHeight)
+		: Math.max(renderer.width / sourceWidth, renderer.height / sourceHeight) *
+			reframe.scale;
+	const scaledWidth = sourceWidth * fitScale * resolved.transform.scaleX;
+	const scaledHeight = sourceHeight * fitScale * resolved.transform.scaleY;
 	const absWidth = Math.abs(scaledWidth);
 	const absHeight = Math.abs(scaledHeight);
+	// Pan the source so its normalized anchor (reframe.x, reframe.y) lands at the
+	// canvas center. At identity (0.5, 0.5) this is zero.
+	const reframePanX = (0.5 - reframe.x) * sourceWidth * fitScale;
+	const reframePanY = (0.5 - reframe.y) * sourceHeight * fitScale;
 
 	return {
-		centerX: renderer.width / 2 + resolved.transform.position.x,
-		centerY: renderer.height / 2 + resolved.transform.position.y,
+		centerX:
+			renderer.width / 2 + reframePanX + resolved.transform.position.x,
+		centerY:
+			renderer.height / 2 + reframePanY + resolved.transform.position.y,
 		width: absWidth,
 		height: absHeight,
 		rotationDegrees: resolved.transform.rotate,
@@ -578,4 +740,11 @@ function identityKey(source: CanvasImageSource): string {
 		return `@${key}`;
 	}
 	return "@?";
+}
+
+function hashTransitionSource(resolved: ResolvedTransitionNodeState): string {
+	return [
+		resolved.outgoing ? identityKey(resolved.outgoing.source) : "none",
+		resolved.incoming ? identityKey(resolved.incoming.source) : "none",
+	].join(":");
 }

@@ -15,6 +15,7 @@ import { SummarizePanel } from "@/components/editor/panels/summarize";
 import { LongToShortView } from "@/components/editor/panels/assets/views/long-to-short";
 import { SocialsView } from "@/components/editor/panels/assets/views/socials";
 import { AudioMixerView } from "@/components/editor/panels/assets/views/audio-mixer";
+import { TransitionsView } from "@/components/editor/panels/assets/views/transitions";
 
 export function AssetsPanel() {
 	const { activeTab } = useAssetsPanelStore();
@@ -26,11 +27,7 @@ export function AssetsPanel() {
 		text: <TextView />,
 		stickers: <StickersView />,
 		effects: <EffectsView />,
-		transitions: (
-			<div className="text-muted-foreground p-4">
-				Transitions view coming soon...
-			</div>
-		),
+		transitions: <TransitionsView />,
 		captions: <Captions />,
 		adjustment: (
 			<div className="text-muted-foreground p-4">

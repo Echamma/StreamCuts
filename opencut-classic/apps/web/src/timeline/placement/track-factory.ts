@@ -82,6 +82,7 @@ export function buildEmptyTrack({
 				name: trackName,
 				type: "video",
 				elements: [],
+				transitions: [],
 				hidden: false,
 				muted: false,
 			};

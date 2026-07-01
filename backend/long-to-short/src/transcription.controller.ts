@@ -12,7 +12,7 @@ import { extname } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { getUploadDirectory } from './long-to-short.service'
 import { isAcceptedAudioOrVideoUpload } from './media-upload'
-import { TranscriptionService } from './transcription.service'
+import { TranscriptionService, type TranscriptionProfile } from './transcription.service'
 
 @Controller()
 export class TranscriptionController {
@@ -46,8 +46,13 @@ export class TranscriptionController {
     @UploadedFile() file: Express.Multer.File,
     @Body('language') language?: string,
     @Body('model') model?: string,
+    @Body('profile') profile?: TranscriptionProfile,
   ) {
-    return this.transcriptionService.transcribeMedia(file, { language, model })
+    return this.transcriptionService.transcribeMedia(file, {
+      language,
+      model,
+      profile,
+    })
   }
 
   @Post('/api/transcription/models/status')

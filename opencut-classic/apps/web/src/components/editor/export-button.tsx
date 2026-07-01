@@ -24,16 +24,32 @@ import {
 	EXPORT_FORMAT_VALUES,
 	EXPORT_QUALITY_VALUES,
 	type ExportFormat,
+	type ExportOptions,
 	type ExportOutputTarget,
 	type ExportQuality,
 	type ExportSceneTarget,
 } from "@/export";
+import {
+	EXPORT_PLATFORM_PRESET_IDS,
+	EXPORT_PRESETS,
+	applyExportPreset,
+	getExportPreset,
+	isExportPlatformPresetId,
+	type ExportPresetId,
+} from "@/export/presets";
 import {
 	Section,
 	SectionContent,
 	SectionHeader,
 	SectionTitle,
 } from "@/components/section";
+import {
+	Select,
+	SelectContent,
+	SelectItem,
+	SelectTrigger,
+	SelectValue,
+} from "@/components/ui/select";
 import { useEditor } from "@/editor/use-editor";
 import { DEFAULT_EXPORT_OPTIONS } from "@/export/defaults";
 
@@ -200,6 +216,22 @@ function ExportPopover({
 	const [sceneTarget, setSceneTarget] = useState<ExportSceneTarget>({
 		mode: "current",
 	});
+	const [presetId, setPresetId] = useState<ExportPresetId>(() => {
+		const targetAspect = activeProject?.settings.targetAspect;
+		if (targetAspect === "9:16") return "tiktok-shorts";
+		if (targetAspect === "1:1") return "instagram-square";
+		if (targetAspect === "4:5") return "instagram-portrait";
+		if (targetAspect === "16:9") return "youtube-1080p";
+		return "custom";
+	});
+
+	const handlePresetChange = (next: ExportPresetId) => {
+		setPresetId(next);
+		if (next === "custom") return;
+		const preset = getExportPreset({ id: next });
+		setFormat(preset.format);
+		setQuality(preset.quality);
+	};
 
 	const handleExport = async () => {
 		if (!activeProject) return;
@@ -219,15 +251,24 @@ function ExportPopover({
 				return;
 			}
 
+			const baseOptions: ExportOptions = {
+				format,
+				quality,
+				fps: activeProject.settings.fps,
+				includeAudio: shouldIncludeAudio,
+				sceneTarget,
+				outputTarget,
+			};
+			const exportOptions =
+				presetId !== "custom" && isExportPlatformPresetId(presetId)
+					? applyExportPreset({
+							preset: getExportPreset({ id: presetId }),
+							options: baseOptions,
+						})
+					: baseOptions;
+
 			const result = await editor.project.export({
-				options: {
-					format,
-					quality,
-					fps: activeProject.settings.fps,
-					includeAudio: shouldIncludeAudio,
-					sceneTarget,
-					outputTarget,
-				},
+				options: exportOptions,
 			});
 
 			if (result.cancelled) {
@@ -285,8 +326,47 @@ function ExportPopover({
 								<div className="flex flex-col">
 									<Section
 										collapsible
-										defaultOpen={false}
+										defaultOpen={true}
 										showTopBorder={false}
+									>
+										<SectionHeader>
+											<SectionTitle>Preset</SectionTitle>
+										</SectionHeader>
+										<SectionContent>
+											<Select
+												value={presetId}
+												onValueChange={(value) => {
+													if (value === "custom" || isExportPlatformPresetId(value)) {
+														handlePresetChange(value as ExportPresetId);
+													}
+												}}
+											>
+												<SelectTrigger className="w-full">
+													<SelectValue />
+												</SelectTrigger>
+												<SelectContent>
+													<SelectItem value="custom">Custom</SelectItem>
+													{EXPORT_PLATFORM_PRESET_IDS.map((id) => {
+														const preset = EXPORT_PRESETS[id];
+														return (
+															<SelectItem key={id} value={id}>
+																<div className="flex flex-col items-start">
+																	<span>{preset.name}</span>
+																	<span className="text-muted-foreground text-xs">
+																		{preset.description}
+																	</span>
+																</div>
+															</SelectItem>
+														);
+													})}
+												</SelectContent>
+											</Select>
+										</SectionContent>
+									</Section>
+
+									<Section
+										collapsible
+										defaultOpen={false}
 									>
 										<SectionHeader>
 											<SectionTitle>Format</SectionTitle>
