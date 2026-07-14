@@ -21,6 +21,7 @@ clip source → clip gain (existing, keyframed)
 
 | ID | Resolve feature | Status | StreamCuts anchor | Proposed approach | Feasibility | Effort | Phase |
 |---|---|---|---|---|---|---|---|
+<!-- 2026-07-14 audit: FAIR-001 is more built than "greenfield" implied — a per-track + per-element volume(dB)/mute mixer already ships in components/editor/panels/assets/views/audio-mixer.tsx, driven by resolveEffectiveAudioGain in timeline/audio-state.ts. Track SOLO added 2026-07-14 (timeline/audio-solo.ts routes playback + export gates through one helper; ToggleTrackSoloCommand; S button in the mixer). Genuine remaining gaps: pan (FAIR-002), meters (FAIR-007). -->
 | FAIR-001 | Mixer with channel strips (gain/mute/solo per track + master) | MISSING | `core/managers/audio-manager.ts` (insertion); dormant `audio-mixer` tab | Design note above; mixer UI = the Audio page's primary bottom/right surface with vertical strips | browser-native | L | 1 |
 | FAIR-002 | Pan (clip + track, automatable) | MISSING | same | `StereoPannerNode` per strip; pan param registered keyframable | browser-native | S | 1 |
 | FAIR-003 | Clip fade handles & audio crossfades | MISSING | element trim handles in `timeline/controllers/`; visual transitions exist but no gain envelopes | Fade-in/out handles on audio (and video-with-audio) clips → equal-power gain ramps; crossfade = overlapping fades; **must render identically in export** | browser-native | M | 2 |

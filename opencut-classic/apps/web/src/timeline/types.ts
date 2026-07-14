@@ -38,6 +38,9 @@ export interface VideoTrack extends BaseTrack {
 	elements: (VideoElement | ImageElement)[];
 	transitions?: TrackTransition[];
 	muted: boolean;
+	/** When any audio-capable track is soloed, non-soloed tracks are silenced
+	 * (FAIR-001 mixer solo). Optional/additive — absent means not soloed. */
+	soloed?: boolean;
 	hidden: boolean;
 }
 
@@ -51,6 +54,8 @@ export interface AudioTrack extends BaseTrack {
 	type: "audio";
 	elements: AudioElement[];
 	muted: boolean;
+	/** See VideoTrack.soloed (FAIR-001 mixer solo). */
+	soloed?: boolean;
 }
 
 export interface GraphicTrack extends BaseTrack {

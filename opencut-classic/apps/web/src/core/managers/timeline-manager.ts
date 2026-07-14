@@ -34,6 +34,7 @@ import {
 	AddTrackCommand,
 	RemoveTrackCommand,
 	ToggleTrackMuteCommand,
+	ToggleTrackSoloCommand,
 	ToggleTrackVisibilityCommand,
 	InsertElementCommand,
 	DeleteElementsCommand,
@@ -182,6 +183,11 @@ export class TimelineManager {
 
 	toggleTrackMute({ trackId }: { trackId: string }): void {
 		const command = new ToggleTrackMuteCommand(trackId);
+		this.editor.command.execute({ command });
+	}
+
+	toggleTrackSolo({ trackId }: { trackId: string }): void {
+		const command = new ToggleTrackSoloCommand(trackId);
 		this.editor.command.execute({ command });
 	}
 

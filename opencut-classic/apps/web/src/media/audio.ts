@@ -20,7 +20,7 @@ import {
 } from "@/timeline/audio-state";
 import { doesElementHaveEnabledAudio } from "@/timeline/audio-separation";
 import { canElementHaveAudio, hasMediaId } from "@/timeline/element-utils";
-import { canTrackHaveAudio } from "@/timeline";
+import { anyTrackSoloed, isTrackAudioSilenced } from "@/timeline/audio-solo";
 import { mediaSupportsAudio } from "@/media/media-utils";
 import { getSourceTimeAtClipTime, renderRetimedBuffer } from "@/retime";
 import {
@@ -113,9 +113,10 @@ export function collectAudibleCandidates({
 	const allTracks = [...tracks.overlay, tracks.main, ...tracks.audio];
 	const mediaMap = new Map(mediaAssets.map((a) => [a.id, a]));
 	const candidates: AudibleElementCandidate[] = [];
+	const soloActive = anyTrackSoloed({ tracks });
 
 	for (const track of allTracks) {
-		if (canTrackHaveAudio(track) && track.muted) continue;
+		if (isTrackAudioSilenced({ track, soloActive })) continue;
 
 		for (const element of track.elements) {
 			if (!canElementHaveAudio(element)) continue;
@@ -529,9 +530,10 @@ export async function collectAudioMixSources({
 		mediaAssets.map((asset) => [asset.id, asset]),
 	);
 	const pendingLibrarySources: Array<Promise<AudioMixSource | null>> = [];
+	const soloActive = anyTrackSoloed({ tracks });
 
 	for (const track of orderedTracks) {
-		if (canTrackHaveAudio(track) && track.muted) continue;
+		if (isTrackAudioSilenced({ track, soloActive })) continue;
 
 		for (const element of track.elements) {
 			if (!canElementHaveAudio(element)) continue;
@@ -592,9 +594,10 @@ export async function collectAudioClips({
 		mediaAssets.map((asset) => [asset.id, asset]),
 	);
 	const pendingLibraryClips: Array<Promise<AudioClipSource | null>> = [];
+	const soloActive = anyTrackSoloed({ tracks });
 
 	for (const track of orderedTracks) {
-		const isTrackMuted = canTrackHaveAudio(track) && track.muted;
+		const isTrackMuted = isTrackAudioSilenced({ track, soloActive });
 
 		for (const element of track.elements) {
 			if (!canElementHaveAudio(element)) continue;
