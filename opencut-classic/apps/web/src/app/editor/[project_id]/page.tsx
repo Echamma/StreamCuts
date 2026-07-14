@@ -34,6 +34,10 @@ import {
 	bookmarkNotesPreviewOverlay,
 	getBookmarkPreviewOverlaySource,
 } from "@/timeline/bookmarks/index";
+import {
+	getSafeAreaPreviewOverlaySource,
+	safeAreaPreviewOverlay,
+} from "@/preview/safe-areas";
 import { loadAllUserFonts } from "@/fonts/user-fonts-store";
 
 export default function Editor() {
@@ -96,6 +100,10 @@ function EditorLayout() {
 		overlay: bookmarkNotesPreviewOverlay,
 		overlays,
 	});
+	const showSafeAreas = isPreviewOverlayVisible({
+		overlay: safeAreaPreviewOverlay,
+		overlays,
+	});
 
 	const overlaySource = useMemo(
 		() =>
@@ -104,6 +112,7 @@ function EditorLayout() {
 					getGuidePreviewOverlaySource({
 						guideId: activeGuide,
 					}),
+					getSafeAreaPreviewOverlaySource({ isVisible: showSafeAreas }),
 					activeScene
 						? getBookmarkPreviewOverlaySource({
 								bookmarks: activeScene.bookmarks,
@@ -116,7 +125,7 @@ function EditorLayout() {
 							},
 				],
 			}),
-		[activeGuide, activeScene, currentTime, showBookmarkNotes],
+		[activeGuide, activeScene, currentTime, showBookmarkNotes, showSafeAreas],
 	);
 
 	const overlayControls = useMemo(
