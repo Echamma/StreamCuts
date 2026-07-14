@@ -7,6 +7,10 @@ Monorepo root for the StreamCuts worktree.
 - `opencut-classic/` - the OpenCut frontend and core app
 - `backend/long-to-short/` - the NestJS backend for clip generation and transcription
 
+## Roadmap
+
+The DaVinci-Resolve-class feature integration and UX overhaul roadmap lives in [docs/roadmap/](docs/roadmap/README.md) — feature-by-feature mapping, phased plan, pages-shell UX design, design-token spec, and risk register.
+
 ## Windows launcher
 
 If you want a double-clickable local launcher that starts the backend and opens the app in your browser:
