@@ -133,10 +133,24 @@ export interface ImageElement extends BaseTimelineElement {
 	masks?: Mask[];
 }
 
+/** Per-word timing for a caption element, in element-local seconds
+ * (`0` = the element's own start). Populated from transcription word timings
+ * when available; when absent the renderer falls back to even-split timing.
+ * Structurally identical to `CaptionWord` in `@/subtitles/animation/types`,
+ * kept here to avoid a core→feature import. */
+export interface CaptionWordTiming {
+	text: string;
+	start: number;
+	end: number;
+}
+
 export interface TextElement extends BaseTimelineElement {
 	type: "text";
 	hidden?: boolean;
 	effects?: Effect[];
+	/** Word-by-word caption animation timing (EDIT-012). Optional and additive:
+	 * old elements and manual/imported captions simply lack it. */
+	captionWords?: CaptionWordTiming[];
 }
 
 export interface StickerElement extends BaseTimelineElement {

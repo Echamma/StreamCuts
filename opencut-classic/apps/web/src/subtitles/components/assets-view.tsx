@@ -47,6 +47,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { toast } from "sonner";
 import { CaptionList } from "@/subtitles/components/caption-list";
 import { CaptionStylePanel } from "@/subtitles/components/caption-style-panel";
+import { seedBakedCaptionPresets } from "@/subtitles/caption-style-presets-store";
 
 type ProcessingState =
 	| { status: "idle"; error: string | null; warnings: string[] }
@@ -118,6 +119,12 @@ export function Captions() {
 	const [downloadingModel, setDownloadingModel] = useState<string | null>(null);
 
 	const isProcessing = processing.status === "processing";
+
+	// Seed the built-in caption style presets (Beast, Reels, Hormozi, …) on first
+	// use of the captions workflow. Idempotent — a localStorage flag guards it.
+	useEffect(() => {
+		seedBakedCaptionPresets();
+	}, []);
 
 	useEffect(() => {
 		let cancelled = false;

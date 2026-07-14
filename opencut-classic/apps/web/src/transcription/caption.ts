@@ -117,6 +117,11 @@ function appendWordChunks({
 				text,
 				startTime,
 				duration: Math.max(end - startTime, minDuration),
+				words: current.map((word) => ({
+					text: word.text,
+					start: word.start,
+					end: word.end,
+				})),
 			});
 		}
 

@@ -52,8 +52,19 @@ export interface TranscriptionModel {
 	description: string;
 }
 
+/** A word boundary inside a caption chunk, in absolute timeline seconds. */
+export interface CaptionChunkWord {
+	text: string;
+	start: number;
+	end: number;
+}
+
 export interface CaptionChunk {
 	text: string;
 	startTime: number;
 	duration: number;
+	/** Per-word timings (absolute seconds), when the transcription produced
+	 * word-level boundaries. Used to drive accurate word-by-word caption
+	 * animation; absent for estimated chunks and imported subtitle files. */
+	words?: CaptionChunkWord[];
 }
