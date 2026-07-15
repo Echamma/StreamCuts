@@ -16,6 +16,18 @@ export interface Bookmark {
 	duration?: MediaTime;
 }
 
+/** A marker pinned to a single clip (EDIT-005 clip-level markers). `time` is
+ * element-local (0 = the element's own `startTime`), so the marker travels with
+ * the clip when it moves or is trimmed. Optional/additive on every element via
+ * {@link BaseTimelineElement.markers} — old elements simply lack it, so there is
+ * no storage migration. Structurally parallel to the scene-scoped
+ * {@link Bookmark}, kept distinct because its time-base is clip-local. */
+export interface ClipMarker {
+	time: MediaTime;
+	note?: string;
+	color?: string;
+}
+
 export interface TScene {
 	id: string;
 	name: string;
@@ -118,6 +130,9 @@ interface BaseTimelineElement {
 	sourceDuration?: MediaTime;
 	animations?: ElementAnimations;
 	params: ParamValues;
+	/** Clip-level markers (EDIT-005), element-local time. Optional/additive —
+	 * absent on elements that have none, so no migration. See {@link ClipMarker}. */
+	markers?: ClipMarker[];
 }
 
 export interface VideoElement extends BaseTimelineElement {
