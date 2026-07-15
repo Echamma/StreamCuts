@@ -9,7 +9,15 @@ import type {
 	RetimeConfig,
 	VideoTrack,
 } from "@/timeline";
-import { calculateTotalDuration } from "@/timeline";
+import { calculateTotalDuration, isRetimableElement } from "@/timeline";
+import {
+	computeRoll,
+	computeSlide,
+	computeSlip,
+	findLeftAdjacentId,
+	findRightAdjacentId,
+	type TrimClip,
+} from "@/timeline/trim";
 import { TimelineDragSource } from "@/timeline/drag-source";
 import { findTrackInSceneTracks } from "@/timeline/track-element-update";
 import { lastFrameMediaTime, type MediaTime, ZERO_MEDIA_TIME } from "@/wasm";
@@ -161,6 +169,158 @@ export class TimelineManager {
 			],
 			pushHistory,
 		});
+	}
+
+	/**
+	 * Slip (EDIT-002): shift which span of the source an element shows without
+	 * moving it on the timeline. `deltaTime` is a clip-space delta; positive
+	 * reveals later source frames. Returns the source-space amount actually
+	 * applied (after clamping to the element's handles), or `null` when nothing
+	 * moved.
+	 */
+	slipElement({
+		trackId,
+		elementId,
+		deltaTime,
+	}: {
+		trackId: string;
+		elementId: string;
+		deltaTime: MediaTime;
+	}): MediaTime | null {
+		const fps = this.editor.project.getActive()?.settings.fps;
+		const element = this.getElementByRef({ trackId, elementId });
+		if (!fps || !element) {
+			return null;
+		}
+
+		const result = computeSlip({
+			clip: this.elementToTrimClip({ element }),
+			requestedDelta: deltaTime,
+			fps,
+		});
+		if (!result) {
+			return null;
+		}
+
+		this.updateElements({
+			updates: [{ trackId, elementId, patch: result.patch }],
+		});
+		return result.appliedSource;
+	}
+
+	/**
+	 * Roll (EDIT-002): move the edit point on one side of an element, trimming it
+	 * and its touching neighbour together so their combined span is unchanged.
+	 * `edge` picks which boundary of `elementId` to roll; positive `deltaTime`
+	 * moves that boundary later. Returns the clip-space amount applied, or `null`
+	 * when there is no adjacent neighbour or nothing moved. Both element patches
+	 * commit as one undoable step.
+	 */
+	rollEdit({
+		trackId,
+		elementId,
+		edge,
+		deltaTime,
+	}: {
+		trackId: string;
+		elementId: string;
+		edge: "left" | "right";
+		deltaTime: MediaTime;
+	}): MediaTime | null {
+		const fps = this.editor.project.getActive()?.settings.fps;
+		const track = this.getTrackById({ trackId });
+		const element = track?.elements.find((el) => el.id === elementId);
+		if (!fps || !track || !element) {
+			return null;
+		}
+
+		const neighbourId =
+			edge === "right"
+				? findRightAdjacentId({ elements: track.elements, elementId })
+				: findLeftAdjacentId({ elements: track.elements, elementId });
+		const neighbour = neighbourId
+			? track.elements.find((el) => el.id === neighbourId)
+			: undefined;
+		if (!neighbour) {
+			return null;
+		}
+
+		const leftElement = edge === "right" ? element : neighbour;
+		const rightElement = edge === "right" ? neighbour : element;
+		const result = computeRoll({
+			left: this.elementToTrimClip({ element: leftElement }),
+			right: this.elementToTrimClip({ element: rightElement }),
+			requestedDelta: deltaTime,
+			fps,
+		});
+		if (!result) {
+			return null;
+		}
+
+		this.updateElements({
+			updates: [
+				{ trackId, elementId: leftElement.id, patch: result.left },
+				{ trackId, elementId: rightElement.id, patch: result.right },
+			],
+		});
+		return result.applied;
+	}
+
+	/**
+	 * Slide (EDIT-002): move an element along the timeline while its two touching
+	 * neighbours absorb the shift, keeping the layout gapless. The slid element
+	 * keeps its own source window. `deltaTime` is a clip-space delta; positive
+	 * slides later. Requires an adjacent neighbour on both sides — returns `null`
+	 * otherwise, or when nothing moved. All three patches commit as one undoable
+	 * step.
+	 */
+	slideElement({
+		trackId,
+		elementId,
+		deltaTime,
+	}: {
+		trackId: string;
+		elementId: string;
+		deltaTime: MediaTime;
+	}): MediaTime | null {
+		const fps = this.editor.project.getActive()?.settings.fps;
+		const track = this.getTrackById({ trackId });
+		const target = track?.elements.find((el) => el.id === elementId);
+		if (!fps || !track || !target) {
+			return null;
+		}
+
+		const leftId = findLeftAdjacentId({ elements: track.elements, elementId });
+		const rightId = findRightAdjacentId({ elements: track.elements, elementId });
+		const leftElement = leftId
+			? track.elements.find((el) => el.id === leftId)
+			: undefined;
+		const rightElement = rightId
+			? track.elements.find((el) => el.id === rightId)
+			: undefined;
+		if (!leftElement || !rightElement) {
+			return null;
+		}
+
+		const result = computeSlide({
+			left: this.elementToTrimClip({ element: leftElement }),
+			target: this.elementToTrimClip({ element: target }),
+			right: this.elementToTrimClip({ element: rightElement }),
+			requestedDelta: deltaTime,
+			fps,
+		});
+		if (!result) {
+			return null;
+		}
+
+		this.updateElements({
+			updates: [
+				{ trackId, elementId: leftElement.id, patch: result.left },
+				{ trackId, elementId, patch: result.target },
+				{ trackId, elementId: rightElement.id, patch: result.right },
+			],
+		});
+		return result.applied;
 	}
 
 	moveElements({
@@ -990,6 +1150,21 @@ export class TimelineManager {
 		return this.getTrackById({ trackId })?.elements.find(
 			(element) => element.id === elementId,
 		);
+	}
+
+	private elementToTrimClip({
+		element,
+	}: {
+		element: TimelineElement;
+	}): TrimClip {
+		return {
+			startTime: element.startTime,
+			duration: element.duration,
+			trimStart: element.trimStart,
+			trimEnd: element.trimEnd,
+			sourceDuration: element.sourceDuration,
+			retime: isRetimableElement(element) ? element.retime : undefined,
+		};
 	}
 
 	private findTrackIdForElement({
