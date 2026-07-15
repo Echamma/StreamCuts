@@ -86,14 +86,20 @@ export function TimelineBookmarksRow({
 			className="relative flex-1 overflow-hidden"
 			style={{ height: TIMELINE_BOOKMARK_ROW_HEIGHT_PX }}
 		>
-			<button
-				className="relative w-full cursor-default select-none border-0 bg-transparent p-0"
+			{/* role="button" div (not a <button>) so the per-bookmark <button>
+			    markers below are not nested inside a button, which is invalid
+			    HTML and triggers React hydration errors. Mirrors the sibling
+			    <TimelineRuler>, which is likewise a keyboard-focusable div with
+			    an empty onKeyDown to satisfy jsx-a11y/click-events-have-key-events. */}
+			<div
+				className="relative w-full cursor-default select-none"
 				style={{
 					height: TIMELINE_BOOKMARK_ROW_HEIGHT_PX,
 					width: `${dynamicTimelineWidth}px`,
 				}}
+				role="button"
+				tabIndex={0}
 				aria-label="Timeline ruler"
-				type="button"
 				onWheel={handleWheel}
 				onClick={(event) => {
 					if (!event.currentTarget.contains(event.target as Node)) return;
@@ -104,6 +110,7 @@ export function TimelineBookmarksRow({
 					handleRulerMouseDown(event);
 					handleRulerTrackingMouseDown(event);
 				}}
+				onKeyDown={() => {}}
 			>
 				{bookmarks.map((bookmark) => (
 					<TimelineBookmark
@@ -114,7 +121,7 @@ export function TimelineBookmarksRow({
 						onBookmarkMouseDown={onBookmarkMouseDown}
 					/>
 				))}
-			</button>
+			</div>
 		</div>
 	);
 }
