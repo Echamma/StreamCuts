@@ -5,6 +5,8 @@ import {
 	getElementVolume,
 	isElementMuted,
 } from "@/timeline/audio-state";
+import { anyTrackSoloed, isTrackAudioSilenced } from "@/timeline/audio-solo";
+import { getElementPan, PAN_MAX, PAN_MIN } from "@/timeline/audio-pan";
 import { VOLUME_DB_MIN, VOLUME_DB_MAX } from "@/timeline/audio-constants";
 import { PanelView } from "./base-panel";
 import { Button } from "@/components/ui/button";
@@ -13,12 +15,7 @@ import { Separator } from "@/components/ui/separator";
 import { VolumeHighIcon, VolumeOffIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { cn } from "@/utils/ui";
-import type {
-	AudioElement,
-	AudioTrack,
-	VideoElement,
-	VideoTrack,
-} from "@/timeline";
+import type { AudioElement, VideoElement, VideoTrack } from "@/timeline";
 
 function dbToSlider(db: number): number {
 	return ((db - VOLUME_DB_MIN) / (VOLUME_DB_MAX - VOLUME_DB_MIN)) * 100;
@@ -31,6 +28,20 @@ function sliderToDb(val: number): number {
 function formatDb(db: number): string {
 	if (db <= VOLUME_DB_MIN) return "-∞";
 	return `${db >= 0 ? "+" : ""}${db.toFixed(1)} dB`;
+}
+
+function panToSlider(pan: number): number {
+	return ((pan - PAN_MIN) / (PAN_MAX - PAN_MIN)) * 100;
+}
+
+function sliderToPan(value: number): number {
+	return PAN_MIN + (value / 100) * (PAN_MAX - PAN_MIN);
+}
+
+function formatPan(pan: number): string {
+	if (Math.abs(pan) < 0.005) return "C";
+	const magnitude = Math.round(Math.abs(pan) * 100);
+	return pan < 0 ? `L${magnitude}` : `R${magnitude}`;
 }
 
 export function AudioMixerView() {
@@ -58,6 +69,7 @@ export function AudioMixerView() {
 	);
 
 	const audioTracks = tracks.audio.filter((t) => t.elements.length > 0);
+	const soloActive = anyTrackSoloed({ tracks });
 
 	const hasAny =
 		mainVideoElements.length > 0 ||
@@ -97,8 +109,12 @@ export function AudioMixerView() {
 							label="Video"
 							trackId={tracks.main.id}
 							trackMuted={tracks.main.muted}
+							trackSoloed={tracks.main.soloed ?? false}
 							onToggleTrackMute={() =>
 								editor.timeline.toggleTrackMute({ trackId: tracks.main.id })
+							}
+							onToggleTrackSolo={() =>
+								editor.timeline.toggleTrackSolo({ trackId: tracks.main.id })
 							}
 						>
 							{mainVideoElements.map((el) => (
@@ -106,7 +122,10 @@ export function AudioMixerView() {
 									key={el.id}
 									element={el}
 									trackId={tracks.main.id}
-									trackMuted={tracks.main.muted}
+									trackMuted={isTrackAudioSilenced({
+										track: tracks.main,
+										soloActive,
+									})}
 								/>
 							))}
 						</TrackSection>
@@ -122,8 +141,14 @@ export function AudioMixerView() {
 									label={overlayTrack.name}
 									trackId={overlayTrack.id}
 									trackMuted={overlayTrack.muted}
+									trackSoloed={overlayTrack.soloed ?? false}
 									onToggleTrackMute={() =>
 										editor.timeline.toggleTrackMute({
+											trackId: overlayTrack.id,
+										})
+									}
+									onToggleTrackSolo={() =>
+										editor.timeline.toggleTrackSolo({
 											trackId: overlayTrack.id,
 										})
 									}
@@ -133,7 +158,10 @@ export function AudioMixerView() {
 											key={el.id}
 											element={el}
 											trackId={overlayTrack.id}
-											trackMuted={overlayTrack.muted}
+											trackMuted={isTrackAudioSilenced({
+												track: overlayTrack,
+												soloActive,
+											})}
 										/>
 									))}
 								</TrackSection>
@@ -150,8 +178,12 @@ export function AudioMixerView() {
 						label={audioTrack.name}
 						trackId={audioTrack.id}
 						trackMuted={audioTrack.muted}
+						trackSoloed={audioTrack.soloed ?? false}
 						onToggleTrackMute={() =>
 							editor.timeline.toggleTrackMute({ trackId: audioTrack.id })
+						}
+						onToggleTrackSolo={() =>
+							editor.timeline.toggleTrackSolo({ trackId: audioTrack.id })
 						}
 					>
 						{audioTrack.elements.map((el) => (
@@ -159,7 +191,10 @@ export function AudioMixerView() {
 								key={el.id}
 								element={el}
 								trackId={audioTrack.id}
-								trackMuted={audioTrack.muted}
+								trackMuted={isTrackAudioSilenced({
+									track: audioTrack,
+									soloActive,
+								})}
 							/>
 						))}
 					</TrackSection>
@@ -172,13 +207,17 @@ export function AudioMixerView() {
 function TrackSection({
 	label,
 	trackMuted,
+	trackSoloed,
 	onToggleTrackMute,
+	onToggleTrackSolo,
 	children,
 }: {
 	label: string;
 	trackId: string;
 	trackMuted: boolean;
+	trackSoloed: boolean;
 	onToggleTrackMute: () => void;
+	onToggleTrackSolo: () => void;
 	children: React.ReactNode;
 }) {
 	return (
@@ -187,18 +226,33 @@ function TrackSection({
 				<span className="text-muted-foreground text-xs font-semibold uppercase tracking-wider">
 					{label}
 				</span>
-				<Button
-					variant={trackMuted ? "secondary" : "ghost"}
-					size="icon"
-					className="size-6"
-					onClick={onToggleTrackMute}
-					title={trackMuted ? "Unmute track" : "Mute track"}
-				>
-					<HugeiconsIcon
-						icon={trackMuted ? VolumeOffIcon : VolumeHighIcon}
-						className="size-3.5"
-					/>
-				</Button>
+				<div className="flex items-center gap-1">
+					<Button
+						variant={trackSoloed ? "secondary" : "ghost"}
+						size="icon"
+						className={cn(
+							"size-6 text-xs font-semibold",
+							trackSoloed && "text-primary",
+						)}
+						onClick={onToggleTrackSolo}
+						title={trackSoloed ? "Unsolo track" : "Solo track"}
+						aria-pressed={trackSoloed}
+					>
+						S
+					</Button>
+					<Button
+						variant={trackMuted ? "secondary" : "ghost"}
+						size="icon"
+						className="size-6"
+						onClick={onToggleTrackMute}
+						title={trackMuted ? "Unmute track" : "Mute track"}
+					>
+						<HugeiconsIcon
+							icon={trackMuted ? VolumeOffIcon : VolumeHighIcon}
+							className="size-3.5"
+						/>
+					</Button>
+				</div>
 			</div>
 			<div className="flex flex-col gap-1.5">{children}</div>
 		</div>
@@ -216,6 +270,7 @@ function ElementMixerRow({
 }) {
 	const editor = useEditor();
 	const volumeDb = getElementVolume({ element });
+	const pan = getElementPan({ element });
 	const muted = isElementMuted({ element });
 	const effectiveMuted = trackMuted || muted;
 
@@ -262,6 +317,27 @@ function ElementMixerRow({
 		});
 	};
 
+	const writePan = ({
+		values,
+		pushHistory,
+	}: {
+		values: number[];
+		pushHistory: boolean;
+	}) => {
+		editor.timeline.updateElements({
+			updates: [
+				{
+					trackId,
+					elementId: element.id,
+					patch: {
+						params: { ...element.params, pan: sliderToPan(values[0]) },
+					},
+				},
+			],
+			pushHistory,
+		});
+	};
+
 	return (
 		<div
 			className={cn(
@@ -303,6 +379,26 @@ function ElementMixerRow({
 				step={0.5}
 				disabled={effectiveMuted}
 			/>
+			<div className="flex items-center gap-2">
+				<span className="text-muted-foreground w-7 shrink-0 text-xs">Pan</span>
+				<Slider
+					value={[panToSlider(pan)]}
+					onValueChange={(values) => writePan({ values, pushHistory: false })}
+					onValueCommit={(values) => writePan({ values, pushHistory: true })}
+					min={0}
+					max={100}
+					step={1}
+					disabled={effectiveMuted}
+				/>
+				<span
+					className={cn(
+						"w-7 shrink-0 text-right font-mono text-xs tabular-nums",
+						effectiveMuted ? "text-muted-foreground" : "text-foreground",
+					)}
+				>
+					{formatPan(pan)}
+				</span>
+			</div>
 		</div>
 	);
 }

@@ -29,10 +29,15 @@ import {
 	useCaptionStylePresets,
 	saveCaptionStylePreset,
 	deleteCaptionStylePreset,
+	type CaptionStylePreset,
 } from "@/subtitles/caption-style-presets-store";
+import { captionAnimationConfigToParams } from "@/subtitles/animation/params";
+import { CAPTION_ANIMATION_MODES } from "@/subtitles/animation/types";
 import { X } from "lucide-react";
 
-// Style-only param keys — excludes content, transform, opacity, blendMode
+// Style-only param keys — excludes content, transform, opacity, blendMode.
+// Includes the caption.* animation keys so "save current style as preset"
+// captures the word-by-word animation too.
 const STYLE_PARAM_KEYS = [
 	"fontFamily",
 	"fontSize",
@@ -48,7 +53,22 @@ const STYLE_PARAM_KEYS = [
 	"background.cornerRadius",
 	"background.paddingX",
 	"background.paddingY",
+	"caption.mode",
+	"caption.highlightColor",
+	"caption.highlightBackground",
+	"caption.peakScale",
+	"caption.peakHoldSeconds",
+	"caption.easeSeconds",
 ] as const;
+
+const CAPTION_MODE_LABELS: Record<string, string> = {
+	none: "None",
+	wordHighlight: "Word Highlight",
+	pop: "Pop",
+	bounce: "Bounce",
+	typewriter: "Typewriter",
+	karaokeLine: "Karaoke",
+};
 
 type StyleParamKey = (typeof STYLE_PARAM_KEYS)[number];
 
@@ -65,7 +85,7 @@ function PresetsBar({
 	onApply,
 }: {
 	currentParams: Partial<ParamValues>;
-	onApply: (params: Partial<ParamValues>) => void;
+	onApply: (preset: CaptionStylePreset) => void;
 }) {
 	const presets = useCaptionStylePresets();
 	const [saving, setSaving] = useState(false);
@@ -99,7 +119,7 @@ function PresetsBar({
 							<button
 								type="button"
 								className="truncate max-w-[100px] text-foreground/80 hover:text-foreground transition-colors"
-								onClick={() => onApply(preset.params)}
+								onClick={() => onApply(preset)}
 								title={`Apply "${preset.name}"`}
 							>
 								{preset.name}
@@ -208,14 +228,23 @@ export function CaptionStylePanel() {
 		});
 	};
 
-	const applyPreset = (params: Partial<ParamValues>) => {
+	const applyPreset = (preset: CaptionStylePreset) => {
 		if (rows.length === 0) return;
+		// A baked preset carries its animation as a typed block; flatten it into
+		// caption.* params so it rides the normal params update path. User-saved
+		// presets already store caption.* inside `params`.
+		const merged: Partial<ParamValues> = {
+			...preset.params,
+			...(preset.animation
+				? captionAnimationConfigToParams({ animation: preset.animation })
+				: {}),
+		};
 		editor.timeline.updateElements({
 			updates: rows.map(({ trackId, elementId }) => ({
 				trackId,
 				elementId,
 				// Cast: updateElements shallow-merges params, so passing a subset is safe
-				patch: { params: params as ParamValues },
+				patch: { params: merged as ParamValues },
 			})),
 		});
 	};
@@ -302,6 +331,9 @@ export function CaptionStylePanel() {
 	if (rows.length === 0) return null;
 
 	const bgEnabled = Boolean(refParams["background.enabled"]);
+	const captionMode = String(refParams["caption.mode"] ?? "none");
+	const usesHighlightColor =
+		captionMode === "wordHighlight" || captionMode === "karaokeLine";
 
 	return (
 		<Section
@@ -318,6 +350,42 @@ export function CaptionStylePanel() {
 				<SectionFields>
 					{/* Presets */}
 					<PresetsBar currentParams={refParams} onApply={applyPreset} />
+
+					{/* Word-by-word animation */}
+					<SectionField label="Animation">
+						<Select
+							value={captionMode}
+							onValueChange={(v) => updateAll("caption.mode", v)}
+						>
+							<SelectTrigger className="w-full">
+								<SelectValue />
+							</SelectTrigger>
+							<SelectContent>
+								{CAPTION_ANIMATION_MODES.map((mode) => (
+									<SelectItem key={mode} value={mode}>
+										{CAPTION_MODE_LABELS[mode] ?? mode}
+									</SelectItem>
+								))}
+							</SelectContent>
+						</Select>
+					</SectionField>
+
+					{usesHighlightColor && (
+						<SectionField label="Highlight">
+							<ColorPicker
+								value={String(refParams["caption.highlightColor"] ?? "#facc15")
+									.replace(/^#/, "")
+									.toUpperCase()}
+								onChange={(color) =>
+									previewAll("caption.highlightColor", `#${color}`)
+								}
+								onChangeEnd={(color) => {
+									previewAll("caption.highlightColor", `#${color}`);
+									commitAll();
+								}}
+							/>
+						</SectionField>
+					)}
 
 					{/* Font family */}
 					<SectionField label="Font Family">

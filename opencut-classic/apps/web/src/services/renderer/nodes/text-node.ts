@@ -2,7 +2,11 @@ import { BaseNode } from "./base-node";
 import type { TextElement } from "@/timeline";
 import type { EffectPass } from "@/effects/types";
 import type { BlendMode, Transform } from "@/rendering";
-import { drawMeasuredTextLayout } from "@/text/primitives";
+import { drawMeasuredTextLayout, drawTextBackgroundLayer } from "@/text/primitives";
+import {
+	drawAnimatedCaptionLayout,
+	type CaptionAnimationRenderState,
+} from "@/text/caption-animation";
 import type { MeasuredTextElement } from "@/text/measure-element";
 
 export type TextNodeParams = TextElement & {
@@ -21,6 +25,9 @@ export interface ResolvedTextNodeState {
 	backgroundColor: string;
 	effectPasses: EffectPass[][];
 	measuredText: MeasuredTextElement;
+	/** Present only when this text element is an animated caption (EDIT-012).
+	 * When set, the node draws its words individually instead of as a block. */
+	captionAnimation?: CaptionAnimationRenderState;
 }
 
 export class TextNode extends BaseNode<TextNodeParams, ResolvedTextNodeState> {}
@@ -48,14 +55,35 @@ export function renderTextToContext({
 		ctx.rotate((resolved.transform.rotate * Math.PI) / 180);
 	}
 
-	drawMeasuredTextLayout({
-		ctx,
-		layout: resolved.measuredText,
-		textColor: resolved.textColor,
-		background: resolved.measuredText.resolvedBackground,
-		backgroundColor: resolved.backgroundColor,
-		textBaseline: baseline,
-	});
+	if (
+		resolved.captionAnimation &&
+		resolved.captionAnimation.config.mode !== "none"
+	) {
+		// Draw the block background once, then paint words individually so the
+		// active word can be recolored/scaled without disturbing layout.
+		drawTextBackgroundLayer({
+			ctx,
+			layout: resolved.measuredText,
+			background: resolved.measuredText.resolvedBackground,
+			backgroundColor: resolved.backgroundColor,
+		});
+		drawAnimatedCaptionLayout({
+			ctx,
+			layout: resolved.measuredText,
+			baseColor: resolved.textColor,
+			state: resolved.captionAnimation,
+			textBaseline: baseline,
+		});
+	} else {
+		drawMeasuredTextLayout({
+			ctx,
+			layout: resolved.measuredText,
+			textColor: resolved.textColor,
+			background: resolved.measuredText.resolvedBackground,
+			backgroundColor: resolved.backgroundColor,
+			textBaseline: baseline,
+		});
+	}
 
 	ctx.restore();
 }

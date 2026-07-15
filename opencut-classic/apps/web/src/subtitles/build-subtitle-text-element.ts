@@ -312,11 +312,20 @@ export function buildSubtitleTextElement({
 		});
 	}
 
+	// Convert absolute word timings to element-local seconds so the renderer can
+	// drive word-by-word caption animation without knowing the element's start.
+	const captionWords = caption.words?.map((word) => ({
+		text: word.text,
+		start: Math.max(0, word.start - caption.startTime),
+		end: Math.max(0, word.end - caption.startTime),
+	}));
+
 	return {
 		...DEFAULTS.text.element,
 		name: `Caption ${index + 1}`,
 		duration: mediaTimeFromSeconds({ seconds: caption.duration }),
 		startTime: mediaTimeFromSeconds({ seconds: caption.startTime }),
+		...(captionWords && captionWords.length > 0 ? { captionWords } : {}),
 		params: {
 			...DEFAULTS.text.element.params,
 			content,

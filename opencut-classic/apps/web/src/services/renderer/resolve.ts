@@ -17,6 +17,8 @@ import {
 	getTextMeasurementContext,
 	measureTextElement,
 } from "@/text/measure-element";
+import type { CaptionAnimationRenderState } from "@/text/caption-animation";
+import { readCaptionAnimationConfig } from "@/subtitles/animation/params";
 import { resolveColorAtTime, resolveOpacityAtTime } from "@/animation/values";
 import {
 	REFRAME_IDENTITY,
@@ -460,6 +462,35 @@ function resolveTextNode({
 			localTime,
 			ctx: getTextMeasurementContext(),
 		}),
+		captionAnimation: resolveCaptionAnimation({ node, localTime }),
+	};
+}
+
+/** Build the word-by-word caption animation state for a text node, or undefined
+ * when the element carries no active caption animation (EDIT-012). */
+function resolveCaptionAnimation({
+	node,
+	localTime,
+}: {
+	node: TextNode;
+	localTime: number;
+}): CaptionAnimationRenderState | undefined {
+	const config = readCaptionAnimationConfig({ params: node.params.params });
+	if (config.mode === "none") {
+		return undefined;
+	}
+
+	const durationTicks = node.params.duration;
+	const progress =
+		durationTicks > 0
+			? Math.max(0, Math.min(1, localTime / durationTicks))
+			: 0;
+
+	return {
+		config,
+		progress,
+		durationSeconds: mediaTimeToSeconds({ time: durationTicks }),
+		words: node.params.captionWords,
 	};
 }
 

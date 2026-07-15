@@ -102,6 +102,30 @@ export const ACTIONS = {
 		description: "Extract or recover source audio",
 		category: "editing",
 	},
+	"slip-backward": {
+		description: "Slip clip source 1 frame earlier",
+		category: "editing",
+	},
+	"slip-forward": {
+		description: "Slip clip source 1 frame later",
+		category: "editing",
+	},
+	"slide-backward": {
+		description: "Slide clip 1 frame earlier",
+		category: "editing",
+	},
+	"slide-forward": {
+		description: "Slide clip 1 frame later",
+		category: "editing",
+	},
+	"roll-backward": {
+		description: "Roll next edit 1 frame earlier",
+		category: "editing",
+	},
+	"roll-forward": {
+		description: "Roll next edit 1 frame later",
+		category: "editing",
+	},
 	"select-all": {
 		description: "Select all elements",
 		category: "selection",

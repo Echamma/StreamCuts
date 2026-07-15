@@ -19,7 +19,16 @@ import {
 	getExportFileExtension,
 	downloadBuffer,
 } from "@/export";
-import { Check, Copy, Download, RotateCcw } from "lucide-react";
+import { Check, Copy, Download, ListPlus, Play, RotateCcw, Trash2, X } from "lucide-react";
+import {
+	useExportQueue,
+	addExportJob,
+	removeExportJob,
+	clearFinishedExportJobs,
+	startExportQueue,
+	cancelExportQueue,
+} from "@/export/export-queue-store";
+import type { ExportQueueJob } from "@/export/queue-runner";
 import {
 	EXPORT_FORMAT_VALUES,
 	EXPORT_QUALITY_VALUES,
@@ -204,6 +213,7 @@ function ExportPopover({
 	const scenes = useEditor((e) => e.scenes.getScenes());
 	const exportState = useEditor((e) => e.project.getExportState());
 	const { isExporting, progress, phase, statusText, result: exportResult } = exportState;
+	const { isRunning: isQueueRunning } = useExportQueue();
 	const [format, setFormat] = useState<ExportFormat>(
 		DEFAULT_EXPORT_OPTIONS.format,
 	);
@@ -299,9 +309,38 @@ function ExportPopover({
 		editor.project.cancelExport();
 	};
 
+	const buildQueueOptions = (): {
+		name: string;
+		options: ExportOptions;
+	} | null => {
+		if (!activeProject) return null;
+		const baseOptions: ExportOptions = {
+			format,
+			quality,
+			fps: activeProject.settings.fps,
+			includeAudio: shouldIncludeAudio,
+			sceneTarget,
+		};
+		const options =
+			presetId !== "custom" && isExportPlatformPresetId(presetId)
+				? applyExportPreset({
+						preset: getExportPreset({ id: presetId }),
+						options: baseOptions,
+					})
+				: baseOptions;
+		const name = `${activeProject.metadata.name}${getSceneLabel({ sceneTarget, scenes })}`;
+		return { name, options };
+	};
+
+	const handleAddToQueue = () => {
+		const built = buildQueueOptions();
+		if (!built) return;
+		addExportJob({ name: built.name, options: built.options });
+	};
+
 	return (
 		<PopoverContent className="bg-background mr-4 flex w-80 flex-col p-0">
-			{exportResult && !exportResult.success ? (
+			{exportResult && !exportResult.success && !isQueueRunning ? (
 				<ExportError
 					error={exportResult.error || "Unknown error occurred"}
 					onRetry={handleExport}
@@ -503,10 +542,24 @@ function ExportPopover({
 									)}
 								</div>
 
-								<div className="p-3 pt-0">
-									<Button onClick={handleExport} className="w-full gap-2">
+								<div className="flex gap-2 p-3 pt-0">
+									<Button
+										onClick={handleExport}
+										disabled={isQueueRunning}
+										className="flex-1 gap-2"
+									>
 										<Download className="size-4" />
 										Export
+									</Button>
+									<Button
+										variant="outline"
+										onClick={handleAddToQueue}
+										disabled={isQueueRunning}
+										className="gap-2"
+										title="Add these settings to the export queue"
+									>
+										<ListPlus className="size-4" />
+										Queue
 									</Button>
 								</div>
 							</>
@@ -530,12 +583,18 @@ function ExportPopover({
 								<Button
 									variant="outline"
 									className="w-full rounded-md"
-									onClick={handleCancel}
+									onClick={
+										isQueueRunning
+											? () => cancelExportQueue({ editor })
+											: handleCancel
+									}
 								>
-									Cancel
+									{isQueueRunning ? "Cancel queue" : "Cancel"}
 								</Button>
 							</div>
 						)}
+
+						<ExportQueueSection />
 					</div>
 				</>
 			)}
@@ -584,6 +643,106 @@ function ExportError({
 					<RotateCcw />
 					Retry
 				</Button>
+			</div>
+		</div>
+	);
+}
+
+function jobStatusColor({ status }: { status: ExportQueueJob["status"] }): string {
+	if (status === "done") return "text-constructive";
+	if (status === "failed") return "text-destructive";
+	return "text-muted-foreground";
+}
+
+function ExportQueueRow({ job }: { job: ExportQueueJob }) {
+	return (
+		<div className="flex items-center gap-2 text-xs">
+			<span className="flex-1 truncate" title={job.name}>
+				{job.name}
+			</span>
+			{job.status === "running" ? (
+				<span className="text-muted-foreground tabular-nums">
+					{Math.round(job.progress * 100)}%
+				</span>
+			) : (
+				<span
+					className={cn("capitalize", jobStatusColor({ status: job.status }))}
+				>
+					{job.status}
+				</span>
+			)}
+			{job.status !== "running" && (
+				<button
+					type="button"
+					aria-label={`Remove ${job.name} from queue`}
+					className="text-muted-foreground hover:text-destructive"
+					onClick={() => removeExportJob({ id: job.id })}
+				>
+					<X className="size-3" />
+				</button>
+			)}
+		</div>
+	);
+}
+
+function ExportQueueSection() {
+	const editor = useEditor();
+	const { jobs, isRunning } = useExportQueue();
+
+	if (jobs.length === 0) return null;
+
+	const hasPending = jobs.some((job) => job.status === "pending");
+	const hasFinished = jobs.some(
+		(job) =>
+			job.status === "done" ||
+			job.status === "failed" ||
+			job.status === "cancelled",
+	);
+
+	return (
+		<div className="flex flex-col gap-2 border-t p-3">
+			<div className="flex items-center justify-between">
+				<span className="text-sm font-medium">
+					Export queue ({jobs.length})
+				</span>
+				<div className="flex items-center gap-1.5">
+					{hasFinished && !isRunning ? (
+						<Button
+							variant="ghost"
+							size="sm"
+							className="h-7 gap-1 px-2 text-xs"
+							onClick={clearFinishedExportJobs}
+						>
+							<Trash2 className="size-3" />
+							Clear done
+						</Button>
+					) : null}
+					{isRunning ? (
+						<Button
+							variant="outline"
+							size="sm"
+							className="h-7 px-2 text-xs"
+							onClick={() => cancelExportQueue({ editor })}
+						>
+							Cancel
+						</Button>
+					) : (
+						<Button
+							size="sm"
+							className="h-7 gap-1 px-2 text-xs"
+							disabled={!hasPending}
+							onClick={() => void startExportQueue({ editor })}
+						>
+							<Play className="size-3" />
+							Start
+						</Button>
+					)}
+				</div>
+			</div>
+			<div className="flex flex-col gap-1.5">
+				{jobs.map((job) => (
+					<ExportQueueRow key={job.id} job={job} />
+				))}
 			</div>
 		</div>
 	);

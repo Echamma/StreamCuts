@@ -372,6 +372,80 @@ export function useEditorActions() {
 		undefined,
 	);
 
+	const applyTrimNudge = ({
+		op,
+		direction,
+	}: {
+		op: "slip" | "slide" | "roll";
+		direction: 1 | -1;
+	}) => {
+		if (selectedElements.length !== 1) {
+			return;
+		}
+		const { trackId, elementId } = selectedElements[0];
+		const fps = editor.project.getActive().settings.fps;
+		const frame = mediaTime({
+			ticks: Math.round((TICKS_PER_SECOND * fps.denominator) / fps.numerator),
+		});
+		const deltaTime =
+			direction === 1 ? frame : subMediaTime({ a: ZERO_MEDIA_TIME, b: frame });
+		if (op === "slip") {
+			editor.timeline.slipElement({ trackId, elementId, deltaTime });
+		} else if (op === "slide") {
+			editor.timeline.slideElement({ trackId, elementId, deltaTime });
+		} else {
+			editor.timeline.rollEdit({ trackId, elementId, edge: "right", deltaTime });
+		}
+	};
+
+	useActionHandler(
+		"slip-backward",
+		() => {
+			applyTrimNudge({ op: "slip", direction: -1 });
+		},
+		undefined,
+	);
+
+	useActionHandler(
+		"slip-forward",
+		() => {
+			applyTrimNudge({ op: "slip", direction: 1 });
+		},
+		undefined,
+	);
+
+	useActionHandler(
+		"slide-backward",
+		() => {
+			applyTrimNudge({ op: "slide", direction: -1 });
+		},
+		undefined,
+	);
+
+	useActionHandler(
+		"slide-forward",
+		() => {
+			applyTrimNudge({ op: "slide", direction: 1 });
+		},
+		undefined,
+	);
+
+	useActionHandler(
+		"roll-backward",
+		() => {
+			applyTrimNudge({ op: "roll", direction: -1 });
+		},
+		undefined,
+	);
+
+	useActionHandler(
+		"roll-forward",
+		() => {
+			applyTrimNudge({ op: "roll", direction: 1 });
+		},
+		undefined,
+	);
+
 	useActionHandler(
 		"select-all",
 		() => {

@@ -29,6 +29,9 @@ import {
 	ContextMenuContent,
 	ContextMenuItem,
 	ContextMenuSeparator,
+	ContextMenuSub,
+	ContextMenuSubContent,
+	ContextMenuSubTrigger,
 	ContextMenuTrigger,
 } from "@/components/ui/context-menu";
 import { toast } from "sonner";
@@ -608,6 +611,41 @@ export function TimelineElement({
 									Replace media
 								</ContextMenuItem>
 							</>
+						)}
+					{selectedElements.length === 1 &&
+						isCurrentElementSelected &&
+						(element.type === "video" ||
+							element.type === "image" ||
+							element.type === "audio") && (
+							<ContextMenuSub>
+								<ContextMenuSubTrigger
+									icon={<HugeiconsIcon icon={Exchange01Icon} />}
+								>
+									Trim
+								</ContextMenuSubTrigger>
+								<ContextMenuSubContent className="w-56">
+									<ActionMenuItem action="slip-backward">
+										Slip 1 frame earlier
+									</ActionMenuItem>
+									<ActionMenuItem action="slip-forward">
+										Slip 1 frame later
+									</ActionMenuItem>
+									<ContextMenuSeparator />
+									<ActionMenuItem action="slide-backward">
+										Slide 1 frame earlier
+									</ActionMenuItem>
+									<ActionMenuItem action="slide-forward">
+										Slide 1 frame later
+									</ActionMenuItem>
+									<ContextMenuSeparator />
+									<ActionMenuItem action="roll-backward">
+										Roll next edit earlier
+									</ActionMenuItem>
+									<ActionMenuItem action="roll-forward">
+										Roll next edit later
+									</ActionMenuItem>
+								</ContextMenuSubContent>
+							</ContextMenuSub>
 						)}
 					<ContextMenuSeparator />
 					<DeleteMenuItem
