@@ -21,6 +21,7 @@ import {
 import { doesElementHaveEnabledAudio } from "@/timeline/audio-separation";
 import { canElementHaveAudio, hasMediaId } from "@/timeline/element-utils";
 import { anyTrackSoloed, isTrackAudioSilenced } from "@/timeline/audio-solo";
+import { getElementPan, panToChannelGains } from "@/timeline/audio-pan";
 import { mediaSupportsAudio } from "@/media/media-utils";
 import { getSourceTimeAtClipTime, renderRetimedBuffer } from "@/retime";
 import {
@@ -49,6 +50,8 @@ export interface CollectedAudioElement {
 	trimStart: number;
 	trimEnd: number;
 	volume: number;
+	/** Stereo pan, -1 (left) … 0 (centre) … +1 (right). */
+	pan: number;
 	muted: boolean;
 	retime?: RetimeConfig;
 }
@@ -187,6 +190,7 @@ export async function collectAudioElements({
 							trackMuted: false,
 							localTime: 0,
 						}),
+						pan: getElementPan({ element }),
 						muted: isElementMuted({ element }),
 						retime: element.retime,
 					};
@@ -219,6 +223,7 @@ export async function collectAudioElements({
 							trackMuted: false,
 							localTime: 0,
 						}),
+						pan: getElementPan({ element }),
 						muted: isElementMuted({ element }),
 						retime: element.retime,
 					};
@@ -376,6 +381,8 @@ interface AudioMixSource {
 	trimStart: number;
 	trimEnd: number;
 	volume: number;
+	/** Stereo pan, -1 (left) … 0 (centre) … +1 (right). */
+	pan: number;
 	retime?: RetimeConfig;
 }
 
@@ -389,6 +396,8 @@ export interface AudioClipSource {
 	trimStart: number;
 	trimEnd: number;
 	volume: number;
+	/** Stereo pan, -1 (left) … 0 (centre) … +1 (right). */
+	pan: number;
 	muted: boolean;
 	retime?: RetimeConfig;
 }
@@ -419,6 +428,7 @@ async function fetchLibraryAudioSource({
 			trimStart: element.trimStart / TICKS_PER_SECOND,
 			trimEnd: element.trimEnd / TICKS_PER_SECOND,
 			volume,
+			pan: getElementPan({ element }),
 			retime: element.retime,
 		};
 	} catch (error) {
@@ -457,6 +467,7 @@ async function fetchLibraryAudioClip({
 			trimStart: element.trimStart,
 			trimEnd: element.trimEnd,
 			volume,
+			pan: getElementPan({ element }),
 			muted,
 			retime: element.retime,
 		};
@@ -485,6 +496,7 @@ function collectMediaAudioSource({
 			TICKS_PER_SECOND,
 		trimEnd: element.trimEnd / TICKS_PER_SECOND,
 		volume,
+		pan: getElementPan({ element }),
 		retime: element.retime,
 	};
 }
@@ -512,6 +524,7 @@ function collectMediaAudioClip({
 			TICKS_PER_SECOND,
 		trimEnd: element.trimEnd / TICKS_PER_SECOND,
 		volume,
+		pan: getElementPan({ element }),
 		muted,
 		retime: element.retime,
 	};
@@ -923,9 +936,11 @@ function mixSourceIntoChunk({
 		Math.ceil(overlapDuration * sampleRate),
 	);
 	let wroteSamples = false;
+	const panGains = panToChannelGains({ pan: clip.pan });
 
 	for (let channel = 0; channel < outputChannels; channel++) {
 		const outputData = outputBuffer.getChannelData(channel);
+		const channelPanGain = channel === 0 ? panGains.left : panGains.right;
 		const sourceChannel = Math.min(channel, buffer.numberOfChannels - 1);
 		const sourceData = buffer.getChannelData(sourceChannel);
 
@@ -956,7 +971,8 @@ function mixSourceIntoChunk({
 			outputData[outputIndex] +=
 				(sourceData[lowerIndex] * (1 - fraction) +
 					sourceData[upperIndex] * fraction) *
-				gain;
+				gain *
+				channelPanGain;
 			wroteSamples = true;
 		}
 	}
@@ -1339,9 +1355,11 @@ function mixAudioChannels({
 
 	const outputStartSample = Math.floor(startTime * sampleRate);
 	const renderedLength = Math.ceil(elementDuration * sampleRate);
+	const panGains = panToChannelGains({ pan: element.pan });
 
 	for (let channel = 0; channel < outputChannels; channel++) {
 		const outputData = outputBuffer.getChannelData(channel);
+		const channelPanGain = channel === 0 ? panGains.left : panGains.right;
 		const sourceChannel = Math.min(channel, buffer.numberOfChannels - 1);
 		const sourceData = buffer.getChannelData(sourceChannel);
 
@@ -1367,7 +1385,8 @@ function mixAudioChannels({
 			outputData[outputIndex] +=
 				(sourceData[lowerIndex] * (1 - fraction) +
 					sourceData[upperIndex] * fraction) *
-				gain;
+				gain *
+				channelPanGain;
 		}
 	}
 }

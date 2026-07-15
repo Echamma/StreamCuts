@@ -9,6 +9,7 @@ import {
 	buildAudioGainAutomation,
 	hasAnimatedVolume,
 } from "@/timeline/audio-state";
+import { panToChannelGains } from "@/timeline/audio-pan";
 import { createAudioMasteringChain } from "@/media/audio-mastering";
 import {
 	getClipTimeAtSourceTime,
@@ -290,6 +291,62 @@ export class AudioManager {
 		this.queuedSources.clear();
 	}
 
+	/**
+	 * Route a clip's (post-volume) gain node to the output, applying stereo pan.
+	 *
+	 * At centre (`pan === 0`) the node connects straight to the destination —
+	 * an exact no-op that leaves the common case byte-identical and node-free.
+	 * Off-centre, a splitter → per-channel gain → merger applies the same
+	 * unity-at-centre law the export mixer uses (deliberately not a
+	 * `StereoPannerNode`, whose equal-power law would diverge from export). The
+	 * gain node is forced to a stereo layout first so a mono source pans instead
+	 * of collapsing to the left channel. Returns a teardown that disconnects
+	 * every node it created, to be called from the source's `ended` handler.
+	 */
+	private connectClipToOutput({
+		audioContext,
+		clipGain,
+		pan,
+	}: {
+		audioContext: AudioContext;
+		clipGain: GainNode;
+		pan: number;
+	}): () => void {
+		const destination = this.masterGain ?? audioContext.destination;
+
+		if (pan === 0) {
+			clipGain.connect(destination);
+			return () => clipGain.disconnect();
+		}
+
+		clipGain.channelCountMode = "explicit";
+		clipGain.channelCount = 2;
+		clipGain.channelInterpretation = "speakers";
+
+		const splitter = audioContext.createChannelSplitter(2);
+		const leftGain = audioContext.createGain();
+		const rightGain = audioContext.createGain();
+		const merger = audioContext.createChannelMerger(2);
+		const gains = panToChannelGains({ pan });
+		leftGain.gain.value = gains.left;
+		rightGain.gain.value = gains.right;
+
+		clipGain.connect(splitter);
+		splitter.connect(leftGain, 0);
+		splitter.connect(rightGain, 1);
+		leftGain.connect(merger, 0, 0);
+		rightGain.connect(merger, 0, 1);
+		merger.connect(destination);
+
+		return () => {
+			clipGain.disconnect();
+			splitter.disconnect();
+			leftGain.disconnect();
+			rightGain.disconnect();
+			merger.disconnect();
+		};
+	}
+
 	private async runClipIterator({
 		clip,
 		startTime,
@@ -348,7 +405,11 @@ export class AudioManager {
 			const clipGain = audioContext.createGain();
 			clipGain.gain.value = clip.volume;
 			node.connect(clipGain);
-			clipGain.connect(this.masterGain ?? audioContext.destination);
+			const disconnectClip = this.connectClipToOutput({
+				audioContext,
+				clipGain,
+				pan: clip.pan,
+			});
 
 			const startTimestamp =
 				this.playbackStartContextTime +
@@ -392,7 +453,7 @@ export class AudioManager {
 			this.queuedSources.add(node);
 			node.addEventListener("ended", () => {
 				node.disconnect();
-				clipGain.disconnect();
+				disconnectClip();
 				this.queuedSources.delete(node);
 			});
 
@@ -440,7 +501,11 @@ export class AudioManager {
 		node.buffer = buffer;
 		const clipGain = audioContext.createGain();
 		node.connect(clipGain);
-		clipGain.connect(this.masterGain ?? audioContext.destination);
+		const disconnectClip = this.connectClipToOutput({
+			audioContext,
+			clipGain,
+			pan: clip.pan,
+		});
 
 		const startTimestamp =
 			this.playbackStartContextTime +
@@ -470,7 +535,7 @@ export class AudioManager {
 		this.queuedSources.add(node);
 		node.addEventListener("ended", () => {
 			node.disconnect();
-			clipGain.disconnect();
+			disconnectClip();
 			this.queuedSources.delete(node);
 		});
 	}

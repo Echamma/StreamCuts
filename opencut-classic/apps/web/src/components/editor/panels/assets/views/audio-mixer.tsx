@@ -6,6 +6,7 @@ import {
 	isElementMuted,
 } from "@/timeline/audio-state";
 import { anyTrackSoloed, isTrackAudioSilenced } from "@/timeline/audio-solo";
+import { getElementPan, PAN_MAX, PAN_MIN } from "@/timeline/audio-pan";
 import { VOLUME_DB_MIN, VOLUME_DB_MAX } from "@/timeline/audio-constants";
 import { PanelView } from "./base-panel";
 import { Button } from "@/components/ui/button";
@@ -27,6 +28,20 @@ function sliderToDb(val: number): number {
 function formatDb(db: number): string {
 	if (db <= VOLUME_DB_MIN) return "-∞";
 	return `${db >= 0 ? "+" : ""}${db.toFixed(1)} dB`;
+}
+
+function panToSlider(pan: number): number {
+	return ((pan - PAN_MIN) / (PAN_MAX - PAN_MIN)) * 100;
+}
+
+function sliderToPan(value: number): number {
+	return PAN_MIN + (value / 100) * (PAN_MAX - PAN_MIN);
+}
+
+function formatPan(pan: number): string {
+	if (Math.abs(pan) < 0.005) return "C";
+	const magnitude = Math.round(Math.abs(pan) * 100);
+	return pan < 0 ? `L${magnitude}` : `R${magnitude}`;
 }
 
 export function AudioMixerView() {
@@ -255,6 +270,7 @@ function ElementMixerRow({
 }) {
 	const editor = useEditor();
 	const volumeDb = getElementVolume({ element });
+	const pan = getElementPan({ element });
 	const muted = isElementMuted({ element });
 	const effectiveMuted = trackMuted || muted;
 
@@ -301,6 +317,27 @@ function ElementMixerRow({
 		});
 	};
 
+	const writePan = ({
+		values,
+		pushHistory,
+	}: {
+		values: number[];
+		pushHistory: boolean;
+	}) => {
+		editor.timeline.updateElements({
+			updates: [
+				{
+					trackId,
+					elementId: element.id,
+					patch: {
+						params: { ...element.params, pan: sliderToPan(values[0]) },
+					},
+				},
+			],
+			pushHistory,
+		});
+	};
+
 	return (
 		<div
 			className={cn(
@@ -342,6 +379,26 @@ function ElementMixerRow({
 				step={0.5}
 				disabled={effectiveMuted}
 			/>
+			<div className="flex items-center gap-2">
+				<span className="text-muted-foreground w-7 shrink-0 text-xs">Pan</span>
+				<Slider
+					value={[panToSlider(pan)]}
+					onValueChange={(values) => writePan({ values, pushHistory: false })}
+					onValueCommit={(values) => writePan({ values, pushHistory: true })}
+					min={0}
+					max={100}
+					step={1}
+					disabled={effectiveMuted}
+				/>
+				<span
+					className={cn(
+						"w-7 shrink-0 text-right font-mono text-xs tabular-nums",
+						effectiveMuted ? "text-muted-foreground" : "text-foreground",
+					)}
+				>
+					{formatPan(pan)}
+				</span>
+			</div>
 		</div>
 	);
 }
