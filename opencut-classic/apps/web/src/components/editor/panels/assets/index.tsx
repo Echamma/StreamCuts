@@ -16,6 +16,7 @@ import { LongToShortView } from "@/components/editor/panels/assets/views/long-to
 import { SocialsView } from "@/components/editor/panels/assets/views/socials";
 import { AudioMixerView } from "@/components/editor/panels/assets/views/audio-mixer";
 import { TransitionsView } from "@/components/editor/panels/assets/views/transitions";
+import { MarkersView } from "@/components/editor/panels/assets/views/markers";
 
 export function AssetsPanel() {
 	const { activeTab } = useAssetsPanelStore();
@@ -29,6 +30,7 @@ export function AssetsPanel() {
 		effects: <EffectsView />,
 		transitions: <TransitionsView />,
 		captions: <Captions />,
+		markers: <MarkersView />,
 		adjustment: (
 			<div className="text-muted-foreground p-4">
 				Adjustment view coming soon...

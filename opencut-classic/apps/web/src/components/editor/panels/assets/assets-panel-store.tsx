@@ -3,6 +3,7 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import {
 	ArrowRightDoubleIcon,
+	Bookmark02Icon,
 	Briefcase09Icon,
 	ClosedCaptionIcon,
 	Folder03Icon,
@@ -28,6 +29,7 @@ export const TAB_KEYS = [
 	"effects",
 	"transitions",
 	"captions",
+	"markers",
 	"adjustment",
 	"boss",
 	"summarize",
@@ -79,6 +81,10 @@ export const tabs = {
 	captions: {
 		icon: createHugeiconsIcon({ icon: ClosedCaptionIcon }),
 		label: "Captions",
+	},
+	markers: {
+		icon: createHugeiconsIcon({ icon: Bookmark02Icon }),
+		label: "Markers",
 	},
 	adjustment: {
 		icon: createHugeiconsIcon({ icon: SlidersHorizontalIcon }),
