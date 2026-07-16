@@ -8,6 +8,10 @@ import type {
 } from "@/timeline";
 import { generateUUID } from "@/utils/id";
 import { requiresMediaId } from "@/timeline/element-utils";
+import {
+	findTrackById,
+	getMainVideoTrack,
+} from "@/timeline/scene-tracks-view";
 import type { MediaAsset } from "@/media/types";
 import { DEFAULT_NEW_ELEMENT_DURATION } from "@/timeline/creation";
 import { floatToFrameRate } from "@/fps/utils";
@@ -53,7 +57,7 @@ export class InsertElementCommand extends Command {
 		}
 
 		const totalElementsInTimeline =
-			this.savedState.main.elements.length +
+			getMainVideoTrack({ tracks: this.savedState }).elements.length +
 			this.savedState.overlay.reduce(
 				(total, track) => total + track.elements.length,
 				0,
@@ -243,11 +247,10 @@ export class InsertElementCommand extends Command {
 		});
 		if (!placementResult) {
 			if (placement.mode === "explicit") {
-				const targetTrack =
-					tracks.main.id === placement.trackId
-						? tracks.main
-						: (tracks.overlay.find((track) => track.id === placement.trackId) ??
-							tracks.audio.find((track) => track.id === placement.trackId));
+				const targetTrack = findTrackById({
+					tracks,
+					trackId: placement.trackId,
+				});
 				if (!targetTrack) {
 					console.error("Track not found:", placement.trackId);
 					return null;

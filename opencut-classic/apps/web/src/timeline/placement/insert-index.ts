@@ -1,4 +1,9 @@
 import type { SceneTracks, TrackType } from "@/timeline";
+import {
+	getAudioBaseIndex,
+	getMainTrackRowIndex,
+	getTotalTrackCount,
+} from "@/timeline/scene-tracks-view";
 
 export function getDefaultInsertIndexForTrack({
 	tracks,
@@ -8,14 +13,14 @@ export function getDefaultInsertIndexForTrack({
 	trackType: TrackType;
 }): number {
 	if (trackType === "audio") {
-		return tracks.overlay.length + 1 + tracks.audio.length;
+		return getAudioBaseIndex({ tracks }) + tracks.audio.length;
 	}
 
 	if (trackType === "effect") {
 		return 0;
 	}
 
-	return tracks.overlay.length;
+	return getMainTrackRowIndex({ tracks });
 }
 
 export function getHighestInsertIndexForTrack({
@@ -26,7 +31,7 @@ export function getHighestInsertIndexForTrack({
 	trackType: TrackType;
 }): number {
 	if (trackType === "audio") {
-		return tracks.overlay.length + 1;
+		return getAudioBaseIndex({ tracks });
 	}
 
 	return 0;
@@ -43,7 +48,7 @@ export function resolvePreferredNewTrackPlacement({
 	preferredIndex: number;
 	direction: "above" | "below";
 }): { insertIndex: number; insertPosition: "above" | "below" | null } {
-	const trackCount = tracks.overlay.length + 1 + tracks.audio.length;
+	const trackCount = getTotalTrackCount({ tracks });
 	if (trackCount === 0) {
 		return {
 			insertIndex: 0,
@@ -55,7 +60,7 @@ export function resolvePreferredNewTrackPlacement({
 		Math.max(preferredIndex, 0),
 		trackCount - 1,
 	);
-	const mainTrackIndex = tracks.overlay.length;
+	const mainTrackIndex = getMainTrackRowIndex({ tracks });
 
 	if (trackType === "audio") {
 		if (safePreferredIndex <= mainTrackIndex) {

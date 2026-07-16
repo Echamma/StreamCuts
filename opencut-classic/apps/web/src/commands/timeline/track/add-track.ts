@@ -6,6 +6,10 @@ import {
 	buildEmptyTrack,
 	getDefaultInsertIndexForTrack,
 } from "@/timeline/placement";
+import {
+	getAudioBaseIndex,
+	getMainTrackRowIndex,
+} from "@/timeline/scene-tracks-view";
 
 export class AddTrackCommand extends Command {
 	private trackId: string;
@@ -77,7 +81,10 @@ function buildAudioTrackState({
 	insertIndex: number;
 	trackId: string;
 }): SceneTracks {
-	const audioInsertIndex = Math.max(0, insertIndex - tracks.overlay.length - 1);
+	const audioInsertIndex = Math.max(
+		0,
+		insertIndex - getAudioBaseIndex({ tracks }),
+	);
 	const newTrack = buildEmptyTrack({
 		id: trackId,
 		type: "audio",
@@ -103,7 +110,7 @@ function buildOverlayTrackState({
 	trackId: string;
 	trackType: Exclude<TrackType, "audio">;
 }): SceneTracks {
-	const overlayInsertIndex = Math.min(insertIndex, tracks.overlay.length);
+	const overlayInsertIndex = Math.min(insertIndex, getMainTrackRowIndex({ tracks }));
 	const newTrack =
 		trackType === "video"
 			? buildEmptyTrack({ id: trackId, type: "video" })
