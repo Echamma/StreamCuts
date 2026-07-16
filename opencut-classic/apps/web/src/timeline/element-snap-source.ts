@@ -1,4 +1,5 @@
 import type { SceneTracks } from "@/timeline";
+import { getOrderedTimelineTracks } from "@/timeline/scene-tracks-view";
 import type { SnapPoint } from "@/timeline/snapping";
 import { addMediaTime } from "@/wasm";
 
@@ -10,7 +11,7 @@ export function getElementEdgeSnapPoints({
 	excludeElementIds?: Set<string>;
 }): SnapPoint[] {
 	const snapPoints: SnapPoint[] = [];
-	const orderedTracks = [...tracks.overlay, tracks.main, ...tracks.audio];
+	const orderedTracks = getOrderedTimelineTracks({ tracks });
 
 	for (const track of orderedTracks) {
 		for (const element of track.elements) {

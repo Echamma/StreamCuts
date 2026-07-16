@@ -4,6 +4,7 @@ import type {
 	GraphicTrack,
 	SceneTracks,
 	TextTrack,
+	TimelineTrack,
 	VideoTrack,
 } from "@/timeline/types";
 
@@ -108,4 +109,26 @@ export function getAudioTracks({
 	tracks: SceneTracks;
 }): AudioTrack[] {
 	return tracks.audio;
+}
+
+/**
+ * Every timeline track in a stable enumeration order — a superset covering
+ * `overlay`, `main`, and `audio`. Concretely today: `[...overlay, main, ...audio]`.
+ * Post-R1 this becomes `[...video, ...text, ...graphic, ...effect, ...audio]`;
+ * consumers that just want to iterate every track (snap-point collection, audio
+ * silence checks, mute enumeration) do not care about the exact interleaving,
+ * only that every track shows up exactly once.
+ *
+ * Consumers that *do* rely on the concrete `[overlay, main, audio]` layout —
+ * insertion-index arithmetic (`overlay.length` = the main-track's row) — must
+ * NOT migrate to this view yet; a future batch introduces dedicated helpers
+ * (`getInsertPosition`, `getTrackRowIndex`) so the layout assumption stops
+ * leaking through the enumeration order.
+ */
+export function getOrderedTimelineTracks({
+	tracks,
+}: {
+	tracks: SceneTracks;
+}): TimelineTrack[] {
+	return [...tracks.overlay, tracks.main, ...tracks.audio];
 }

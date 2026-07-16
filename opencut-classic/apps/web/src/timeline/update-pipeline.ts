@@ -6,6 +6,7 @@ import {
 } from "@/retime";
 import type { RetimeConfig, SceneTracks, TimelineElement } from "@/timeline";
 import { isRetimableElement } from "@/timeline";
+import { getMainVideoTrack } from "@/timeline/scene-tracks-view";
 import { ZERO_MEDIA_TIME, roundMediaTime } from "@/wasm";
 
 type ElementUpdateField = keyof TimelineElement | string;
@@ -101,7 +102,8 @@ const enforceRules: ElementUpdateRule[] = [
 				element.startTime < ZERO_MEDIA_TIME
 					? ZERO_MEDIA_TIME
 					: element.startTime;
-			if (context.trackId !== context.tracks.main.id) {
+			const mainTrack = getMainVideoTrack({ tracks: context.tracks });
+			if (context.trackId !== mainTrack.id) {
 				return {
 					element: {
 						...element,
@@ -110,7 +112,7 @@ const enforceRules: ElementUpdateRule[] = [
 				};
 			}
 
-			const earliestElement = context.tracks.main.elements
+			const earliestElement = mainTrack.elements
 				.filter((candidate) => candidate.id !== element.id)
 				.reduce<TimelineElement | null>((earliest, candidate) => {
 					if (!earliest || candidate.startTime < earliest.startTime) {

@@ -1,6 +1,7 @@
 import type { TimelineTrack, TimelineElement } from "@/timeline";
 import type { ComputeDropTargetParams, DropTarget } from "@/timeline";
 import { resolveTrackPlacement } from "@/timeline/placement";
+import { getOrderedTimelineTracks } from "@/timeline/scene-tracks-view";
 import { TIMELINE_TRACK_GAP_PX } from "./layout";
 import { getTrackHeight } from "./track-layout";
 import {
@@ -115,7 +116,11 @@ export function computeDropTarget({
 	excludeElementId,
 	targetElementTypes,
 }: ComputeDropTargetParams): DropTarget {
-	const orderedTracks = [...tracks.overlay, tracks.main, ...tracks.audio];
+	const orderedTracks = getOrderedTimelineTracks({ tracks });
+	// Shape-arithmetic assumption: in the current [overlay, main, audio] layout
+	// the main track sits at index `overlay.length`. A future R1 batch replaces
+	// this with a dedicated view (`getTrackRowIndex`) so the layout stops
+	// leaking through enumeration order.
 	const mainTrackIndex = tracks.overlay.length;
 	const xPosition =
 		startTimeOverride !== undefined

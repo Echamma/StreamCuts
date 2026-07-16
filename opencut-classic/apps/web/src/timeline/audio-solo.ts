@@ -1,4 +1,5 @@
 import type { SceneTracks, TimelineTrack } from "@/timeline";
+import { getOrderedTimelineTracks } from "@/timeline/scene-tracks-view";
 import { canTrackHaveAudio } from "@/timeline/track-capabilities";
 
 /** All audio-capable tracks (video + audio) across a scene. */
@@ -7,9 +8,7 @@ function audioCapableTracks({
 }: {
 	tracks: SceneTracks;
 }): TimelineTrack[] {
-	return [...tracks.overlay, tracks.main, ...tracks.audio].filter(
-		canTrackHaveAudio,
-	);
+	return getOrderedTimelineTracks({ tracks }).filter(canTrackHaveAudio);
 }
 
 /** True when at least one audio-capable track is soloed. Once solo is active,

@@ -5,6 +5,7 @@ import {
 	getEffectTracks,
 	getGraphicTracks,
 	getMainVideoTrack,
+	getOrderedTimelineTracks,
 	getOverlayVideoTracks,
 	getTextTracks,
 } from "@/timeline/scene-tracks-view";
@@ -166,6 +167,30 @@ describe("getAudioTracks", () => {
 	test("empty audio list is preserved", () => {
 		const tracks = scene({ main: videoTrack({ id: "V1-main" }) });
 		expect(getAudioTracks({ tracks })).toEqual([]);
+	});
+});
+
+describe("getOrderedTimelineTracks", () => {
+	test("today's order: [...overlay, main, ...audio]", () => {
+		const tracks = scene({
+			main: videoTrack({ id: "V1-main" }),
+			overlay: [textTrack({ id: "T1" }), videoTrack({ id: "V2" })],
+			audio: [audioTrack({ id: "A1" }), audioTrack({ id: "A2" })],
+		});
+		expect(getOrderedTimelineTracks({ tracks }).map((t) => t.id)).toEqual([
+			"T1",
+			"V2",
+			"V1-main",
+			"A1",
+			"A2",
+		]);
+	});
+
+	test("empty overlay + empty audio still yields just [main]", () => {
+		const tracks = scene({ main: videoTrack({ id: "V1-main" }) });
+		expect(getOrderedTimelineTracks({ tracks }).map((t) => t.id)).toEqual([
+			"V1-main",
+		]);
 	});
 });
 

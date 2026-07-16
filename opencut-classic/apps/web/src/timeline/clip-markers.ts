@@ -1,3 +1,4 @@
+import { getOrderedTimelineTracks } from "@/timeline/scene-tracks-view";
 import type { ClipMarker, SceneTracks } from "@/timeline/types";
 import {
 	addMediaTime,
@@ -121,7 +122,7 @@ export function collectClipMarkers({
 }: {
 	tracks: SceneTracks;
 }): CollectedClipMarker[] {
-	const orderedTracks = [...tracks.overlay, tracks.main, ...tracks.audio];
+	const orderedTracks = getOrderedTimelineTracks({ tracks });
 	const collected: CollectedClipMarker[] = [];
 
 	for (const track of orderedTracks) {

@@ -1,4 +1,5 @@
 import type { SceneTracks, TimelineTrack } from "@/timeline";
+import { getOrderedTimelineTracks } from "@/timeline/scene-tracks-view";
 import type { GroupTrackSection } from "./types";
 
 export interface TrackPlacement {
@@ -14,7 +15,7 @@ export function getDisplayTracks({
 }: {
 	tracks: SceneTracks;
 }): TimelineTrack[] {
-	return [...tracks.overlay, tracks.main, ...tracks.audio];
+	return getOrderedTimelineTracks({ tracks });
 }
 
 export function getTrackPlacementById({
