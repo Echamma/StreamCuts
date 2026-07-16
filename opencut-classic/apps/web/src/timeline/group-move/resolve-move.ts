@@ -1,6 +1,12 @@
 import type { SceneTracks } from "@/timeline";
 import { getTrackTypeForElementType } from "@/timeline/placement/compatibility";
 import { canPlaceTimeSpansOnTrack } from "@/timeline/placement/overlap";
+import {
+	getAudioBaseIndex,
+	getMainTrackRowIndex,
+	getMainVideoTrack,
+	getTotalTrackCount,
+} from "@/timeline/scene-tracks-view";
 import type {
 	GroupMoveResult,
 	MoveGroup,
@@ -179,7 +185,7 @@ function resolveNewTrackMove({
 			})
 		: Math.max(
 				0,
-				Math.min(anchorInsertIndex - anchorUniqueIndex, tracks.overlay.length),
+				Math.min(anchorInsertIndex - anchorUniqueIndex, getMainTrackRowIndex({ tracks })),
 			);
 
 	// One new track per unique source track (not per element).
@@ -222,10 +228,10 @@ function clampAudioInsertIndex({
 	tracks: SceneTracks;
 	insertIndex: number;
 }): number {
-	const minimumAudioInsertIndex = tracks.overlay.length + 1;
+	const minimumAudioInsertIndex = getAudioBaseIndex({ tracks });
 	return Math.max(
 		minimumAudioInsertIndex,
-		Math.min(insertIndex, minimumAudioInsertIndex + tracks.audio.length),
+		Math.min(insertIndex, getTotalTrackCount({ tracks })),
 	);
 }
 
@@ -319,9 +325,10 @@ function clampAnchorStartTime({
 			? minimumAnchorStartTime
 			: anchorStartTime;
 
+	const mainTrack = getMainVideoTrack({ tracks });
 	const memberOnMainTrack = group.members.find(
 		(member) =>
-			targetTrackIdsByElementId.get(member.elementId) === tracks.main.id,
+			targetTrackIdsByElementId.get(member.elementId) === mainTrack.id,
 	);
 	if (!memberOnMainTrack) {
 		return clampedAnchorStartTime;
@@ -334,7 +341,7 @@ function clampAnchorStartTime({
 		a: clampedAnchorStartTime,
 		b: memberOnMainTrack.timeOffset,
 	});
-	const earliestStationaryMainStartTime = tracks.main.elements
+	const earliestStationaryMainStartTime = mainTrack.elements
 		.filter((element) => !movingElementIds.has(element.id))
 		.reduce<MediaTime | null>((earliestStartTime, element) => {
 			if (earliestStartTime == null || element.startTime < earliestStartTime) {
