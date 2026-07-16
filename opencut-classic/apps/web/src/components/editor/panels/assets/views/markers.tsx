@@ -1,12 +1,26 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useEditor, useScenes } from "@/editor/use-editor";
 import { mediaTimeToSeconds } from "@/wasm";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { ColorPicker } from "@/components/ui/color-picker";
+import {
+	Popover,
+	PopoverContent,
+	PopoverTrigger,
+} from "@/components/ui/popover";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { Delete02Icon, PlusSignIcon } from "@hugeicons/core-free-icons";
+import {
+	Delete02Icon,
+	Edit03Icon,
+	PlusSignIcon,
+} from "@hugeicons/core-free-icons";
 import type { Bookmark } from "@/timeline";
+import { DEFAULT_TIMELINE_BOOKMARK_COLOR } from "@/timeline/components/theme";
+import { uppercase } from "@/utils/string";
 import {
 	formatMarkerTime,
 	markerLabel,
@@ -187,6 +201,7 @@ function ClipMarkerRow({ entry }: { entry: CollectedClipMarker }) {
 					<span className="tabular-nums">{formatMarkerTime({ seconds })}</span>
 				</span>
 			</button>
+			<ClipMarkerEditPopover entry={entry} />
 			<Button
 				variant="ghost"
 				size="icon"
@@ -203,5 +218,65 @@ function ClipMarkerRow({ entry }: { entry: CollectedClipMarker }) {
 				<HugeiconsIcon icon={Delete02Icon} className="size-3.5" />
 			</Button>
 		</div>
+	);
+}
+
+function ClipMarkerEditPopover({ entry }: { entry: CollectedClipMarker }) {
+	const editor = useEditor();
+	const [open, setOpen] = useState(false);
+
+	const patch = (updates: { note?: string; color?: string }) => {
+		editor.timeline.updateClipMarker({
+			trackId: entry.trackId,
+			elementId: entry.elementId,
+			localTime: entry.marker.time,
+			updates,
+		});
+	};
+
+	const colorHex = (entry.marker.color ?? DEFAULT_TIMELINE_BOOKMARK_COLOR)
+		.replace("#", "")
+		.toUpperCase();
+
+	return (
+		<Popover open={open} onOpenChange={setOpen}>
+			<PopoverTrigger asChild>
+				<Button
+					variant="ghost"
+					size="icon"
+					className="size-6 shrink-0 opacity-0 transition-opacity group-hover:opacity-100"
+					title="Edit clip marker"
+				>
+					<HugeiconsIcon icon={Edit03Icon} className="size-3.5" />
+				</Button>
+			</PopoverTrigger>
+			<PopoverContent
+				className="flex w-64 flex-col gap-3 p-3"
+				align="end"
+				side="bottom"
+				sideOffset={8}
+				onOpenAutoFocus={(event) => event.preventDefault()}
+			>
+				<div className="flex flex-col gap-2">
+					<Label className="text-xs">Note</Label>
+					<Input
+						placeholder="Add a note..."
+						value={entry.marker.note ?? ""}
+						onChange={(event) => patch({ note: event.target.value })}
+						className="h-8 text-sm"
+					/>
+				</div>
+				<div className="flex flex-col gap-2">
+					<Label className="text-xs">Color</Label>
+					<ColorPicker
+						value={colorHex}
+						onChangeEnd={(color) =>
+							patch({ color: `#${uppercase({ string: color })}` })
+						}
+						className="bg-background border"
+					/>
+				</div>
+			</PopoverContent>
+		</Popover>
 	);
 }

@@ -25,6 +25,7 @@ const {
 	sortClipMarkers,
 	addClipMarkerToList,
 	removeClipMarkerFromList,
+	updateClipMarkerInList,
 	clipMarkerAbsoluteTime,
 	localTimeForClip,
 	collectClipMarkers,
@@ -156,6 +157,32 @@ describe("removeClipMarkerFromList", () => {
 		expect(
 			removeClipMarkerFromList({ markers, time: at({ ticks: 999 }) }).length,
 		).toBe(2);
+	});
+});
+
+describe("updateClipMarkerInList", () => {
+	test("patches note/color of the tick-exact marker, keeps time", () => {
+		const result = updateClipMarkerInList({
+			markers: [marker({ ticks: 100 }), marker({ ticks: 300, note: "keep" })],
+			time: at({ ticks: 100 }),
+			updates: { note: "edited", color: "#ff0000" },
+		});
+		const edited = result.find((m) => m.time === at({ ticks: 100 }));
+		expect(edited?.note).toBe("edited");
+		expect(edited?.color).toBe("#ff0000");
+		expect(edited?.time).toBe(at({ ticks: 100 }));
+		// other markers untouched
+		expect(result.find((m) => m.time === at({ ticks: 300 }))?.note).toBe("keep");
+	});
+
+	test("no-op when no marker matches the time", () => {
+		const markers = [marker({ ticks: 100, note: "a" })];
+		const result = updateClipMarkerInList({
+			markers,
+			time: at({ ticks: 999 }),
+			updates: { note: "b" },
+		});
+		expect(result.map((m) => m.note)).toEqual(["a"]);
 	});
 });
 

@@ -52,6 +52,23 @@ export function removeClipMarkerFromList({
 	return markers.filter((m) => m.time !== time);
 }
 
+/**
+ * Patch the note/color of the marker at `time` (tick-exact). `time` itself is
+ * never changed here (a marker's position moves with its clip, not by edit).
+ * Returns a new array; unmatched markers pass through unchanged.
+ */
+export function updateClipMarkerInList({
+	markers,
+	time,
+	updates,
+}: {
+	markers: ClipMarker[];
+	time: MediaTime;
+	updates: Partial<Omit<ClipMarker, "time">>;
+}): ClipMarker[] {
+	return markers.map((m) => (m.time === time ? { ...m, ...updates } : m));
+}
+
 /** Absolute timeline time of a clip marker = element start + its local time. */
 export function clipMarkerAbsoluteTime({
 	elementStartTime,

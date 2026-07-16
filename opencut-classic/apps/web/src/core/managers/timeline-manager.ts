@@ -8,6 +8,7 @@ import type {
 	TimelineElement,
 	RetimeConfig,
 	VideoTrack,
+	ClipMarker,
 } from "@/timeline";
 import { calculateTotalDuration, isRetimableElement } from "@/timeline";
 import {
@@ -22,6 +23,7 @@ import {
 	addClipMarkerToList,
 	localTimeForClip,
 	removeClipMarkerFromList,
+	updateClipMarkerInList,
 } from "@/timeline/clip-markers";
 import { TimelineDragSource } from "@/timeline/drag-source";
 import { findTrackInSceneTracks } from "@/timeline/track-element-update";
@@ -388,6 +390,37 @@ export class TimelineManager {
 		const nextMarkers = removeClipMarkerFromList({
 			markers: element.markers,
 			time: localTime,
+		});
+
+		this.updateElements({
+			updates: [{ trackId, elementId, patch: { markers: nextMarkers } }],
+		});
+	}
+
+	/**
+	 * Patch the note/color of the clip marker at `localTime` (element-local,
+	 * tick-exact). Commits one undoable step. No-op when the element or marker is
+	 * gone.
+	 */
+	updateClipMarker({
+		trackId,
+		elementId,
+		localTime,
+		updates,
+	}: {
+		trackId: string;
+		elementId: string;
+		localTime: MediaTime;
+		updates: Partial<Omit<ClipMarker, "time">>;
+	}): void {
+		const element = this.getElementByRef({ trackId, elementId });
+		if (!element?.markers) {
+			return;
+		}
+		const nextMarkers = updateClipMarkerInList({
+			markers: element.markers,
+			time: localTime,
+			updates,
 		});
 
 		this.updateElements({
