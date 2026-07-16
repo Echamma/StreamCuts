@@ -9,6 +9,7 @@ import { anyTrackSoloed, isTrackAudioSilenced } from "@/timeline/audio-solo";
 import { getElementPan, PAN_MAX, PAN_MIN } from "@/timeline/audio-pan";
 import { VOLUME_DB_MIN, VOLUME_DB_MAX } from "@/timeline/audio-constants";
 import { PanelView } from "./base-panel";
+import { MasterMeter } from "./master-meter";
 import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
 import { Separator } from "@/components/ui/separator";
@@ -81,16 +82,20 @@ export function AudioMixerView() {
 	if (!hasAny) {
 		return (
 			<PanelView title="Audio">
-				<div className="flex flex-col items-center justify-center gap-3 py-16 text-center">
-					<HugeiconsIcon
-						icon={VolumeHighIcon}
-						className="text-muted-foreground size-10"
-					/>
-					<div className="flex flex-col gap-1">
-						<p className="font-medium">No audio in your project</p>
-						<p className="text-muted-foreground text-sm text-balance">
-							Add a video or audio clip to the timeline to see controls here.
-						</p>
+				<div className="flex flex-col gap-1">
+					<MasterSection />
+					<Separator className="my-1" />
+					<div className="flex flex-col items-center justify-center gap-3 py-14 text-center">
+						<HugeiconsIcon
+							icon={VolumeHighIcon}
+							className="text-muted-foreground size-10"
+						/>
+						<div className="flex flex-col gap-1">
+							<p className="font-medium">No audio in your project</p>
+							<p className="text-muted-foreground text-sm text-balance">
+								Add a video or audio clip to the timeline to see controls here.
+							</p>
+						</div>
 					</div>
 				</div>
 			</PanelView>
@@ -100,6 +105,8 @@ export function AudioMixerView() {
 	return (
 		<PanelView title="Audio">
 			<div className="flex flex-col gap-1 pb-4">
+				<MasterSection />
+				<Separator className="my-1" />
 				{(mainVideoElements.length > 0 ||
 					overlayVideoTracks.some((t) =>
 						t.elements.some((el) => el.type === "video"),
@@ -201,6 +208,17 @@ export function AudioMixerView() {
 				))}
 			</div>
 		</PanelView>
+	);
+}
+
+function MasterSection() {
+	return (
+		<div className="flex flex-col gap-1.5 px-1 pt-2 pb-1">
+			<span className="text-muted-foreground text-xs font-semibold uppercase tracking-wider">
+				Master
+			</span>
+			<MasterMeter />
+		</div>
 	);
 }
 
