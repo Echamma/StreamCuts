@@ -33,6 +33,7 @@ export function createAudioMasteringChain({
 	destination: AudioNode;
 }): {
 	input: GainNode;
+	output: GainNode;
 } {
 	const input = audioContext.createGain();
 	const limiter = audioContext.createDynamicsCompressor();
@@ -49,7 +50,8 @@ export function createAudioMasteringChain({
 	limiter.connect(outputGain);
 	outputGain.connect(destination);
 
-	return { input };
+	// `output` is the post-limiter node the meter taps (what you actually hear).
+	return { input, output: outputGain };
 }
 
 export async function applyAudioMasteringToBuffer({

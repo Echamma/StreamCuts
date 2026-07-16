@@ -11,6 +11,7 @@ import {
 } from "@/timeline/audio-state";
 import { panToChannelGains } from "@/timeline/audio-pan";
 import { createAudioMasteringChain } from "@/media/audio-mastering";
+import { computeLevelsFromSamples } from "@/media/audio-metering";
 import {
 	getClipTimeAtSourceTime,
 	getSourceTimeAtClipTime,
@@ -27,6 +28,9 @@ import {
 export class AudioManager {
 	private audioContext: AudioContext | null = null;
 	private masterGain: GainNode | null = null;
+	/** Passive tap off the post-limiter master output for FAIR-007 metering. */
+	private masterAnalyser: AnalyserNode | null = null;
+	private meterSampleBuffer: Float32Array<ArrayBuffer> | null = null;
 	private playbackStartTime = 0;
 	private playbackStartContextTime = 0;
 	private scheduleTimer: number | null = null;
@@ -73,6 +77,8 @@ export class AudioManager {
 			void this.audioContext.close();
 			this.audioContext = null;
 			this.masterGain = null;
+			this.masterAnalyser = null;
+			this.meterSampleBuffer = null;
 		}
 	}
 
@@ -185,13 +191,35 @@ export class AudioManager {
 		if (typeof window === "undefined") return null;
 
 		this.audioContext = createAudioContext();
-		const { input } = createAudioMasteringChain({
+		const { input, output } = createAudioMasteringChain({
 			audioContext: this.audioContext,
 			destination: this.audioContext.destination,
 		});
 		this.masterGain = input;
 		this.masterGain.gain.value = this.lastVolume;
+
+		// Passive metering tap: the analyser is a leaf (never connected onward),
+		// so it observes the post-limiter signal without altering playback.
+		const analyser = this.audioContext.createAnalyser();
+		analyser.fftSize = 2048;
+		output.connect(analyser);
+		this.masterAnalyser = analyser;
+		this.meterSampleBuffer = new Float32Array(analyser.fftSize);
+
 		return this.audioContext;
+	}
+
+	/**
+	 * Read the current master output levels (FAIR-007) as linear peak/RMS in
+	 * `[0, ~1]`, or `null` before the audio graph exists. Cheap enough to call
+	 * per animation frame; the meter component maps these to dBFS + fill.
+	 */
+	readMasterMeter(): { peak: number; rms: number } | null {
+		if (!this.masterAnalyser || !this.meterSampleBuffer) {
+			return null;
+		}
+		this.masterAnalyser.getFloatTimeDomainData(this.meterSampleBuffer);
+		return computeLevelsFromSamples({ samples: this.meterSampleBuffer });
 	}
 
 	private updateGain(): void {
