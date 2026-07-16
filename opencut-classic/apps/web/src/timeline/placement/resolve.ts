@@ -1,4 +1,5 @@
 import type { SceneTracks, TrackType, TimelineTrack } from "@/timeline";
+import { getOrderedTimelineTracks } from "@/timeline/scene-tracks-view";
 import {
 	getDefaultInsertIndexForTrack,
 	getHighestInsertIndexForTrack,
@@ -135,7 +136,7 @@ export function resolveTrackPlacement({
 	tracks,
 	...placement
 }: ResolveTrackPlacementParams): PlacementResult | null {
-	const orderedTracks = [...tracks.overlay, tracks.main, ...tracks.audio];
+	const orderedTracks = getOrderedTimelineTracks({ tracks });
 	const trackType =
 		"trackType" in placement
 			? placement.trackType

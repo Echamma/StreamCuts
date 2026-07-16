@@ -1,4 +1,5 @@
 import type { SceneTracks, TimelineElement, VideoTrack } from "@/timeline";
+import { getMainVideoTrack } from "@/timeline/scene-tracks-view";
 import { type MediaTime, ZERO_MEDIA_TIME } from "@/wasm";
 
 export const MAIN_TRACK_NAME = "Main Track";
@@ -35,12 +36,13 @@ export function enforceMainTrackStart({
 	requestedStartTime: MediaTime;
 	excludeElementId?: string;
 }): MediaTime {
-	if (tracks.main.id !== targetTrackId) {
+	const mainTrack = getMainVideoTrack({ tracks });
+	if (mainTrack.id !== targetTrackId) {
 		return requestedStartTime;
 	}
 
 	const earliestElement = getEarliestMainTrackElement({
-		mainTrack: tracks.main,
+		mainTrack,
 		excludeElementId,
 	});
 	if (!earliestElement) {

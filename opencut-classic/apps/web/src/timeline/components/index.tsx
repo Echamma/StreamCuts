@@ -20,6 +20,10 @@ import {
 	ContextMenuItem,
 	ContextMenuTrigger,
 } from "@/components/ui/context-menu";
+import {
+	getMainVideoTrack,
+	getOrderedTimelineTracks,
+} from "@/timeline/scene-tracks-view";
 import { useTimelineZoom } from "@/timeline/hooks/use-timeline-zoom";
 import {
 	useCallback,
@@ -131,11 +135,11 @@ export function Timeline() {
 	const tracks = useMemo<TimelineTrack[]>(
 		() =>
 			scene
-				? [...scene.tracks.overlay, scene.tracks.main, ...scene.tracks.audio]
+				? getOrderedTimelineTracks({ tracks: scene.tracks })
 				: [],
 		[scene],
 	);
-	const mainTrackId = scene?.tracks.main.id ?? null;
+	const mainTrackId = scene ? getMainVideoTrack({ tracks: scene.tracks }).id : null;
 	const seek = (time: MediaTime) => editor.playback.seek({ time });
 
 	const timelineRef = useRef<HTMLDivElement>(null);
@@ -618,7 +622,7 @@ function TrackLabelsPanel({
 	const tracks = useMemo<TimelineTrack[]>(
 		() =>
 			scene
-				? [...scene.tracks.overlay, scene.tracks.main, ...scene.tracks.audio]
+				? getOrderedTimelineTracks({ tracks: scene.tracks })
 				: [],
 		[scene],
 	);
@@ -759,7 +763,7 @@ function TimelineTrackRows({
 	const tracks = useMemo<TimelineTrack[]>(
 		() =>
 			scene
-				? [...scene.tracks.overlay, scene.tracks.main, ...scene.tracks.audio]
+				? getOrderedTimelineTracks({ tracks: scene.tracks })
 				: [],
 		[scene],
 	);
