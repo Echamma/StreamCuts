@@ -14,6 +14,10 @@ import type {
 	PlannedTrackCreation,
 } from "@/timeline/group-move";
 import { findTrackInSceneTracks } from "@/timeline/track-element-update";
+import {
+	getAudioBaseIndex,
+	getMainTrackRowIndex,
+} from "@/timeline/scene-tracks-view";
 
 export class MoveElementCommand extends Command {
 	private savedState: SceneTracks | null = null;
@@ -156,7 +160,7 @@ function insertTrackAtDisplayIndex({
 	if (track.type === "audio") {
 		const audioInsertIndex = Math.max(
 			0,
-			Math.min(insertIndex - tracks.overlay.length - 1, tracks.audio.length),
+			Math.min(insertIndex - getAudioBaseIndex({ tracks }), tracks.audio.length),
 		);
 		return {
 			...tracks,
@@ -170,7 +174,7 @@ function insertTrackAtDisplayIndex({
 
 	const overlayInsertIndex = Math.max(
 		0,
-		Math.min(insertIndex, tracks.overlay.length),
+		Math.min(insertIndex, getMainTrackRowIndex({ tracks })),
 	);
 	return {
 		...tracks,

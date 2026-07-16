@@ -132,3 +132,65 @@ export function getOrderedTimelineTracks({
 }): TimelineTrack[] {
 	return [...tracks.overlay, tracks.main, ...tracks.audio];
 }
+
+/**
+ * Look up a track by id across every kind — main, overlay, and audio. Returns
+ * `undefined` when no track has that id. Replaces the common pattern
+ *   tracks.main.id === id ? tracks.main : overlay.find(...) ?? audio.find(...)
+ * with one call so a Phase C shape change only touches this file.
+ */
+export function findTrackById({
+	tracks,
+	trackId,
+}: {
+	tracks: SceneTracks;
+	trackId: string;
+}): TimelineTrack | undefined {
+	if (tracks.main.id === trackId) return tracks.main;
+	const overlayHit = tracks.overlay.find((track) => track.id === trackId);
+	if (overlayHit) return overlayHit;
+	return tracks.audio.find((track) => track.id === trackId);
+}
+
+/**
+ * Row index of the main video track in the ordered enumeration
+ * `[...overlay, main, ...audio]` — today `overlay.length`. This helper isolates
+ * the concrete-shape assumption so insertion-index arithmetic can stop reaching
+ * for `overlay.length` directly.
+ *
+ * Post-R1 the enumeration order changes and this returns `getAllVideoTracks`'s
+ * index for the ripple track; callers using it as an insertion pivot will need
+ * a follow-up dedicated helper. For now, callers that used
+ * `tracks.overlay.length` as "the main-track row" are equivalent to this.
+ */
+export function getMainTrackRowIndex({
+	tracks,
+}: {
+	tracks: SceneTracks;
+}): number {
+	return tracks.overlay.length;
+}
+
+/**
+ * First row index of the audio band in the ordered enumeration — today
+ * `overlay.length + 1`. Same isolation goal as `getMainTrackRowIndex`.
+ */
+export function getAudioBaseIndex({
+	tracks,
+}: {
+	tracks: SceneTracks;
+}): number {
+	return tracks.overlay.length + 1;
+}
+
+/**
+ * Total row count across the ordered enumeration — today
+ * `overlay.length + 1 + audio.length`.
+ */
+export function getTotalTrackCount({
+	tracks,
+}: {
+	tracks: SceneTracks;
+}): number {
+	return tracks.overlay.length + 1 + tracks.audio.length;
+}

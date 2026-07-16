@@ -1,13 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import {
+	findTrackById,
 	getAllVideoTracks,
+	getAudioBaseIndex,
 	getAudioTracks,
 	getEffectTracks,
 	getGraphicTracks,
+	getMainTrackRowIndex,
 	getMainVideoTrack,
 	getOrderedTimelineTracks,
 	getOverlayVideoTracks,
 	getTextTracks,
+	getTotalTrackCount,
 } from "@/timeline/scene-tracks-view";
 import type {
 	AudioTrack,
@@ -191,6 +195,62 @@ describe("getOrderedTimelineTracks", () => {
 		expect(getOrderedTimelineTracks({ tracks }).map((t) => t.id)).toEqual([
 			"V1-main",
 		]);
+	});
+});
+
+describe("findTrackById", () => {
+	test("returns the main track when its id matches", () => {
+		const tracks = scene({ main: videoTrack({ id: "V1-main" }) });
+		expect(findTrackById({ tracks, trackId: "V1-main" })?.id).toBe("V1-main");
+	});
+
+	test("returns an overlay track when its id matches", () => {
+		const tracks = scene({
+			main: videoTrack({ id: "V1-main" }),
+			overlay: [textTrack({ id: "T1" }), graphicTrack({ id: "G1" })],
+		});
+		expect(findTrackById({ tracks, trackId: "G1" })?.id).toBe("G1");
+	});
+
+	test("returns an audio track when its id matches", () => {
+		const tracks = scene({
+			main: videoTrack({ id: "V1-main" }),
+			audio: [audioTrack({ id: "A1" })],
+		});
+		expect(findTrackById({ tracks, trackId: "A1" })?.id).toBe("A1");
+	});
+
+	test("returns undefined for an unknown id", () => {
+		const tracks = scene({ main: videoTrack({ id: "V1-main" }) });
+		expect(findTrackById({ tracks, trackId: "no-such-id" })).toBeUndefined();
+	});
+});
+
+describe("shape-arithmetic helpers", () => {
+	test("getMainTrackRowIndex = overlay.length", () => {
+		const tracks = scene({
+			main: videoTrack({ id: "V1-main" }),
+			overlay: [textTrack({ id: "T1" }), videoTrack({ id: "V2" })],
+			audio: [audioTrack({ id: "A1" })],
+		});
+		expect(getMainTrackRowIndex({ tracks })).toBe(2);
+	});
+
+	test("getAudioBaseIndex = overlay.length + 1", () => {
+		const tracks = scene({
+			main: videoTrack({ id: "V1-main" }),
+			overlay: [textTrack({ id: "T1" }), videoTrack({ id: "V2" })],
+		});
+		expect(getAudioBaseIndex({ tracks })).toBe(3);
+	});
+
+	test("getTotalTrackCount = overlay.length + 1 + audio.length", () => {
+		const tracks = scene({
+			main: videoTrack({ id: "V1-main" }),
+			overlay: [textTrack({ id: "T1" })],
+			audio: [audioTrack({ id: "A1" }), audioTrack({ id: "A2" })],
+		});
+		expect(getTotalTrackCount({ tracks })).toBe(4);
 	});
 });
 
