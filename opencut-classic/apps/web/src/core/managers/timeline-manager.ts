@@ -8,6 +8,7 @@ import type {
 	TimelineElement,
 	RetimeConfig,
 	VideoTrack,
+	ClipMarker,
 } from "@/timeline";
 import { calculateTotalDuration, isRetimableElement } from "@/timeline";
 import {
@@ -18,6 +19,12 @@ import {
 	findRightAdjacentId,
 	type TrimClip,
 } from "@/timeline/trim";
+import {
+	addClipMarkerToList,
+	localTimeForClip,
+	removeClipMarkerFromList,
+	updateClipMarkerInList,
+} from "@/timeline/clip-markers";
 import { TimelineDragSource } from "@/timeline/drag-source";
 import { findTrackInSceneTracks } from "@/timeline/track-element-update";
 import { lastFrameMediaTime, type MediaTime, ZERO_MEDIA_TIME } from "@/wasm";
@@ -321,6 +328,104 @@ export class TimelineManager {
 			],
 		});
 		return result.applied;
+	}
+
+	/**
+	 * Add a clip-level marker (EDIT-005) to an element at an absolute timeline
+	 * time. The time is converted to element-local and clamped to the clip's
+	 * visible span, so marking always lands a marker on the clip (at the nearest
+	 * edge when the playhead sits outside it); re-adding at the same tick updates
+	 * the existing marker. Commits one undoable step.
+	 */
+	addClipMarker({
+		trackId,
+		elementId,
+		time,
+		note,
+		color,
+	}: {
+		trackId: string;
+		elementId: string;
+		time: MediaTime;
+		note?: string;
+		color?: string;
+	}): void {
+		const element = this.getElementByRef({ trackId, elementId });
+		if (!element) {
+			return;
+		}
+
+		const localTime = localTimeForClip({
+			elementStartTime: element.startTime,
+			elementDuration: element.duration,
+			absoluteTime: time,
+		});
+		const nextMarkers = addClipMarkerToList({
+			markers: element.markers ?? [],
+			marker: { time: localTime, note, color },
+		});
+
+		this.updateElements({
+			updates: [{ trackId, elementId, patch: { markers: nextMarkers } }],
+		});
+	}
+
+	/**
+	 * Remove the clip marker at `localTime` (element-local, tick-exact) from an
+	 * element. Commits one undoable step.
+	 */
+	removeClipMarker({
+		trackId,
+		elementId,
+		localTime,
+	}: {
+		trackId: string;
+		elementId: string;
+		localTime: MediaTime;
+	}): void {
+		const element = this.getElementByRef({ trackId, elementId });
+		if (!element?.markers) {
+			return;
+		}
+		const nextMarkers = removeClipMarkerFromList({
+			markers: element.markers,
+			time: localTime,
+		});
+
+		this.updateElements({
+			updates: [{ trackId, elementId, patch: { markers: nextMarkers } }],
+		});
+	}
+
+	/**
+	 * Patch the note/color of the clip marker at `localTime` (element-local,
+	 * tick-exact). Commits one undoable step. No-op when the element or marker is
+	 * gone.
+	 */
+	updateClipMarker({
+		trackId,
+		elementId,
+		localTime,
+		updates,
+	}: {
+		trackId: string;
+		elementId: string;
+		localTime: MediaTime;
+		updates: Partial<Omit<ClipMarker, "time">>;
+	}): void {
+		const element = this.getElementByRef({ trackId, elementId });
+		if (!element?.markers) {
+			return;
+		}
+		const nextMarkers = updateClipMarkerInList({
+			markers: element.markers,
+			time: localTime,
+			updates,
+		});
+
+		this.updateElements({
+			updates: [{ trackId, elementId, patch: { markers: nextMarkers } }],
+		});
 	}
 
 	moveElements({

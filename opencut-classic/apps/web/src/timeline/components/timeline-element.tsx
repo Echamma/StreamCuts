@@ -87,6 +87,7 @@ import {
 	Exchange01Icon,
 	KeyframeIcon,
 	MagicWand05Icon,
+	Bookmark02Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { uppercase } from "@/utils/string";
@@ -510,6 +511,21 @@ export function TimelineElement({
 						>
 							Duplicate
 						</ActionMenuItem>
+					)}
+					{selectedElements.length === 1 && (
+						<ContextMenuItem
+							icon={<HugeiconsIcon icon={Bookmark02Icon} />}
+							onClick={(event: React.MouseEvent) => {
+								event.stopPropagation();
+								editor.timeline.addClipMarker({
+									trackId: track.id,
+									elementId: element.id,
+									time: editor.playback.getCurrentTime(),
+								});
+							}}
+						>
+							Add marker
+						</ContextMenuItem>
 					)}
 					{canElementHaveAudio(element) && hasAudio && (
 						<MuteMenuItem

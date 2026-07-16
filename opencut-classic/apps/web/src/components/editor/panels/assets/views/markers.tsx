@@ -1,22 +1,49 @@
 "use client";
 
+import { useMemo, useState } from "react";
 import { useEditor, useScenes } from "@/editor/use-editor";
 import { mediaTimeToSeconds } from "@/wasm";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { ColorPicker } from "@/components/ui/color-picker";
+import {
+	Popover,
+	PopoverContent,
+	PopoverTrigger,
+} from "@/components/ui/popover";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { Delete02Icon, PlusSignIcon } from "@hugeicons/core-free-icons";
+import {
+	Delete02Icon,
+	Edit03Icon,
+	PlusSignIcon,
+} from "@hugeicons/core-free-icons";
 import type { Bookmark } from "@/timeline";
+import { DEFAULT_TIMELINE_BOOKMARK_COLOR } from "@/timeline/components/theme";
+import { uppercase } from "@/utils/string";
 import {
 	formatMarkerTime,
 	markerLabel,
 	sortBookmarksByTime,
 } from "@/timeline/bookmarks/marker-list";
+import {
+	clipMarkerLabel,
+	collectClipMarkers,
+	type CollectedClipMarker,
+} from "@/timeline/clip-markers";
 import { PanelView } from "./base-panel";
 
 export function MarkersView() {
 	const editor = useEditor();
 	const bookmarks = useScenes(
 		(e) => e.scenes.getActiveSceneOrNull()?.bookmarks ?? null,
+	);
+	const tracks = useScenes(
+		(e) => e.scenes.getActiveSceneOrNull()?.tracks ?? null,
+	);
+	const clipMarkers = useMemo(
+		() => (tracks ? collectClipMarkers({ tracks }) : []),
+		[tracks],
 	);
 
 	const addAction = (
@@ -47,14 +74,16 @@ export function MarkersView() {
 	}
 
 	const sorted = sortBookmarksByTime({ bookmarks });
+	const isEmpty = sorted.length === 0 && clipMarkers.length === 0;
 
-	if (sorted.length === 0) {
+	if (isEmpty) {
 		return (
 			<PanelView title="Markers" actions={addAction}>
 				<div className="flex flex-col items-center justify-center gap-2 py-16 text-center">
 					<p className="font-medium">No markers yet</p>
 					<p className="text-muted-foreground text-sm text-balance">
-						Add a marker at the playhead to jump back to it later.
+						Add a marker at the playhead to jump back to it later, or right-click
+						a clip to mark a moment on it.
 					</p>
 				</div>
 			</PanelView>
@@ -63,16 +92,47 @@ export function MarkersView() {
 
 	return (
 		<PanelView title="Markers" actions={addAction}>
-			<div className="flex flex-col gap-1 pb-2">
-				{sorted.map((bookmark) => (
-					<MarkerRow key={bookmark.time} bookmark={bookmark} />
-				))}
+			<div className="flex flex-col gap-3 pb-2">
+				{sorted.length > 0 && (
+					<Section title="Timeline">
+						{sorted.map((bookmark) => (
+							<BookmarkRow key={bookmark.time} bookmark={bookmark} />
+						))}
+					</Section>
+				)}
+				{clipMarkers.length > 0 && (
+					<Section title="Clips">
+						{clipMarkers.map((entry) => (
+							<ClipMarkerRow
+								key={`${entry.elementId}:${entry.marker.time}`}
+								entry={entry}
+							/>
+						))}
+					</Section>
+				)}
 			</div>
 		</PanelView>
 	);
 }
 
-function MarkerRow({ bookmark }: { bookmark: Bookmark }) {
+function Section({
+	title,
+	children,
+}: {
+	title: string;
+	children: React.ReactNode;
+}) {
+	return (
+		<div className="flex flex-col gap-1">
+			<p className="text-muted-foreground px-1 text-[10px] font-medium tracking-wide uppercase">
+				{title}
+			</p>
+			{children}
+		</div>
+	);
+}
+
+function BookmarkRow({ bookmark }: { bookmark: Bookmark }) {
 	const editor = useEditor();
 	const seconds = mediaTimeToSeconds({ time: bookmark.time });
 
@@ -107,5 +167,116 @@ function MarkerRow({ bookmark }: { bookmark: Bookmark }) {
 				<HugeiconsIcon icon={Delete02Icon} className="size-3.5" />
 			</Button>
 		</div>
+	);
+}
+
+function ClipMarkerRow({ entry }: { entry: CollectedClipMarker }) {
+	const editor = useEditor();
+	const seconds = mediaTimeToSeconds({ time: entry.absoluteTime });
+	const label = clipMarkerLabel({
+		marker: entry.marker,
+		elementName: entry.elementName,
+	});
+	// Only surface the clip name in the sub-line when the label is the note —
+	// otherwise the label already is the clip name and repeating it is noise.
+	const showClipName = label !== entry.elementName;
+
+	return (
+		<div className="group border-border bg-muted/40 hover:bg-muted/60 flex items-center gap-2 rounded-md border p-2 transition-colors">
+			<span
+				className="size-2.5 shrink-0 rounded-full"
+				style={{ backgroundColor: entry.marker.color ?? "var(--primary)" }}
+			/>
+			<button
+				type="button"
+				className="flex min-w-0 flex-1 flex-col items-start text-left"
+				onClick={() => editor.playback.seek({ time: entry.absoluteTime })}
+				title="Jump to clip marker"
+			>
+				<span className="text-foreground w-full truncate text-xs">{label}</span>
+				<span className="text-muted-foreground flex w-full items-center gap-1.5 text-[10px]">
+					{showClipName && (
+						<span className="min-w-0 truncate">{entry.elementName}</span>
+					)}
+					<span className="tabular-nums">{formatMarkerTime({ seconds })}</span>
+				</span>
+			</button>
+			<ClipMarkerEditPopover entry={entry} />
+			<Button
+				variant="ghost"
+				size="icon"
+				className="size-6 shrink-0 opacity-0 transition-opacity group-hover:opacity-100"
+				onClick={() => {
+					editor.timeline.removeClipMarker({
+						trackId: entry.trackId,
+						elementId: entry.elementId,
+						localTime: entry.marker.time,
+					});
+				}}
+				title="Delete clip marker"
+			>
+				<HugeiconsIcon icon={Delete02Icon} className="size-3.5" />
+			</Button>
+		</div>
+	);
+}
+
+function ClipMarkerEditPopover({ entry }: { entry: CollectedClipMarker }) {
+	const editor = useEditor();
+	const [open, setOpen] = useState(false);
+
+	const patch = (updates: { note?: string; color?: string }) => {
+		editor.timeline.updateClipMarker({
+			trackId: entry.trackId,
+			elementId: entry.elementId,
+			localTime: entry.marker.time,
+			updates,
+		});
+	};
+
+	const colorHex = (entry.marker.color ?? DEFAULT_TIMELINE_BOOKMARK_COLOR)
+		.replace("#", "")
+		.toUpperCase();
+
+	return (
+		<Popover open={open} onOpenChange={setOpen}>
+			<PopoverTrigger asChild>
+				<Button
+					variant="ghost"
+					size="icon"
+					className="size-6 shrink-0 opacity-0 transition-opacity group-hover:opacity-100"
+					title="Edit clip marker"
+				>
+					<HugeiconsIcon icon={Edit03Icon} className="size-3.5" />
+				</Button>
+			</PopoverTrigger>
+			<PopoverContent
+				className="flex w-64 flex-col gap-3 p-3"
+				align="end"
+				side="bottom"
+				sideOffset={8}
+				onOpenAutoFocus={(event) => event.preventDefault()}
+			>
+				<div className="flex flex-col gap-2">
+					<Label className="text-xs">Note</Label>
+					<Input
+						placeholder="Add a note..."
+						value={entry.marker.note ?? ""}
+						onChange={(event) => patch({ note: event.target.value })}
+						className="h-8 text-sm"
+					/>
+				</div>
+				<div className="flex flex-col gap-2">
+					<Label className="text-xs">Color</Label>
+					<ColorPicker
+						value={colorHex}
+						onChangeEnd={(color) =>
+							patch({ color: `#${uppercase({ string: color })}` })
+						}
+						className="bg-background border"
+					/>
+				</div>
+			</PopoverContent>
+		</Popover>
 	);
 }
