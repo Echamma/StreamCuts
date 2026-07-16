@@ -1,5 +1,12 @@
 import type { SceneTracks, TimelineElement, TimelineTrack } from "@/timeline";
+import { findTrackById } from "@/timeline/scene-tracks-view";
 
+/**
+ * Kept for callers that use the `null` convention; delegates to `findTrackById`.
+ * The write helpers below still reach for the concrete
+ * `{ overlay, main, audio }` shape on purpose — they are the shape-native
+ * abstraction that swaps at Phase C so consumers don't have to.
+ */
 export function findTrackInSceneTracks({
 	tracks,
 	trackId,
@@ -7,15 +14,7 @@ export function findTrackInSceneTracks({
 	tracks: SceneTracks;
 	trackId: string;
 }): TimelineTrack | null {
-	if (tracks.main.id === trackId) {
-		return tracks.main;
-	}
-
-	return (
-		tracks.overlay.find((track) => track.id === trackId) ??
-		tracks.audio.find((track) => track.id === trackId) ??
-		null
-	);
+	return findTrackById({ tracks, trackId }) ?? null;
 }
 
 export function updateTrackInSceneTracks({

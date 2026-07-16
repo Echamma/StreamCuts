@@ -1,5 +1,10 @@
 import type { SceneTracks, TimelineTrack } from "@/timeline";
-import { getOrderedTimelineTracks } from "@/timeline/scene-tracks-view";
+import {
+	getAudioBaseIndex,
+	getMainTrackRowIndex,
+	getMainVideoTrack,
+	getOrderedTimelineTracks,
+} from "@/timeline/scene-tracks-view";
 import type { GroupTrackSection } from "./types";
 
 export interface TrackPlacement {
@@ -25,13 +30,14 @@ export function getTrackPlacementById({
 	tracks: SceneTracks;
 	trackId: string;
 }): TrackPlacement | null {
-	if (tracks.main.id === trackId) {
+	const mainTrack = getMainVideoTrack({ tracks });
+	if (mainTrack.id === trackId) {
 		return {
 			trackId,
-			trackType: tracks.main.type,
+			trackType: mainTrack.type,
 			section: "main",
 			sectionIndex: -1,
-			displayIndex: tracks.overlay.length,
+			displayIndex: getMainTrackRowIndex({ tracks }),
 		};
 	}
 
@@ -57,7 +63,7 @@ export function getTrackPlacementById({
 			trackType: tracks.audio[audioTrackIndex].type,
 			section: "audio",
 			sectionIndex: audioTrackIndex,
-			displayIndex: tracks.overlay.length + 1 + audioTrackIndex,
+			displayIndex: getAudioBaseIndex({ tracks }) + audioTrackIndex,
 		};
 	}
 
