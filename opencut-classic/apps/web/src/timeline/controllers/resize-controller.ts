@@ -25,6 +25,7 @@ import {
 import { getElementEdgeSnapPoints } from "@/timeline/element-snap-source";
 import { getPlayheadSnapPoints } from "@/timeline/playhead-snap-source";
 import { getAnimationKeyframeSnapPointsForTimeline } from "@/timeline/animation-snap-points";
+import { getOrderedTimelineTracks } from "@/timeline/scene-tracks-view";
 import {
 	isRetimableElement,
 	type SceneTracks,
@@ -80,10 +81,7 @@ export function buildResizeMembers({
 		selectedElements.map((el) => el.elementId),
 	);
 	const trackMap = new Map(
-		[...tracks.overlay, tracks.main, ...tracks.audio].map((track) => [
-			track.id,
-			track,
-		]),
+		getOrderedTimelineTracks({ tracks }).map((track) => [track.id, track]),
 	);
 
 	return selectedElements.flatMap(({ trackId, elementId }) => {

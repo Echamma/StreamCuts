@@ -26,6 +26,7 @@ import {
 	updateClipMarkerInList,
 } from "@/timeline/clip-markers";
 import { TimelineDragSource } from "@/timeline/drag-source";
+import { getOrderedTimelineTracks } from "@/timeline/scene-tracks-view";
 import { findTrackInSceneTracks } from "@/timeline/track-element-update";
 import { lastFrameMediaTime, type MediaTime, ZERO_MEDIA_TIME } from "@/wasm";
 import {
@@ -1282,21 +1283,9 @@ export class TimelineManager {
 			return null;
 		}
 
-		if (
-			activeScene.tracks.main.elements.some(
-				(element) => element.id === elementId,
-			)
-		) {
-			return activeScene.tracks.main.id;
-		}
-
-		for (const track of activeScene.tracks.overlay) {
-			if (track.elements.some((element) => element.id === elementId)) {
-				return track.id;
-			}
-		}
-
-		for (const track of activeScene.tracks.audio) {
+		for (const track of getOrderedTimelineTracks({
+			tracks: activeScene.tracks,
+		})) {
 			if (track.elements.some((element) => element.id === elementId)) {
 				return track.id;
 			}
