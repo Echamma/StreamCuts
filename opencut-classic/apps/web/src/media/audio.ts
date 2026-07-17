@@ -12,6 +12,7 @@ import {
 	getWaveformSourceKeyForAsset,
 } from "@/media/asset-source";
 import { applyAudioMasteringToBuffer } from "@/media/audio-mastering";
+import { getOrderedTimelineTracks } from "@/timeline/scene-tracks-view";
 import type { AudioCapableElement } from "@/timeline/audio-state";
 import {
 	hasAnimatedVolume,
@@ -113,7 +114,7 @@ export function collectAudibleCandidates({
 	tracks: SceneTracks;
 	mediaAssets: MediaAsset[];
 }): AudibleElementCandidate[] {
-	const allTracks = [...tracks.overlay, tracks.main, ...tracks.audio];
+	const allTracks = getOrderedTimelineTracks({ tracks });
 	const mediaMap = new Map(mediaAssets.map((a) => [a.id, a]));
 	const candidates: AudibleElementCandidate[] = [];
 	const soloActive = anyTrackSoloed({ tracks });
@@ -537,7 +538,7 @@ export async function collectAudioMixSources({
 	tracks: SceneTracks;
 	mediaAssets: MediaAsset[];
 }): Promise<AudioMixSource[]> {
-	const orderedTracks = [...tracks.overlay, tracks.main, ...tracks.audio];
+	const orderedTracks = getOrderedTimelineTracks({ tracks });
 	const audioMixSources: AudioMixSource[] = [];
 	const mediaMap = new Map<string, MediaAsset>(
 		mediaAssets.map((asset) => [asset.id, asset]),
@@ -601,7 +602,7 @@ export async function collectAudioClips({
 	tracks: SceneTracks;
 	mediaAssets: MediaAsset[];
 }): Promise<AudioClipSource[]> {
-	const orderedTracks = [...tracks.overlay, tracks.main, ...tracks.audio];
+	const orderedTracks = getOrderedTimelineTracks({ tracks });
 	const clips: AudioClipSource[] = [];
 	const mediaMap = new Map<string, MediaAsset>(
 		mediaAssets.map((asset) => [asset.id, asset]),

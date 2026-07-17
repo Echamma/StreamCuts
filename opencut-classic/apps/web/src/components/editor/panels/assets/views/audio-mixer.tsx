@@ -8,6 +8,11 @@ import {
 import { anyTrackSoloed, isTrackAudioSilenced } from "@/timeline/audio-solo";
 import { getElementPan, PAN_MAX, PAN_MIN } from "@/timeline/audio-pan";
 import { VOLUME_DB_MIN, VOLUME_DB_MAX } from "@/timeline/audio-constants";
+import {
+	getAudioTracks,
+	getMainVideoTrack,
+	getOverlayVideoTracks,
+} from "@/timeline/scene-tracks-view";
 import { PanelView } from "./base-panel";
 import { MasterMeter } from "./master-meter";
 import { Button } from "@/components/ui/button";
@@ -16,7 +21,7 @@ import { Separator } from "@/components/ui/separator";
 import { VolumeHighIcon, VolumeOffIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { cn } from "@/utils/ui";
-import type { AudioElement, VideoElement, VideoTrack } from "@/timeline";
+import type { AudioElement, VideoElement } from "@/timeline";
 
 function dbToSlider(db: number): number {
 	return ((db - VOLUME_DB_MIN) / (VOLUME_DB_MAX - VOLUME_DB_MIN)) * 100;
@@ -61,15 +66,15 @@ export function AudioMixerView() {
 		);
 	}
 
-	const mainVideoElements = tracks.main.elements.filter(
+	const mainTrack = getMainVideoTrack({ tracks });
+	const mainVideoElements = mainTrack.elements.filter(
 		(el): el is VideoElement => el.type === "video",
 	);
 
-	const overlayVideoTracks = tracks.overlay.filter(
-		(t): t is VideoTrack => t.type === "video",
+	const overlayVideoTracks = getOverlayVideoTracks({ tracks });
+	const audioTracks = getAudioTracks({ tracks }).filter(
+		(t) => t.elements.length > 0,
 	);
-
-	const audioTracks = tracks.audio.filter((t) => t.elements.length > 0);
 	const soloActive = anyTrackSoloed({ tracks });
 
 	const hasAny =
@@ -114,23 +119,23 @@ export function AudioMixerView() {
 					<>
 						<TrackSection
 							label="Video"
-							trackId={tracks.main.id}
-							trackMuted={tracks.main.muted}
-							trackSoloed={tracks.main.soloed ?? false}
+							trackId={mainTrack.id}
+							trackMuted={mainTrack.muted}
+							trackSoloed={mainTrack.soloed ?? false}
 							onToggleTrackMute={() =>
-								editor.timeline.toggleTrackMute({ trackId: tracks.main.id })
+								editor.timeline.toggleTrackMute({ trackId: mainTrack.id })
 							}
 							onToggleTrackSolo={() =>
-								editor.timeline.toggleTrackSolo({ trackId: tracks.main.id })
+								editor.timeline.toggleTrackSolo({ trackId: mainTrack.id })
 							}
 						>
 							{mainVideoElements.map((el) => (
 								<ElementMixerRow
 									key={el.id}
 									element={el}
-									trackId={tracks.main.id}
+									trackId={mainTrack.id}
 									trackMuted={isTrackAudioSilenced({
-										track: tracks.main,
+										track: mainTrack,
 										soloActive,
 									})}
 								/>

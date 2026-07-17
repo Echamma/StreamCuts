@@ -3,6 +3,7 @@
 import { useRef, useState } from "react";
 import { useEditor } from "@/editor/use-editor";
 import type { TextElement } from "@/timeline";
+import { getTextTracks } from "@/timeline/scene-tracks-view";
 import type { ParamValue, ParamValues } from "@/params";
 import {
 	Section,
@@ -192,7 +193,7 @@ function PresetsBar({
 export function CaptionStylePanel() {
 	const editor = useEditor();
 	const scene = editor.scenes.getActiveScene();
-	const textTracks = scene.tracks.overlay.filter((t) => t.type === "text");
+	const textTracks = getTextTracks({ tracks: scene.tracks });
 
 	const rows: RowRef[] = textTracks.flatMap((track) =>
 		(track.elements as TextElement[]).map((el) => ({

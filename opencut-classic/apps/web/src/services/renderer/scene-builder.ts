@@ -1,4 +1,5 @@
 import type { SceneTracks, TimelineTrack } from "@/timeline";
+import { getMainVideoTrack } from "@/timeline/scene-tracks-view";
 import type { MediaAsset } from "@/media/types";
 import { getAssetSourceStartTime } from "@/media/asset-source";
 import { RootNode } from "./nodes/root-node";
@@ -402,12 +403,13 @@ export function buildScene({
 	const rootNode = new RootNode({ duration });
 	const mediaMap = new Map(mediaAssets.map((m) => [m.id, m]));
 
+	const mainVideoTrack = getMainVideoTrack({ tracks });
 	const visibleTracks = [
 		...tracks.overlay.filter((track) => !("hidden" in track && track.hidden)),
-		...(!tracks.main.hidden ? [tracks.main] : []),
+		...(!mainVideoTrack.hidden ? [mainVideoTrack] : []),
 	];
 	const orderedTracksBottomToTop = visibleTracks.slice().reverse();
-	const mainTrack = tracks.main.hidden ? undefined : tracks.main;
+	const mainTrack = mainVideoTrack.hidden ? undefined : mainVideoTrack;
 
 	const allNodes = buildTrackNodes({
 		tracks: orderedTracksBottomToTop,

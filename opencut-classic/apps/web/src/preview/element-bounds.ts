@@ -1,4 +1,5 @@
 import type { SceneTracks, TimelineElement } from "@/timeline";
+import { getMainVideoTrack } from "@/timeline/scene-tracks-view";
 import type { MediaAsset } from "@/media/types";
 import { STICKER_INTRINSIC_SIZE_FALLBACK } from "@/stickers/intrinsic-size";
 import { DEFAULT_GRAPHIC_SOURCE_SIZE } from "@/graphics";
@@ -257,9 +258,10 @@ export function getVisibleElementsWithBounds({
 	mediaAssets: MediaAsset[];
 }): ElementWithBounds[] {
 	const mediaMap = new Map(mediaAssets.map((m) => [m.id, m]));
+	const mainVideoTrack = getMainVideoTrack({ tracks });
 	const orderedTracks = [
 		...tracks.overlay.filter((track) => !("hidden" in track && track.hidden)),
-		...(!tracks.main.hidden ? [tracks.main] : []),
+		...(!mainVideoTrack.hidden ? [mainVideoTrack] : []),
 	].reverse();
 
 	const result: ElementWithBounds[] = [];
