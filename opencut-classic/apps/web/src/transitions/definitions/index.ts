@@ -6,6 +6,7 @@ import { dipWhiteTransition } from "./dip-white";
 import { slideLeftTransition } from "./slide-left";
 import { pushLeftTransition } from "./push-left";
 import { zoomInTransition } from "./zoom-in";
+import { blurThroughTransition } from "./blur-through";
 
 export const defaultTransitions = [
 	crossfadeTransition,
@@ -16,4 +17,5 @@ export const defaultTransitions = [
 	slideLeftTransition,
 	pushLeftTransition,
 	zoomInTransition,
+	blurThroughTransition,
 ];

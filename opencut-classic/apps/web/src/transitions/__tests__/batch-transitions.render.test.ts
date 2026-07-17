@@ -5,6 +5,7 @@ import { dipWhiteTransition } from "@/transitions/definitions/dip-white";
 import { slideLeftTransition } from "@/transitions/definitions/slide-left";
 import { pushLeftTransition } from "@/transitions/definitions/push-left";
 import { zoomInTransition } from "@/transitions/definitions/zoom-in";
+import { blurThroughTransition } from "@/transitions/definitions/blur-through";
 
 // The transition definitions are dependency-free (type-only imports), so their
 // render() can be exercised directly against a real 2D canvas — from = red,
@@ -72,6 +73,7 @@ describe.each([
 	["slide-left", slideLeftTransition],
 	["push-left", pushLeftTransition],
 	["zoom-in", zoomInTransition],
+	["blur-through", blurThroughTransition],
 ] as const)("%s transition endpoints", (_name, transition) => {
 	test("progress 0 shows the outgoing (from) clip", () => {
 		const ctx = renderAt({ transition, progress: 0 });
