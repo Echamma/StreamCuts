@@ -1,16 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import {
 	findTrackById,
-	getAllVideoTracks,
 	getAudioBaseIndex,
-	getAudioTracks,
-	getEffectTracks,
-	getGraphicTracks,
 	getMainTrackRowIndex,
 	getMainVideoTrack,
 	getOrderedTimelineTracks,
 	getOverlayVideoTracks,
-	getTextTracks,
 	getTotalTrackCount,
 } from "@/timeline/scene-tracks-view";
 import type {
@@ -70,25 +65,6 @@ function scene({
 	return { video, text, graphic, effect, audio };
 }
 
-describe("getAllVideoTracks", () => {
-	test("returns tracks.video in place", () => {
-		const tracks = scene({
-			video: [
-				videoTrack({ id: "V1-main" }),
-				videoTrack({ id: "V2" }),
-				videoTrack({ id: "V3" }),
-			],
-			text: [textTrack({ id: "T1" })],
-			graphic: [graphicTrack({ id: "G1" })],
-		});
-		expect(getAllVideoTracks({ tracks }).map((t) => t.id)).toEqual([
-			"V1-main",
-			"V2",
-			"V3",
-		]);
-	});
-});
-
 describe("getMainVideoTrack", () => {
 	test("returns video[0] (the ripple track)", () => {
 		const tracks = scene({
@@ -116,46 +92,6 @@ describe("getOverlayVideoTracks", () => {
 	test("returns empty when only the ripple track exists", () => {
 		const tracks = scene({ video: [videoTrack({ id: "V1-main" })] });
 		expect(getOverlayVideoTracks({ tracks })).toEqual([]);
-	});
-});
-
-describe("getTextTracks", () => {
-	test("returns tracks.text in order", () => {
-		const tracks = scene({
-			video: [videoTrack({ id: "V1-main" })],
-			text: [textTrack({ id: "T1" }), textTrack({ id: "T2" })],
-		});
-		expect(getTextTracks({ tracks }).map((t) => t.id)).toEqual(["T1", "T2"]);
-	});
-});
-
-describe("getGraphicTracks", () => {
-	test("returns tracks.graphic in order", () => {
-		const tracks = scene({
-			video: [videoTrack({ id: "V1-main" })],
-			graphic: [graphicTrack({ id: "G1" }), graphicTrack({ id: "G2" })],
-		});
-		expect(getGraphicTracks({ tracks }).map((t) => t.id)).toEqual(["G1", "G2"]);
-	});
-});
-
-describe("getEffectTracks", () => {
-	test("returns tracks.effect in order", () => {
-		const tracks = scene({
-			video: [videoTrack({ id: "V1-main" })],
-			effect: [effectTrack({ id: "E1" })],
-		});
-		expect(getEffectTracks({ tracks }).map((t) => t.id)).toEqual(["E1"]);
-	});
-});
-
-describe("getAudioTracks", () => {
-	test("returns tracks.audio in order", () => {
-		const tracks = scene({
-			video: [videoTrack({ id: "V1-main" })],
-			audio: [audioTrack({ id: "A1" }), audioTrack({ id: "A2" })],
-		});
-		expect(getAudioTracks({ tracks }).map((t) => t.id)).toEqual(["A1", "A2"]);
 	});
 });
 
@@ -256,11 +192,11 @@ describe("view completeness (partition property)", () => {
 		});
 
 		const seenIds = [
-			...getAllVideoTracks({ tracks }).map((t) => t.id),
-			...getTextTracks({ tracks }).map((t) => t.id),
-			...getGraphicTracks({ tracks }).map((t) => t.id),
-			...getEffectTracks({ tracks }).map((t) => t.id),
-			...getAudioTracks({ tracks }).map((t) => t.id),
+			...tracks.video.map((t) => t.id),
+			...tracks.text.map((t) => t.id),
+			...tracks.graphic.map((t) => t.id),
+			...tracks.effect.map((t) => t.id),
+			...tracks.audio.map((t) => t.id),
 		];
 		expect(seenIds.sort()).toEqual(
 			["V1-main", "V2", "T1", "T2", "G1", "E1", "A1"].sort(),

@@ -1,41 +1,19 @@
-import type {
-	AudioTrack,
-	EffectTrack,
-	GraphicTrack,
-	SceneTracks,
-	TextTrack,
-	TimelineTrack,
-	VideoTrack,
-} from "@/timeline/types";
+import type { SceneTracks, TimelineTrack, VideoTrack } from "@/timeline/types";
 
 /**
- * R1 compatibility views over `SceneTracks` (see
- * `docs/roadmap/50-r1-uniform-tracks-spike.md`).
+ * Semantic views + shape-arithmetic helpers over `SceneTracks`
+ * (see `docs/roadmap/50-r1-uniform-tracks-spike.md`).
  *
- * Post-Phase-C: `SceneTracks` is the uniform shape
- *   { video: VideoTrack[]; text: TextTrack[]; graphic: GraphicTrack[];
- *     effect: EffectTrack[]; audio: AudioTrack[] }
+ * Post-R1 the shape is `{ video[], text[], graphic[], effect[], audio[] }`
  * with each band ordered bottom-to-top by compositing z-order. `video[0]` is
- * the ripple track (the former `main`). These views were introduced in Phase A
- * as adapters over the old `{overlay, main, audio}` shape; consumers migrated
- * to them during Phase B; now they simply read the new shape directly.
+ * the ripple track (the former `main`). These helpers stay non-trivial:
+ * band access should just be `tracks.text` etc.; use these when the caller
+ * needs "the ripple track", the enumeration across bands, or index math.
  */
 
 /**
- * Every video track in the scene, bottom-to-top. Direct alias for `tracks.video`.
- */
-export function getAllVideoTracks({
-	tracks,
-}: {
-	tracks: SceneTracks;
-}): VideoTrack[] {
-	return tracks.video;
-}
-
-/**
- * The bottom-most video track — the ripple track. Callers that used this to
- * mean "the former `main`" continue to work: after the R1 flip, `video[0]` is
- * the same track that was `main` before.
+ * The bottom-most video track — the ripple track. Post-R1 this is `video[0]`;
+ * callers that used this to mean "the former `main`" continue to work.
  */
 export function getMainVideoTrack({
 	tracks,
@@ -46,7 +24,7 @@ export function getMainVideoTrack({
 }
 
 /**
- * Video tracks above the main one. Post-R1 = `video.slice(1)`.
+ * Video tracks above the ripple track. `video.slice(1)`.
  */
 export function getOverlayVideoTracks({
 	tracks,
@@ -54,38 +32,6 @@ export function getOverlayVideoTracks({
 	tracks: SceneTracks;
 }): VideoTrack[] {
 	return tracks.video.slice(1);
-}
-
-export function getTextTracks({
-	tracks,
-}: {
-	tracks: SceneTracks;
-}): TextTrack[] {
-	return tracks.text;
-}
-
-export function getGraphicTracks({
-	tracks,
-}: {
-	tracks: SceneTracks;
-}): GraphicTrack[] {
-	return tracks.graphic;
-}
-
-export function getEffectTracks({
-	tracks,
-}: {
-	tracks: SceneTracks;
-}): EffectTrack[] {
-	return tracks.effect;
-}
-
-export function getAudioTracks({
-	tracks,
-}: {
-	tracks: SceneTracks;
-}): AudioTrack[] {
-	return tracks.audio;
 }
 
 /**

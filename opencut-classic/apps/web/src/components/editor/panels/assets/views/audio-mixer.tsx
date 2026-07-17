@@ -9,7 +9,6 @@ import { anyTrackSoloed, isTrackAudioSilenced } from "@/timeline/audio-solo";
 import { getElementPan, PAN_MAX, PAN_MIN } from "@/timeline/audio-pan";
 import { VOLUME_DB_MIN, VOLUME_DB_MAX } from "@/timeline/audio-constants";
 import {
-	getAudioTracks,
 	getMainVideoTrack,
 	getOverlayVideoTracks,
 } from "@/timeline/scene-tracks-view";
@@ -72,9 +71,7 @@ export function AudioMixerView() {
 	);
 
 	const overlayVideoTracks = getOverlayVideoTracks({ tracks });
-	const audioTracks = getAudioTracks({ tracks }).filter(
-		(t) => t.elements.length > 0,
-	);
+	const audioTracks = tracks.audio.filter((t) => t.elements.length > 0);
 	const soloActive = anyTrackSoloed({ tracks });
 
 	const hasAny =
