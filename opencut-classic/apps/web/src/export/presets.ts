@@ -25,7 +25,22 @@ export const EXPORT_PRESET_IDS = [
 	...EXPORT_PLATFORM_PRESET_IDS,
 ] as const;
 
-export type ExportPresetId = (typeof EXPORT_PRESET_IDS)[number];
+/**
+ * A preset id is one of: the sentinel `"custom"` (dialog is in manual mode), a
+ * built-in `ExportPlatformPresetId`, or a `user:<uuid>` string for a user-saved
+ * preset (DEL-004). We use a prefix instead of a discriminated union so old
+ * ids continue to match `isExportPlatformPresetId` unchanged.
+ */
+export type ExportPresetId =
+	| (typeof EXPORT_PRESET_IDS)[number]
+	| UserExportPresetId;
+
+export const USER_EXPORT_PRESET_ID_PREFIX = "user:" as const;
+export type UserExportPresetId = `${typeof USER_EXPORT_PRESET_ID_PREFIX}${string}`;
+
+export function isUserExportPresetId(value: string): value is UserExportPresetId {
+	return value.startsWith(USER_EXPORT_PRESET_ID_PREFIX);
+}
 
 export interface ExportPreset {
 	id: ExportPlatformPresetId;
@@ -36,6 +51,19 @@ export interface ExportPreset {
 	fps: FrameRate;
 	format: ExportFormat;
 	quality: ExportQuality;
+}
+
+/** A user-saved preset (DEL-004). Same shape as a built-in but freely edited. */
+export interface UserExportPreset {
+	id: UserExportPresetId;
+	name: string;
+	description: string;
+	width: number;
+	height: number;
+	fps: FrameRate;
+	format: ExportFormat;
+	quality: ExportQuality;
+	createdAt: number;
 }
 
 export const EXPORT_PRESETS: Record<ExportPlatformPresetId, ExportPreset> = {
@@ -118,6 +146,7 @@ export function isExportPlatformPresetId(
 }
 
 export function isExportPresetId(value: string): value is ExportPresetId {
+	if (isUserExportPresetId(value)) return true;
 	return EXPORT_PRESET_IDS.some((id) => id === value);
 }
 
@@ -133,7 +162,7 @@ export function applyExportPreset({
 	preset,
 	options,
 }: {
-	preset: ExportPreset;
+	preset: ExportPreset | UserExportPreset;
 	options: ExportOptions;
 }): ExportOptions {
 	return {
@@ -142,6 +171,44 @@ export function applyExportPreset({
 		quality: preset.quality,
 		fps: preset.fps,
 		canvasSizeOverride: { width: preset.width, height: preset.height },
+	};
+}
+
+/**
+ * Build a user preset record from a name + the current dialog state. `id` is
+ * assigned by the store; `createdAt` records insertion order for stable sorting.
+ */
+export function buildUserExportPreset({
+	id,
+	name,
+	options,
+	fps,
+	createdAt,
+}: {
+	id: UserExportPresetId;
+	name: string;
+	options: Pick<ExportOptions, "format" | "quality"> & {
+		canvasSizeOverride?: { width: number; height: number };
+	};
+	fps: FrameRate;
+	createdAt: number;
+}): UserExportPreset {
+	const width = options.canvasSizeOverride?.width ?? 1920;
+	const height = options.canvasSizeOverride?.height ?? 1080;
+	const fpsLabel =
+		fps.denominator === 1
+			? `${fps.numerator} fps`
+			: `${(fps.numerator / fps.denominator).toFixed(2)} fps`;
+	return {
+		id,
+		name,
+		description: `${width}×${height} · ${fpsLabel}`,
+		width,
+		height,
+		fps,
+		format: options.format,
+		quality: options.quality,
+		createdAt,
 	};
 }
 

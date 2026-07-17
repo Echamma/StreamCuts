@@ -44,8 +44,17 @@ import {
 	applyExportPreset,
 	getExportPreset,
 	isExportPlatformPresetId,
+	isUserExportPresetId,
 	type ExportPresetId,
+	type UserExportPresetId,
 } from "@/export/presets";
+import {
+	getUserExportPreset,
+	removeUserExportPreset,
+	saveUserExportPreset,
+	useUserExportPresets,
+} from "@/export/user-presets-store";
+import { Input } from "@/components/ui/input";
 import {
 	Section,
 	SectionContent,
@@ -234,13 +243,57 @@ function ExportPopover({
 		if (targetAspect === "16:9") return "youtube-1080p";
 		return "custom";
 	});
+	const userPresets = useUserExportPresets();
+	const [savePresetName, setSavePresetName] = useState<string>("");
+	const [isNamingPreset, setIsNamingPreset] = useState<boolean>(false);
 
 	const handlePresetChange = (next: ExportPresetId) => {
 		setPresetId(next);
 		if (next === "custom") return;
+		if (isUserExportPresetId(next)) {
+			const userPreset = getUserExportPreset({ id: next });
+			if (userPreset) {
+				setFormat(userPreset.format);
+				setQuality(userPreset.quality);
+			}
+			return;
+		}
 		const preset = getExportPreset({ id: next });
 		setFormat(preset.format);
 		setQuality(preset.quality);
+	};
+
+	// Resolve the preset object that drives canvas size + should be applied on export.
+	const resolvedPreset =
+		presetId === "custom"
+			? null
+			: isUserExportPresetId(presetId)
+				? getUserExportPreset({ id: presetId })
+				: getExportPreset({ id: presetId });
+
+	const canSaveAsPreset = resolvedPreset !== null;
+
+	const handleSavePreset = () => {
+		if (!resolvedPreset || !activeProject) return;
+		saveUserExportPreset({
+			name: savePresetName,
+			options: {
+				format,
+				quality,
+				canvasSizeOverride: {
+					width: resolvedPreset.width,
+					height: resolvedPreset.height,
+				},
+			},
+			fps: activeProject.settings.fps,
+		});
+		setSavePresetName("");
+		setIsNamingPreset(false);
+	};
+
+	const handleRemoveUserPreset = (id: UserExportPresetId) => {
+		removeUserExportPreset({ id });
+		if (presetId === id) setPresetId("custom");
 	};
 
 	const handleExport = async () => {
@@ -269,13 +322,12 @@ function ExportPopover({
 				sceneTarget,
 				outputTarget,
 			};
-			const exportOptions =
-				presetId !== "custom" && isExportPlatformPresetId(presetId)
-					? applyExportPreset({
-							preset: getExportPreset({ id: presetId }),
-							options: baseOptions,
-						})
-					: baseOptions;
+			const exportOptions = resolvedPreset
+				? applyExportPreset({
+						preset: resolvedPreset,
+						options: baseOptions,
+					})
+				: baseOptions;
 
 			const result = await editor.project.export({
 				options: exportOptions,
@@ -321,13 +373,12 @@ function ExportPopover({
 			includeAudio: shouldIncludeAudio,
 			sceneTarget,
 		};
-		const options =
-			presetId !== "custom" && isExportPlatformPresetId(presetId)
-				? applyExportPreset({
-						preset: getExportPreset({ id: presetId }),
-						options: baseOptions,
-					})
-				: baseOptions;
+		const options = resolvedPreset
+			? applyExportPreset({
+					preset: resolvedPreset,
+					options: baseOptions,
+				})
+			: baseOptions;
 		const name = `${activeProject.metadata.name}${getSceneLabel({ sceneTarget, scenes })}`;
 		return { name, options };
 	};
@@ -375,7 +426,11 @@ function ExportPopover({
 											<Select
 												value={presetId}
 												onValueChange={(value) => {
-													if (value === "custom" || isExportPlatformPresetId(value)) {
+													if (
+														value === "custom" ||
+														isExportPlatformPresetId(value) ||
+														isUserExportPresetId(value)
+													) {
 														handlePresetChange(value as ExportPresetId);
 													}
 												}}
@@ -398,8 +453,98 @@ function ExportPopover({
 															</SelectItem>
 														);
 													})}
+													{userPresets.length > 0 && (
+														<div className="border-t my-1" />
+													)}
+													{userPresets.map((preset) => (
+														<SelectItem key={preset.id} value={preset.id}>
+															<div className="flex flex-col items-start">
+																<span>{preset.name}</span>
+																<span className="text-muted-foreground text-xs">
+																	{preset.description} · saved
+																</span>
+															</div>
+														</SelectItem>
+													))}
 												</SelectContent>
 											</Select>
+											{isNamingPreset ? (
+												<div className="mt-2 flex items-center gap-2">
+													<Input
+														// eslint-disable-next-line jsx-a11y/no-autofocus -- input appears in response to a click; focusing it avoids a stray tab.
+														autoFocus
+														value={savePresetName}
+														onChange={(event) => setSavePresetName(event.target.value)}
+														placeholder="Preset name"
+														className="h-8 text-xs"
+														onKeyDown={(event) => {
+															if (event.key === "Enter") handleSavePreset();
+															if (event.key === "Escape") {
+																setIsNamingPreset(false);
+																setSavePresetName("");
+															}
+														}}
+													/>
+													<Button
+														type="button"
+														size="sm"
+														variant="secondary"
+														className="h-8 px-2 text-xs"
+														onClick={handleSavePreset}
+													>
+														Save
+													</Button>
+													<Button
+														type="button"
+														size="sm"
+														variant="ghost"
+														className="h-8 px-2 text-xs"
+														onClick={() => {
+															setIsNamingPreset(false);
+															setSavePresetName("");
+														}}
+													>
+														<X className="size-3" />
+													</Button>
+												</div>
+											) : (
+												<div className="mt-2 flex items-center justify-between gap-2">
+													<Button
+														type="button"
+														size="sm"
+														variant="secondary"
+														className="h-7 px-2 text-xs"
+														disabled={!canSaveAsPreset}
+														onClick={() => {
+															setSavePresetName(
+																resolvedPreset ? `${resolvedPreset.name} (mine)` : "",
+															);
+															setIsNamingPreset(true);
+														}}
+														title={
+															canSaveAsPreset
+																? "Save current preset with your own name"
+																: "Select a preset first to save a variant of it"
+														}
+													>
+														Save as preset…
+													</Button>
+													{isUserExportPresetId(presetId) && (
+														<Button
+															type="button"
+															size="sm"
+															variant="ghost"
+															className="h-7 px-2 text-xs text-destructive"
+															onClick={() =>
+																handleRemoveUserPreset(presetId as UserExportPresetId)
+															}
+														>
+															<Trash2 className="mr-1 size-3" />
+															Delete preset
+														</Button>
+													)}
+												</div>
+											)}
 										</SectionContent>
 									</Section>
 
