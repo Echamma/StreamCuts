@@ -4,11 +4,14 @@ import { DEFAULT_EXPORT_OPTIONS } from "@/export/defaults";
 import {
 	EXPORT_PLATFORM_PRESET_IDS,
 	EXPORT_PRESETS,
+	USER_EXPORT_PRESET_ID_PREFIX,
 	applyExportPreset,
+	buildUserExportPreset,
 	findMatchingPreset,
 	getExportPreset,
 	isExportPlatformPresetId,
 	isExportPresetId,
+	isUserExportPresetId,
 } from "@/export/presets";
 
 describe("EXPORT_PRESETS", () => {
@@ -156,5 +159,82 @@ describe("findMatchingPreset", () => {
 			canvasSizeOverride: { width: preset.width, height: preset.height },
 		};
 		expect(findMatchingPreset({ options })).toBe("tiktok-shorts");
+	});
+});
+
+describe("isUserExportPresetId / isExportPresetId (DEL-004)", () => {
+	test("prefixed ids are user preset ids", () => {
+		expect(isUserExportPresetId(`${USER_EXPORT_PRESET_ID_PREFIX}abcd-1234`)).toBe(
+			true,
+		);
+	});
+
+	test("built-in ids are not user preset ids", () => {
+		expect(isUserExportPresetId("custom")).toBe(false);
+		expect(isUserExportPresetId("tiktok-shorts")).toBe(false);
+	});
+
+	test("isExportPresetId accepts user preset ids", () => {
+		expect(isExportPresetId(`${USER_EXPORT_PRESET_ID_PREFIX}deadbeef`)).toBe(true);
+	});
+});
+
+describe("buildUserExportPreset (DEL-004)", () => {
+	test("copies format/quality/fps and derives description from size + fps", () => {
+		const preset = buildUserExportPreset({
+			id: `${USER_EXPORT_PRESET_ID_PREFIX}p1`,
+			name: "My square 60",
+			options: {
+				format: "mp4",
+				quality: "high",
+				canvasSizeOverride: { width: 1080, height: 1080 },
+			},
+			fps: { numerator: 60, denominator: 1 },
+			createdAt: 1_700_000_000_000,
+		});
+		expect(preset.id).toBe(`${USER_EXPORT_PRESET_ID_PREFIX}p1`);
+		expect(preset.name).toBe("My square 60");
+		expect(preset.width).toBe(1080);
+		expect(preset.height).toBe(1080);
+		expect(preset.fps.numerator).toBe(60);
+		expect(preset.format).toBe("mp4");
+		expect(preset.quality).toBe("high");
+		expect(preset.description).toContain("1080×1080");
+		expect(preset.description).toContain("60");
+	});
+
+	test("falls back to 1920×1080 when no canvasSizeOverride is given", () => {
+		const preset = buildUserExportPreset({
+			id: `${USER_EXPORT_PRESET_ID_PREFIX}p2`,
+			name: "Untitled",
+			options: { format: "webm", quality: "medium" },
+			fps: { numerator: 30, denominator: 1 },
+			createdAt: 0,
+		});
+		expect(preset.width).toBe(1920);
+		expect(preset.height).toBe(1080);
+	});
+
+	test("applyExportPreset accepts a user preset", () => {
+		const userPreset = buildUserExportPreset({
+			id: `${USER_EXPORT_PRESET_ID_PREFIX}p3`,
+			name: "Odd",
+			options: {
+				format: "webm",
+				quality: "medium",
+				canvasSizeOverride: { width: 720, height: 720 },
+			},
+			fps: { numerator: 24, denominator: 1 },
+			createdAt: 0,
+		});
+		const options: ExportOptions = {
+			...DEFAULT_EXPORT_OPTIONS,
+			includeAudio: false,
+		};
+		const result = applyExportPreset({ preset: userPreset, options });
+		expect(result.canvasSizeOverride).toEqual({ width: 720, height: 720 });
+		expect(result.format).toBe("webm");
+		expect(result.quality).toBe("medium");
+		expect(result.includeAudio).toBe(false);
 	});
 });
