@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { useEditor } from "@/editor/use-editor";
 import { useTextEditRequestStore } from "@/preview/text-edit-request-store";
 import type { TextElement } from "@/timeline";
+import { getTextTracks } from "@/timeline/scene-tracks-view";
 import { mediaTimeFromSeconds, mediaTimeToSeconds } from "@/wasm";
 
 function formatTime(seconds: number): string {
@@ -86,7 +87,7 @@ export function CaptionList() {
 	const editor = useEditor();
 
 	const scene = editor.scenes.getActiveScene();
-	const textTracks = scene.tracks.overlay.filter((t) => t.type === "text");
+	const textTracks = getTextTracks({ tracks: scene.tracks });
 
 	const rows: CaptionRow[] = textTracks.flatMap((track) =>
 		(track.elements as TextElement[]).map((el) => ({

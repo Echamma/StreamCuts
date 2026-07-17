@@ -20,6 +20,7 @@ import { getElementsAtTime, hasMediaId } from "@/timeline";
 import { cancelInteraction } from "@/editor/cancel-interaction";
 import { invokeAction } from "@/actions";
 import { canToggleSourceAudio } from "@/timeline/audio-separation";
+import { getOrderedTimelineTracks } from "@/timeline/scene-tracks-view";
 import {
 	activateScope,
 	clearActiveScope,
@@ -450,11 +451,9 @@ export function useEditorActions() {
 		"select-all",
 		() => {
 			const scene = editor.scenes.getActiveScene();
-			const allElements = [
-				...scene.tracks.overlay,
-				scene.tracks.main,
-				...scene.tracks.audio,
-			].flatMap((track) =>
+			const allElements = getOrderedTimelineTracks({
+				tracks: scene.tracks,
+			}).flatMap((track) =>
 				track.elements.map((element) => ({
 					trackId: track.id,
 					elementId: element.id,
