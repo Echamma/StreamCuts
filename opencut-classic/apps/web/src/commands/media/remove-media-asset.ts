@@ -11,6 +11,7 @@ import { storageService } from "@/services/storage/service";
 import { videoCache } from "@/services/video-cache/service";
 import { waveformCache } from "@/services/waveform-cache/service";
 import { hasMediaId } from "@/timeline/element-utils";
+import { getOrderedTimelineTracks } from "@/timeline/scene-tracks-view";
 import type { SceneTracks } from "@/timeline";
 
 export class RemoveMediaAssetCommand extends Command {
@@ -101,11 +102,7 @@ export class RemoveMediaAssetCommand extends Command {
 
 		const elementsToRemove: Array<{ trackId: string; elementId: string }> = [];
 
-		for (const track of [
-			...this.savedTracks.overlay,
-			this.savedTracks.main,
-			...this.savedTracks.audio,
-		]) {
+		for (const track of getOrderedTimelineTracks({ tracks: this.savedTracks })) {
 			for (const element of track.elements) {
 				if (hasMediaId(element) && element.mediaId === this.assetId) {
 					elementsToRemove.push({ trackId: track.id, elementId: element.id });

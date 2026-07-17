@@ -41,16 +41,56 @@ export function getTrackPlacementById({
 		};
 	}
 
-	const overlayTrackIndex = tracks.overlay.findIndex(
-		(track) => track.id === trackId,
-	);
-	if (overlayTrackIndex >= 0) {
+	// Ordered enumeration: [text, graphic, effect, video, audio]. Video[0]
+	// was handled above (it's `main`); any other video is an overlay.
+	const textIndex = tracks.text.findIndex((track) => track.id === trackId);
+	if (textIndex >= 0) {
 		return {
 			trackId,
-			trackType: tracks.overlay[overlayTrackIndex].type,
+			trackType: "text",
 			section: "overlay",
-			sectionIndex: overlayTrackIndex,
-			displayIndex: overlayTrackIndex,
+			sectionIndex: textIndex,
+			displayIndex: textIndex,
+		};
+	}
+
+	const graphicIndex = tracks.graphic.findIndex((track) => track.id === trackId);
+	if (graphicIndex >= 0) {
+		return {
+			trackId,
+			trackType: "graphic",
+			section: "overlay",
+			sectionIndex: tracks.text.length + graphicIndex,
+			displayIndex: tracks.text.length + graphicIndex,
+		};
+	}
+
+	const effectIndex = tracks.effect.findIndex((track) => track.id === trackId);
+	if (effectIndex >= 0) {
+		const displayIndex =
+			tracks.text.length + tracks.graphic.length + effectIndex;
+		return {
+			trackId,
+			trackType: "effect",
+			section: "overlay",
+			sectionIndex: displayIndex,
+			displayIndex,
+		};
+	}
+
+	// video[1+] are overlays sitting above main (in band terms) but they
+	// display below main in the ordered enumeration.
+	const videoOverlayIndex = tracks.video.slice(1).findIndex(
+		(track) => track.id === trackId,
+	);
+	if (videoOverlayIndex >= 0) {
+		const displayIndex = getMainTrackRowIndex({ tracks }) + 1 + videoOverlayIndex;
+		return {
+			trackId,
+			trackType: "video",
+			section: "overlay",
+			sectionIndex: videoOverlayIndex,
+			displayIndex,
 		};
 	}
 

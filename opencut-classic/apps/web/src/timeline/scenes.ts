@@ -81,16 +81,20 @@ export function buildDefaultScene({
 		name,
 		isMain,
 		tracks: {
-			overlay: [],
-			main: {
-				id: generateUUID(),
-				name: MAIN_TRACK_NAME,
-				type: "video",
-				elements: [],
-				transitions: [],
-				muted: false,
-				hidden: false,
-			},
+			video: [
+				{
+					id: generateUUID(),
+					name: MAIN_TRACK_NAME,
+					type: "video",
+					elements: [],
+					transitions: [],
+					muted: false,
+					hidden: false,
+				},
+			],
+			text: [],
+			graphic: [],
+			effect: [],
 			audio: [],
 		},
 		bookmarks: [],
@@ -171,16 +175,20 @@ export function mergeSceneTracks({ scenes }: { scenes: TScene[] }): {
 	bookmarks: TScene["bookmarks"];
 } {
 	const merged: SceneTracks = {
-		overlay: [],
-		main: {
-			id: generateUUID(),
-			name: MAIN_TRACK_NAME,
-			type: "video",
-			elements: [],
-			transitions: [],
-			muted: false,
-			hidden: false,
-		},
+		video: [
+			{
+				id: generateUUID(),
+				name: MAIN_TRACK_NAME,
+				type: "video",
+				elements: [],
+				transitions: [],
+				muted: false,
+				hidden: false,
+			},
+		],
+		text: [],
+		graphic: [],
+		effect: [],
 		audio: [],
 	};
 	const mergedBookmarks: TScene["bookmarks"] = [];
@@ -188,73 +196,76 @@ export function mergeSceneTracks({ scenes }: { scenes: TScene[] }): {
 
 	for (const scene of scenes) {
 		const sceneDuration = calculateTotalDuration({ tracks: scene.tracks });
+		const mainVideoTrack = scene.tracks.video[0];
 		const mainElementIdMap = new Map<string, string>();
-		merged.main.elements.push(
+		merged.video[0].elements.push(
 			...cloneElementsWithOffset({
-				elements: scene.tracks.main.elements,
+				elements: mainVideoTrack.elements,
 				offset,
 				elementIdMap: mainElementIdMap,
 			}),
 		);
-		merged.main.transitions!.push(
+		merged.video[0].transitions!.push(
 			...remapTrackTransitions({
-				track: scene.tracks.main,
+				track: mainVideoTrack,
 				elementIdMap: mainElementIdMap,
 			}),
 		);
 
-		for (const overlayTrack of scene.tracks.overlay) {
-			const overlayElementIdMap = new Map<string, string>();
-			switch (overlayTrack.type) {
-				case "video":
-					merged.overlay.push({
-						...overlayTrack,
-						id: generateUUID(),
-						elements: cloneElementsWithOffset({
-							elements: overlayTrack.elements,
-							offset,
-							elementIdMap: overlayElementIdMap,
-						}),
-						transitions: remapTrackTransitions({
-							track: overlayTrack,
-							elementIdMap: overlayElementIdMap,
-						}),
-					});
-					break;
-				case "text":
-					merged.overlay.push({
-						...overlayTrack,
-						id: generateUUID(),
-						elements: cloneElementsWithOffset({
-							elements: overlayTrack.elements,
-							offset,
-							elementIdMap: overlayElementIdMap,
-						}),
-					});
-					break;
-				case "graphic":
-					merged.overlay.push({
-						...overlayTrack,
-						id: generateUUID(),
-						elements: cloneElementsWithOffset({
-							elements: overlayTrack.elements,
-							offset,
-							elementIdMap: overlayElementIdMap,
-						}),
-					});
-					break;
-				case "effect":
-					merged.overlay.push({
-						...overlayTrack,
-						id: generateUUID(),
-						elements: cloneElementsWithOffset({
-							elements: overlayTrack.elements,
-							offset,
-							elementIdMap: overlayElementIdMap,
-						}),
-					});
-					break;
-			}
+		for (const videoOverlay of scene.tracks.video.slice(1)) {
+			const elementIdMap = new Map<string, string>();
+			merged.video.push({
+				...videoOverlay,
+				id: generateUUID(),
+				elements: cloneElementsWithOffset({
+					elements: videoOverlay.elements,
+					offset,
+					elementIdMap,
+				}),
+				transitions: remapTrackTransitions({
+					track: videoOverlay,
+					elementIdMap,
+				}),
+			});
+		}
+
+		for (const textTrack of scene.tracks.text) {
+			const elementIdMap = new Map<string, string>();
+			merged.text.push({
+				...textTrack,
+				id: generateUUID(),
+				elements: cloneElementsWithOffset({
+					elements: textTrack.elements,
+					offset,
+					elementIdMap,
+				}),
+			});
+		}
+
+		for (const graphicTrack of scene.tracks.graphic) {
+			const elementIdMap = new Map<string, string>();
+			merged.graphic.push({
+				...graphicTrack,
+				id: generateUUID(),
+				elements: cloneElementsWithOffset({
+					elements: graphicTrack.elements,
+					offset,
+					elementIdMap,
+				}),
+			});
+		}
+
+		for (const effectTrack of scene.tracks.effect) {
+			const elementIdMap = new Map<string, string>();
+			merged.effect.push({
+				...effectTrack,
+				id: generateUUID(),
+				elements: cloneElementsWithOffset({
+					elements: effectTrack.elements,
+					offset,
+					elementIdMap,
+				}),
+			});
 		}
 
 		for (const audioTrack of scene.tracks.audio) {

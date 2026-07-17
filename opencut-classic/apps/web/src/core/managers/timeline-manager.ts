@@ -27,7 +27,10 @@ import {
 } from "@/timeline/clip-markers";
 import { TimelineDragSource } from "@/timeline/drag-source";
 import { getOrderedTimelineTracks } from "@/timeline/scene-tracks-view";
-import { findTrackInSceneTracks } from "@/timeline/track-element-update";
+import {
+	findTrackInSceneTracks,
+	updateTrackInSceneTracks,
+} from "@/timeline/track-element-update";
 import { lastFrameMediaTime, type MediaTime, ZERO_MEDIA_TIME } from "@/wasm";
 import {
 	canElementBeHidden,
@@ -1155,8 +1158,10 @@ export class TimelineManager {
 		};
 
 		return {
-			overlay: tracks.overlay.map((track) => applyTrackOverlay(track)),
-			main: applyTrackOverlay(tracks.main),
+			video: tracks.video.map((track) => applyTrackOverlay(track)),
+			text: tracks.text.map((track) => applyTrackOverlay(track)),
+			graphic: tracks.graphic.map((track) => applyTrackOverlay(track)),
+			effect: tracks.effect.map((track) => applyTrackOverlay(track)),
 			audio: tracks.audio.map((track) => applyTrackOverlay(track)),
 		};
 	}
@@ -1310,21 +1315,10 @@ export class TimelineManager {
 		trackId: string;
 		nextTrack: TimelineTrack;
 	}): SceneTracks {
-		if (tracks.main.id === trackId && nextTrack.type === "video") {
-			return {
-				...tracks,
-				main: nextTrack,
-			};
-		}
-
-		return {
-			...tracks,
-			overlay: tracks.overlay.map((track) =>
-				track.id === trackId ? (nextTrack as typeof track) : track,
-			),
-			audio: tracks.audio.map((track) =>
-				track.id === trackId ? (nextTrack as typeof track) : track,
-			),
-		};
+		return updateTrackInSceneTracks({
+			tracks,
+			trackId,
+			update: <TTrack extends TimelineTrack>(): TTrack => nextTrack as TTrack,
+		});
 	}
 }

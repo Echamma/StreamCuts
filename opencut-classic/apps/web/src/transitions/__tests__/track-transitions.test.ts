@@ -82,15 +82,20 @@ function buildScene({
 }: {
 	id: string;
 	mainTrack: VideoTrack;
-	overlay?: TScene["tracks"]["overlay"];
+	overlay?: (VideoTrack | { type: "text" | "graphic" | "effect" })[];
 }): TScene {
+	const videoOverlays = overlay.filter(
+		(t): t is VideoTrack => t.type === "video",
+	);
 	return {
 		id,
 		name: id,
 		isMain: false,
 		tracks: {
-			main: mainTrack,
-			overlay,
+			video: [mainTrack, ...videoOverlays],
+			text: [],
+			graphic: [],
+			effect: [],
 			audio: [],
 		},
 		bookmarks: [],
@@ -203,17 +208,19 @@ describe("track transitions", () => {
 			],
 		});
 
-		expect(tracks.main.transitions).toHaveLength(2);
-		expect(tracks.overlay[0]?.type).toBe("video");
-		if (tracks.overlay[0]?.type !== "video") {
+		const mainVideo = tracks.video[0];
+		const overlayVideo = tracks.video[1];
+		expect(mainVideo.transitions).toHaveLength(2);
+		expect(overlayVideo?.type).toBe("video");
+		if (overlayVideo?.type !== "video") {
 			throw new Error("Expected merged overlay track to stay video.");
 		}
-		expect(tracks.overlay[0].transitions).toHaveLength(1);
+		expect(overlayVideo.transitions).toHaveLength(1);
 
 		const mergedMainIds = new Set(
-			tracks.main.elements.map((element) => element.id),
+			mainVideo.elements.map((element: { id: string }) => element.id),
 		);
-		for (const transition of tracks.main.transitions ?? []) {
+		for (const transition of mainVideo.transitions ?? []) {
 			expect(mergedMainIds.has(transition.fromElementId)).toBe(true);
 			expect(mergedMainIds.has(transition.toElementId)).toBe(true);
 			expect(transition.fromElementId.startsWith("scene-")).toBe(false);
@@ -221,9 +228,9 @@ describe("track transitions", () => {
 		}
 
 		const mergedOverlayIds = new Set(
-			tracks.overlay[0].elements.map((element) => element.id),
+			overlayVideo.elements.map((element: { id: string }) => element.id),
 		);
-		for (const transition of tracks.overlay[0].transitions ?? []) {
+		for (const transition of overlayVideo.transitions ?? []) {
 			expect(mergedOverlayIds.has(transition.fromElementId)).toBe(true);
 			expect(mergedOverlayIds.has(transition.toElementId)).toBe(true);
 		}

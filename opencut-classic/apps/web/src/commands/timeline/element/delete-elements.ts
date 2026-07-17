@@ -38,17 +38,15 @@ export class DeleteElementsCommand extends Command {
 		const editor = EditorCore.getInstance();
 		this.savedState = editor.scenes.getActiveScene().tracks;
 
+		const removeFrom = <T extends TimelineTrack>(band: T[]): T[] =>
+			band.map((track) => removeTrackElements({ track, elements: this.elements }));
+
 		const updatedTracks: SceneTracks = {
-			overlay: this.savedState.overlay.map((track) =>
-				removeTrackElements({ track, elements: this.elements }),
-			),
-			main: removeTrackElements({
-				track: this.savedState.main,
-				elements: this.elements,
-			}),
-			audio: this.savedState.audio.map((track) =>
-				removeTrackElements({ track, elements: this.elements }),
-			),
+			video: removeFrom(this.savedState.video),
+			text: removeFrom(this.savedState.text),
+			graphic: removeFrom(this.savedState.graphic),
+			effect: removeFrom(this.savedState.effect),
+			audio: removeFrom(this.savedState.audio),
 		};
 
 		editor.timeline.updateTracks(updatedTracks);

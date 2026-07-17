@@ -14,6 +14,10 @@ import {
 } from "@/timeline/placement";
 import { cloneAnimations } from "@/animation";
 import {
+	getMainVideoTrack,
+	getOrderedTimelineTracks,
+} from "@/timeline/scene-tracks-view";
+import {
 	addMediaTime,
 	type MediaTime,
 	maxMediaTime,
@@ -71,11 +75,10 @@ export class PasteCommand extends Command {
 			}
 
 			const trackType = items[0].trackType;
-			const sourceTrackIndex = [
-				...updatedTracks.overlay,
-				updatedTracks.main,
-				...updatedTracks.audio,
-			].findIndex((track) => track.id === trackId);
+			const orderedTracks = getOrderedTimelineTracks({ tracks: updatedTracks });
+			const sourceTrackIndex = orderedTracks.findIndex(
+				(track) => track.id === trackId,
+			);
 			const placementResult = resolveTrackPlacement({
 				tracks: updatedTracks,
 				trackType,
@@ -91,15 +94,8 @@ export class PasteCommand extends Command {
 
 			let elementsForPlacement = elementsToAdd;
 			if (placementResult.kind === "existingTrack") {
-				const targetTrack =
-					placementResult.trackIndex < updatedTracks.overlay.length
-						? updatedTracks.overlay[placementResult.trackIndex]
-						: placementResult.trackIndex === updatedTracks.overlay.length
-							? updatedTracks.main
-							: updatedTracks.audio[
-									placementResult.trackIndex - updatedTracks.overlay.length - 1
-								];
-				if (targetTrack?.id === updatedTracks.main.id) {
+				const targetTrack = orderedTracks[placementResult.trackIndex];
+				if (targetTrack?.id === getMainVideoTrack({ tracks: updatedTracks }).id) {
 					const earliestElement = elementsToAdd.reduce((earliest, element) =>
 						element.startTime < earliest.startTime ? element : earliest,
 					);

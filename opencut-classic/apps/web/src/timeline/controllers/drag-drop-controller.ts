@@ -7,6 +7,10 @@ import {
 	toElementDurationTicks,
 } from "@/timeline/creation";
 import { BASE_TIMELINE_PIXELS_PER_SECOND } from "@/timeline/scale";
+import {
+	getMainVideoTrack,
+	getOrderedTimelineTracks,
+} from "@/timeline/scene-tracks-view";
 import type { FrameRate } from "opencut-wasm";
 import {
 	buildTextElement,
@@ -129,7 +133,7 @@ function orderedTracks({
 }: {
 	sceneTracks: SceneTracks;
 }): TimelineTrack[] {
-	return [...sceneTracks.overlay, sceneTracks.main, ...sceneTracks.audio];
+	return getOrderedTimelineTracks({ tracks: sceneTracks });
 }
 
 // --- Controller ---
@@ -522,12 +526,17 @@ export class DragDropController {
 					const sceneTracks = this.config.getSceneTracks();
 					const currentTime = this.config.getCurrentPlayheadTime();
 
-					const reuseMainTrackId =
-						createdAsset.type !== "audio" &&
-						sceneTracks.overlay.length === 0 &&
+					const mainVideoTrack = getMainVideoTrack({ tracks: sceneTracks });
+					const isSceneEmpty =
+						sceneTracks.video.length === 1 &&
+						sceneTracks.text.length === 0 &&
+						sceneTracks.graphic.length === 0 &&
+						sceneTracks.effect.length === 0 &&
 						sceneTracks.audio.length === 0 &&
-						sceneTracks.main.elements.length === 0
-							? sceneTracks.main.id
+						mainVideoTrack.elements.length === 0;
+					const reuseMainTrackId =
+						createdAsset.type !== "audio" && isSceneEmpty
+							? mainVideoTrack.id
 							: null;
 
 					if (reuseMainTrackId) {

@@ -25,23 +25,20 @@ export function applyRippleAdjustments({
 		adjustmentsByTrack.set(adjustment.trackId, trackAdjustments);
 	}
 
+	const applyToBand = <T extends TimelineTrack>(band: T[]): T[] =>
+		band.map((track) =>
+			applyTrackRippleAdjustments({
+				track,
+				adjustments: adjustmentsByTrack.get(track.id) ?? [],
+			}),
+		);
+
 	return {
-		overlay: tracks.overlay.map((track) =>
-			applyTrackRippleAdjustments({
-				track,
-				adjustments: adjustmentsByTrack.get(track.id) ?? [],
-			}),
-		),
-		main: applyTrackRippleAdjustments({
-			track: tracks.main,
-			adjustments: adjustmentsByTrack.get(tracks.main.id) ?? [],
-		}),
-		audio: tracks.audio.map((track) =>
-			applyTrackRippleAdjustments({
-				track,
-				adjustments: adjustmentsByTrack.get(track.id) ?? [],
-			}),
-		),
+		video: applyToBand(tracks.video),
+		text: applyToBand(tracks.text),
+		graphic: applyToBand(tracks.graphic),
+		effect: applyToBand(tracks.effect),
+		audio: applyToBand(tracks.audio),
 	};
 }
 

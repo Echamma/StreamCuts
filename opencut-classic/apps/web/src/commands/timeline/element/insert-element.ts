@@ -10,7 +10,7 @@ import { generateUUID } from "@/utils/id";
 import { requiresMediaId } from "@/timeline/element-utils";
 import {
 	findTrackById,
-	getMainVideoTrack,
+	getOrderedTimelineTracks,
 } from "@/timeline/scene-tracks-view";
 import type { MediaAsset } from "@/media/types";
 import { DEFAULT_NEW_ELEMENT_DURATION } from "@/timeline/creation";
@@ -56,16 +56,9 @@ export class InsertElementCommand extends Command {
 			return;
 		}
 
-		const totalElementsInTimeline =
-			getMainVideoTrack({ tracks: this.savedState }).elements.length +
-			this.savedState.overlay.reduce(
-				(total, track) => total + track.elements.length,
-				0,
-			) +
-			this.savedState.audio.reduce(
-				(total, track) => total + track.elements.length,
-				0,
-			);
+		const totalElementsInTimeline = getOrderedTimelineTracks({
+			tracks: this.savedState,
+		}).reduce((total, track) => total + track.elements.length, 0);
 		const isFirstElement = totalElementsInTimeline === 0;
 
 		const newElement = this.buildElement({ element: this.element });

@@ -84,17 +84,21 @@ function sceneTracksWith({
 	elements: TextElement[];
 }): SceneTracks {
 	return {
-		overlay: [
+		video: [
+			{
+				id: "main-1",
+				name: "Main",
+				type: "video",
+				muted: false,
+				hidden: false,
+				elements: [],
+			},
+		],
+		text: [
 			{ id: "overlay-1", name: "Text", type: "text", hidden: false, elements },
 		],
-		main: {
-			id: "main-1",
-			name: "Main",
-			type: "video",
-			muted: false,
-			hidden: false,
-			elements: [],
-		},
+		graphic: [],
+		effect: [],
 		audio: [],
 	};
 }

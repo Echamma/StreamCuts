@@ -7,6 +7,7 @@ import {
 	type MoveGroup,
 } from "@/timeline/group-move";
 import { BASE_TIMELINE_PIXELS_PER_SECOND } from "@/timeline/scale";
+import { getOrderedTimelineTracks } from "@/timeline/scene-tracks-view";
 import {
 	maxMediaTime,
 	type MediaTime,
@@ -151,7 +152,7 @@ function verticalDirection({
 }
 
 function orderedTracks(sceneTracks: SceneTracks): TimelineTrack[] {
-	return [...sceneTracks.overlay, sceneTracks.main, ...sceneTracks.audio];
+	return getOrderedTimelineTracks({ tracks: sceneTracks });
 }
 
 function movedPastDragThreshold({

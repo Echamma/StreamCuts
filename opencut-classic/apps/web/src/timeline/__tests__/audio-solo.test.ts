@@ -48,11 +48,25 @@ function scene({
 	main,
 	audio = [],
 }: {
-	overlay?: SceneTracks["overlay"];
+	overlay?: (VideoTrack | TextTrack)[];
 	main: VideoTrack;
 	audio?: AudioTrack[];
 }): SceneTracks {
-	return { overlay, main, audio };
+	// v32 uniform shape — the caller's "overlay" list carries video overlays
+	// (all appended to the video band above the ripple track) and text tracks.
+	const videoOverlays = overlay.filter(
+		(t): t is VideoTrack => t.type === "video",
+	);
+	const textOverlays = overlay.filter(
+		(t): t is TextTrack => t.type === "text",
+	);
+	return {
+		video: [main, ...videoOverlays],
+		text: textOverlays,
+		graphic: [],
+		effect: [],
+		audio,
+	};
 }
 
 describe("anyTrackSoloed", () => {
