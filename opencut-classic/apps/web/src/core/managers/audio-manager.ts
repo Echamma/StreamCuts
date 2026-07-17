@@ -552,6 +552,16 @@ export class AudioManager {
 			node.start(actualStartTimestamp, actualClipOffset);
 		}
 
+		scheduleClipFadeRamps({
+			clipGain,
+			clipVolume: clip.volume,
+			startTimestamp: actualStartTimestamp,
+			clipOffset: actualClipOffset,
+			duration: clip.duration,
+			fadeIn: clip.fadeIn,
+			fadeOut: clip.fadeOut,
+		});
+
 		this.scheduleClipGainAutomation({
 			audioContext,
 			clip,
@@ -848,5 +858,61 @@ export class AudioManager {
 			console.warn("Failed to initialize audio sink:", error);
 			return null;
 		}
+	}
+}
+
+/**
+ * Schedule fade-in / fade-out ramps on `clipGain` (FAIR-003). When both fades
+ * are 0 the volume stays at `clipVolume` for the whole clip — an exact no-op
+ * relative to the pre-FAIR-003 code path. Otherwise, gain ramps linearly from
+ * silence to `clipVolume` across the fade-in window and back to silence across
+ * the fade-out window. `clipOffset` is respected so seeking into the middle of
+ * a clip snaps the gain to the correct point on the envelope.
+ */
+function scheduleClipFadeRamps({
+	clipGain,
+	clipVolume,
+	startTimestamp,
+	clipOffset,
+	duration,
+	fadeIn,
+	fadeOut,
+}: {
+	clipGain: GainNode;
+	clipVolume: number;
+	startTimestamp: number;
+	clipOffset: number;
+	duration: number;
+	fadeIn: number;
+	fadeOut: number;
+}): void {
+	if (fadeIn <= 0 && fadeOut <= 0) {
+		clipGain.gain.value = clipVolume;
+		return;
+	}
+
+	// Clip-local time when audio starts sounding; ramp times are anchored to this.
+	const clipStartAbs = startTimestamp - clipOffset;
+	const fadeInEndAbs = clipStartAbs + Math.max(0, fadeIn);
+	const fadeOutStartAbs = clipStartAbs + Math.max(0, duration - fadeOut);
+	const clipEndAbs = clipStartAbs + duration;
+
+	const startingGain =
+		fadeIn > 0 && clipOffset < fadeIn
+			? clipVolume * (clipOffset / fadeIn)
+			: fadeOut > 0 && clipOffset > duration - fadeOut
+				? clipVolume * Math.max(0, (duration - clipOffset) / fadeOut)
+				: clipVolume;
+
+	clipGain.gain.setValueAtTime(startingGain, startTimestamp);
+	if (fadeIn > 0 && clipOffset < fadeIn) {
+		clipGain.gain.linearRampToValueAtTime(clipVolume, fadeInEndAbs);
+	}
+	if (fadeOut > 0) {
+		const fadeOutStart = Math.max(fadeOutStartAbs, startTimestamp);
+		if (clipOffset <= duration - fadeOut) {
+			clipGain.gain.setValueAtTime(clipVolume, fadeOutStart);
+		}
+		clipGain.gain.linearRampToValueAtTime(0, clipEndAbs);
 	}
 }

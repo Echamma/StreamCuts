@@ -7,6 +7,11 @@ import {
 } from "@/timeline/audio-state";
 import { anyTrackSoloed, isTrackAudioSilenced } from "@/timeline/audio-solo";
 import { getElementPan, PAN_MAX, PAN_MIN } from "@/timeline/audio-pan";
+import {
+	FADE_MAX_SECONDS,
+	getElementFadeIn,
+	getElementFadeOut,
+} from "@/timeline/audio-fade";
 import { VOLUME_DB_MIN, VOLUME_DB_MAX } from "@/timeline/audio-constants";
 import {
 	getMainVideoTrack,
@@ -21,6 +26,7 @@ import { VolumeHighIcon, VolumeOffIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { cn } from "@/utils/ui";
 import type { AudioElement, VideoElement } from "@/timeline";
+import { TICKS_PER_SECOND } from "@/wasm";
 
 function dbToSlider(db: number): number {
 	return ((db - VOLUME_DB_MIN) / (VOLUME_DB_MAX - VOLUME_DB_MIN)) * 100;
@@ -47,6 +53,11 @@ function formatPan(pan: number): string {
 	if (Math.abs(pan) < 0.005) return "C";
 	const magnitude = Math.round(Math.abs(pan) * 100);
 	return pan < 0 ? `L${magnitude}` : `R${magnitude}`;
+}
+
+function formatFade(seconds: number): string {
+	if (seconds < 0.05) return "0";
+	return `${seconds.toFixed(seconds < 1 ? 2 : 1)}s`;
 }
 
 export function AudioMixerView() {
@@ -291,8 +302,16 @@ function ElementMixerRow({
 	const editor = useEditor();
 	const volumeDb = getElementVolume({ element });
 	const pan = getElementPan({ element });
+	const fadeIn = getElementFadeIn({ element });
+	const fadeOut = getElementFadeOut({ element });
 	const muted = isElementMuted({ element });
 	const effectiveMuted = trackMuted || muted;
+	// Fade sliders cap at the smaller of the practical UI max and half the clip
+	// duration, so fadeIn + fadeOut can't overshoot the clip.
+	const fadeCap = Math.min(
+		FADE_MAX_SECONDS,
+		Math.max(0.05, element.duration / TICKS_PER_SECOND / 2),
+	);
 
 	const handleVolumeChange = (values: number[]) => {
 		editor.timeline.updateElements({
@@ -351,6 +370,29 @@ function ElementMixerRow({
 					elementId: element.id,
 					patch: {
 						params: { ...element.params, pan: sliderToPan(values[0]) },
+					},
+				},
+			],
+			pushHistory,
+		});
+	};
+
+	const writeFade = ({
+		key,
+		seconds,
+		pushHistory,
+	}: {
+		key: "fadeIn" | "fadeOut";
+		seconds: number;
+		pushHistory: boolean;
+	}) => {
+		editor.timeline.updateElements({
+			updates: [
+				{
+					trackId,
+					elementId: element.id,
+					patch: {
+						params: { ...element.params, [key]: seconds },
 					},
 				},
 			],
@@ -417,6 +459,54 @@ function ElementMixerRow({
 					)}
 				>
 					{formatPan(pan)}
+				</span>
+			</div>
+			<div className="flex items-center gap-2">
+				<span className="text-muted-foreground w-7 shrink-0 text-xs">In</span>
+				<Slider
+					value={[Math.min(fadeIn, fadeCap)]}
+					onValueChange={(values) =>
+						writeFade({ key: "fadeIn", seconds: values[0], pushHistory: false })
+					}
+					onValueCommit={(values) =>
+						writeFade({ key: "fadeIn", seconds: values[0], pushHistory: true })
+					}
+					min={0}
+					max={fadeCap}
+					step={0.05}
+					disabled={effectiveMuted}
+				/>
+				<span
+					className={cn(
+						"w-9 shrink-0 text-right font-mono text-xs tabular-nums",
+						effectiveMuted ? "text-muted-foreground" : "text-foreground",
+					)}
+				>
+					{formatFade(fadeIn)}
+				</span>
+			</div>
+			<div className="flex items-center gap-2">
+				<span className="text-muted-foreground w-7 shrink-0 text-xs">Out</span>
+				<Slider
+					value={[Math.min(fadeOut, fadeCap)]}
+					onValueChange={(values) =>
+						writeFade({ key: "fadeOut", seconds: values[0], pushHistory: false })
+					}
+					onValueCommit={(values) =>
+						writeFade({ key: "fadeOut", seconds: values[0], pushHistory: true })
+					}
+					min={0}
+					max={fadeCap}
+					step={0.05}
+					disabled={effectiveMuted}
+				/>
+				<span
+					className={cn(
+						"w-9 shrink-0 text-right font-mono text-xs tabular-nums",
+						effectiveMuted ? "text-muted-foreground" : "text-foreground",
+					)}
+				>
+					{formatFade(fadeOut)}
 				</span>
 			</div>
 		</div>

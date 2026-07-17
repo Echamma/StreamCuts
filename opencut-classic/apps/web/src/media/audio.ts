@@ -23,6 +23,11 @@ import { doesElementHaveEnabledAudio } from "@/timeline/audio-separation";
 import { canElementHaveAudio, hasMediaId } from "@/timeline/element-utils";
 import { anyTrackSoloed, isTrackAudioSilenced } from "@/timeline/audio-solo";
 import { getElementPan, panToChannelGains } from "@/timeline/audio-pan";
+import {
+	computeFadeGain,
+	getElementFadeIn,
+	getElementFadeOut,
+} from "@/timeline/audio-fade";
 import { mediaSupportsAudio } from "@/media/media-utils";
 import { getSourceTimeAtClipTime, renderRetimedBuffer } from "@/retime";
 import {
@@ -53,6 +58,10 @@ export interface CollectedAudioElement {
 	volume: number;
 	/** Stereo pan, -1 (left) … 0 (centre) … +1 (right). */
 	pan: number;
+	/** Fade in (seconds from clip start). 0 = no fade. */
+	fadeIn: number;
+	/** Fade out (seconds before clip end). 0 = no fade. */
+	fadeOut: number;
 	muted: boolean;
 	retime?: RetimeConfig;
 }
@@ -192,6 +201,8 @@ export async function collectAudioElements({
 							localTime: 0,
 						}),
 						pan: getElementPan({ element }),
+						fadeIn: getElementFadeIn({ element }),
+						fadeOut: getElementFadeOut({ element }),
 						muted: isElementMuted({ element }),
 						retime: element.retime,
 					};
@@ -225,6 +236,8 @@ export async function collectAudioElements({
 							localTime: 0,
 						}),
 						pan: getElementPan({ element }),
+						fadeIn: getElementFadeIn({ element }),
+						fadeOut: getElementFadeOut({ element }),
 						muted: isElementMuted({ element }),
 						retime: element.retime,
 					};
@@ -384,6 +397,10 @@ interface AudioMixSource {
 	volume: number;
 	/** Stereo pan, -1 (left) … 0 (centre) … +1 (right). */
 	pan: number;
+	/** Fade in (seconds from clip start). 0 = no fade. */
+	fadeIn: number;
+	/** Fade out (seconds before clip end). 0 = no fade. */
+	fadeOut: number;
 	retime?: RetimeConfig;
 }
 
@@ -399,6 +416,10 @@ export interface AudioClipSource {
 	volume: number;
 	/** Stereo pan, -1 (left) … 0 (centre) … +1 (right). */
 	pan: number;
+	/** Fade in (seconds from clip start). 0 = no fade. */
+	fadeIn: number;
+	/** Fade out (seconds before clip end). 0 = no fade. */
+	fadeOut: number;
 	muted: boolean;
 	retime?: RetimeConfig;
 }
@@ -430,6 +451,8 @@ async function fetchLibraryAudioSource({
 			trimEnd: element.trimEnd / TICKS_PER_SECOND,
 			volume,
 			pan: getElementPan({ element }),
+						fadeIn: getElementFadeIn({ element }),
+						fadeOut: getElementFadeOut({ element }),
 			retime: element.retime,
 		};
 	} catch (error) {
@@ -469,6 +492,8 @@ async function fetchLibraryAudioClip({
 			trimEnd: element.trimEnd,
 			volume,
 			pan: getElementPan({ element }),
+						fadeIn: getElementFadeIn({ element }),
+						fadeOut: getElementFadeOut({ element }),
 			muted,
 			retime: element.retime,
 		};
@@ -498,6 +523,8 @@ function collectMediaAudioSource({
 		trimEnd: element.trimEnd / TICKS_PER_SECOND,
 		volume,
 		pan: getElementPan({ element }),
+						fadeIn: getElementFadeIn({ element }),
+						fadeOut: getElementFadeOut({ element }),
 		retime: element.retime,
 	};
 }
@@ -526,6 +553,8 @@ function collectMediaAudioClip({
 		trimEnd: element.trimEnd / TICKS_PER_SECOND,
 		volume,
 		pan: getElementPan({ element }),
+						fadeIn: getElementFadeIn({ element }),
+						fadeOut: getElementFadeOut({ element }),
 		muted,
 		retime: element.retime,
 	};
@@ -968,10 +997,20 @@ function mixSourceIntoChunk({
 						localTime: automationLocalTime,
 					})
 				: clip.volume;
+			const fadeGain =
+				clip.fadeIn > 0 || clip.fadeOut > 0
+					? computeFadeGain({
+							fadeIn: clip.fadeIn,
+							fadeOut: clip.fadeOut,
+							duration: clip.duration,
+							localTime: automationLocalTime,
+						})
+					: 1;
 
 			outputData[outputIndex] +=
 				(sourceData[lowerIndex] * (1 - fraction) +
 					sourceData[upperIndex] * fraction) *
+				fadeGain *
 				gain *
 				channelPanGain;
 			wroteSamples = true;
@@ -1383,9 +1422,19 @@ function mixAudioChannels({
 						localTime: clipTime,
 					})
 				: element.volume;
+			const fadeGain =
+				element.fadeIn > 0 || element.fadeOut > 0
+					? computeFadeGain({
+							fadeIn: element.fadeIn,
+							fadeOut: element.fadeOut,
+							duration: elementDuration,
+							localTime: clipTime,
+						})
+					: 1;
 			outputData[outputIndex] +=
 				(sourceData[lowerIndex] * (1 - fraction) +
 					sourceData[upperIndex] * fraction) *
+				fadeGain *
 				gain *
 				channelPanGain;
 		}
