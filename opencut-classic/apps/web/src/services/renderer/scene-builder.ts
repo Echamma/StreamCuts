@@ -404,11 +404,17 @@ export function buildScene({
 	const mediaMap = new Map(mediaAssets.map((m) => [m.id, m]));
 
 	const mainVideoTrack = getMainVideoTrack({ tracks });
+	// Post-R1: compose every visible band into one bottom-to-top render list.
+	// The pre-R1 code put overlay tracks above main; the new order preserves
+	// that intent (video[0] is bottom-most, higher video indices layer on top,
+	// then text/graphic/effect stack above the video band).
 	const visibleTracks = [
-		...tracks.overlay.filter((track) => !("hidden" in track && track.hidden)),
-		...(!mainVideoTrack.hidden ? [mainVideoTrack] : []),
+		...tracks.video.filter((track) => !track.hidden),
+		...tracks.text.filter((track) => !track.hidden),
+		...tracks.graphic.filter((track) => !track.hidden),
+		...tracks.effect.filter((track) => !track.hidden),
 	];
-	const orderedTracksBottomToTop = visibleTracks.slice().reverse();
+	const orderedTracksBottomToTop = visibleTracks;
 	const mainTrack = mainVideoTrack.hidden ? undefined : mainVideoTrack;
 
 	const allNodes = buildTrackNodes({

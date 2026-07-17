@@ -16,6 +16,7 @@ import { registerDefaultEffects } from "@/effects";
 import { registerDefaultMasks } from "@/masks";
 import { registerDefaultTransitions } from "@/transitions";
 import { registerTranscriptionDiagnostics } from "@/transcription/diagnostics";
+import type { SceneTracks } from "@/timeline/types";
 
 export class EditorCore {
 	private static instance: EditorCore | null = null;
@@ -61,13 +62,22 @@ export class EditorCore {
 			}
 
 			const tracks = activeScene.tracks;
-			const prunedTracks = {
-				...tracks,
-				overlay: tracks.overlay.filter((track) => track.elements.length > 0),
+			// Ripple track (video[0]) is never pruned even when empty — it's the
+			// scene's anchor. Every other track drops when it has no elements.
+			const prunedTracks: SceneTracks = {
+				video: tracks.video.filter(
+					(track, index) => index === 0 || track.elements.length > 0,
+				),
+				text: tracks.text.filter((track) => track.elements.length > 0),
+				graphic: tracks.graphic.filter((track) => track.elements.length > 0),
+				effect: tracks.effect.filter((track) => track.elements.length > 0),
 				audio: tracks.audio.filter((track) => track.elements.length > 0),
 			};
 			if (
-				prunedTracks.overlay.length !== tracks.overlay.length ||
+				prunedTracks.video.length !== tracks.video.length ||
+				prunedTracks.text.length !== tracks.text.length ||
+				prunedTracks.graphic.length !== tracks.graphic.length ||
+				prunedTracks.effect.length !== tracks.effect.length ||
 				prunedTracks.audio.length !== tracks.audio.length
 			) {
 				this.timeline.updateTracks(prunedTracks);

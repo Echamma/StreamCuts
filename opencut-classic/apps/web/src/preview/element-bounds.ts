@@ -1,5 +1,4 @@
 import type { SceneTracks, TimelineElement } from "@/timeline";
-import { getMainVideoTrack } from "@/timeline/scene-tracks-view";
 import type { MediaAsset } from "@/media/types";
 import { STICKER_INTRINSIC_SIZE_FALLBACK } from "@/stickers/intrinsic-size";
 import { DEFAULT_GRAPHIC_SOURCE_SIZE } from "@/graphics";
@@ -258,11 +257,16 @@ export function getVisibleElementsWithBounds({
 	mediaAssets: MediaAsset[];
 }): ElementWithBounds[] {
 	const mediaMap = new Map(mediaAssets.map((m) => [m.id, m]));
-	const mainVideoTrack = getMainVideoTrack({ tracks });
-	const orderedTracks = [
-		...tracks.overlay.filter((track) => !("hidden" in track && track.hidden)),
-		...(!mainVideoTrack.hidden ? [mainVideoTrack] : []),
-	].reverse();
+	// Bands that render visually (video/text/graphic/effect), top-most first.
+	// video[0] is the ripple track (post-R1) sitting at the bottom, so we
+	// reverse the concatenation to draw top-to-bottom.
+	const visibleTracks = [
+		...tracks.video.filter((track) => !track.hidden),
+		...tracks.text.filter((track) => !track.hidden),
+		...tracks.graphic.filter((track) => !track.hidden),
+		...tracks.effect.filter((track) => !track.hidden),
+	];
+	const orderedTracks = visibleTracks.slice().reverse();
 
 	const result: ElementWithBounds[] = [];
 

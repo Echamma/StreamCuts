@@ -91,9 +91,21 @@ export type TimelineTrack =
 
 export type OverlayTrack = VideoTrack | TextTrack | GraphicTrack | EffectTrack;
 
+/**
+ * Uniform-track scene shape (R1 Phase C, project version 32). Bands are
+ * ordered bottom-to-top by compositing z-index within each kind: `video[0]`
+ * is the ripple track (the former `main`) and higher indices render on top;
+ * text, graphic, and effect follow the same convention.
+ *
+ * Consumers should read tracks through `@/timeline/scene-tracks-view` rather
+ * than reaching for a band directly — the compatibility views isolate the
+ * "which band lives where?" question in one place.
+ */
 export interface SceneTracks {
-	overlay: OverlayTrack[];
-	main: VideoTrack;
+	video: VideoTrack[];
+	text: TextTrack[];
+	graphic: GraphicTrack[];
+	effect: EffectTrack[];
 	audio: AudioTrack[];
 }
 

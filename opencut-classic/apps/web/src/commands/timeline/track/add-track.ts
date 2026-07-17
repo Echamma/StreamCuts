@@ -42,19 +42,12 @@ export class AddTrackCommand extends Command {
 				trackType: this.type,
 			});
 
-		const updatedTracks =
-			this.type === "audio"
-				? buildAudioTrackState({
-						tracks: this.savedState,
-						insertIndex,
-						trackId: this.trackId,
-					})
-				: buildOverlayTrackState({
-						tracks: this.savedState,
-						insertIndex,
-						trackId: this.trackId,
-						trackType: this.type,
-					});
+		const updatedTracks = buildTrackInsertion({
+			tracks: this.savedState,
+			insertIndex,
+			trackId: this.trackId,
+			trackType: this.type,
+		});
 
 		editor.timeline.updateTracks(updatedTracks);
 		return undefined;
@@ -72,34 +65,7 @@ export class AddTrackCommand extends Command {
 	}
 }
 
-function buildAudioTrackState({
-	tracks,
-	insertIndex,
-	trackId,
-}: {
-	tracks: SceneTracks;
-	insertIndex: number;
-	trackId: string;
-}): SceneTracks {
-	const audioInsertIndex = Math.max(
-		0,
-		insertIndex - getAudioBaseIndex({ tracks }),
-	);
-	const newTrack = buildEmptyTrack({
-		id: trackId,
-		type: "audio",
-	});
-	return {
-		...tracks,
-		audio: [
-			...tracks.audio.slice(0, audioInsertIndex),
-			newTrack,
-			...tracks.audio.slice(audioInsertIndex),
-		],
-	};
-}
-
-function buildOverlayTrackState({
+function buildTrackInsertion({
 	tracks,
 	insertIndex,
 	trackId,
@@ -108,23 +74,75 @@ function buildOverlayTrackState({
 	tracks: SceneTracks;
 	insertIndex: number;
 	trackId: string;
-	trackType: Exclude<TrackType, "audio">;
+	trackType: TrackType;
 }): SceneTracks {
-	const overlayInsertIndex = Math.min(insertIndex, getMainTrackRowIndex({ tracks }));
-	const newTrack =
-		trackType === "video"
-			? buildEmptyTrack({ id: trackId, type: "video" })
-			: trackType === "text"
-				? buildEmptyTrack({ id: trackId, type: "text" })
-				: trackType === "graphic"
-					? buildEmptyTrack({ id: trackId, type: "graphic" })
-					: buildEmptyTrack({ id: trackId, type: "effect" });
+	if (trackType === "audio") {
+		const bandIndex = Math.max(
+			0,
+			insertIndex - getAudioBaseIndex({ tracks }),
+		);
+		const newTrack = buildEmptyTrack({ id: trackId, type: "audio" });
+		return {
+			...tracks,
+			audio: [
+				...tracks.audio.slice(0, bandIndex),
+				newTrack,
+				...tracks.audio.slice(bandIndex),
+			],
+		};
+	}
+
+	if (trackType === "video") {
+		const bandIndex = Math.max(
+			0,
+			Math.min(insertIndex - getMainTrackRowIndex({ tracks }), tracks.video.length),
+		);
+		const newTrack = buildEmptyTrack({ id: trackId, type: "video" });
+		return {
+			...tracks,
+			video: [
+				...tracks.video.slice(0, bandIndex),
+				newTrack,
+				...tracks.video.slice(bandIndex),
+			],
+		};
+	}
+
+	if (trackType === "text") {
+		const bandIndex = Math.max(0, Math.min(insertIndex, tracks.text.length));
+		const newTrack = buildEmptyTrack({ id: trackId, type: "text" });
+		return {
+			...tracks,
+			text: [
+				...tracks.text.slice(0, bandIndex),
+				newTrack,
+				...tracks.text.slice(bandIndex),
+			],
+		};
+	}
+
+	if (trackType === "graphic") {
+		const bandIndex = Math.max(0, Math.min(insertIndex, tracks.graphic.length));
+		const newTrack = buildEmptyTrack({ id: trackId, type: "graphic" });
+		return {
+			...tracks,
+			graphic: [
+				...tracks.graphic.slice(0, bandIndex),
+				newTrack,
+				...tracks.graphic.slice(bandIndex),
+			],
+		};
+	}
+
+	// effect
+	const bandIndex = Math.max(0, Math.min(insertIndex, tracks.effect.length));
+	const newTrack = buildEmptyTrack({ id: trackId, type: "effect" });
 	return {
 		...tracks,
-		overlay: [
-			...tracks.overlay.slice(0, overlayInsertIndex),
+		effect: [
+			...tracks.effect.slice(0, bandIndex),
 			newTrack,
-			...tracks.overlay.slice(overlayInsertIndex),
+			...tracks.effect.slice(bandIndex),
 		],
 	};
 }

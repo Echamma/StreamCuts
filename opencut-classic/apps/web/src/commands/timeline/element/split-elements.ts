@@ -3,7 +3,7 @@ import {
 	createElementSelectionResult,
 	type CommandResult,
 } from "@/commands/base-command";
-import type { SceneTracks, TimelineElement } from "@/timeline";
+import type { SceneTracks, TimelineElement, TimelineTrack } from "@/timeline";
 import { generateUUID } from "@/utils/id";
 import { EditorCore } from "@/core";
 import { isRetimableElement } from "@/timeline";
@@ -191,10 +191,15 @@ export class SplitElementsCommand extends Command {
 			return { ...track, elements } as TTrack;
 		};
 
+		const splitBand = <T extends TimelineTrack>(band: T[]): T[] =>
+			band.map((track) => splitTrack(track));
+
 		const updatedTracks: SceneTracks = {
-			overlay: this.savedState.overlay.map((track) => splitTrack(track)),
-			main: splitTrack(this.savedState.main),
-			audio: this.savedState.audio.map((track) => splitTrack(track)),
+			video: splitBand(this.savedState.video),
+			text: splitBand(this.savedState.text),
+			graphic: splitBand(this.savedState.graphic),
+			effect: splitBand(this.savedState.effect),
+			audio: splitBand(this.savedState.audio),
 		};
 
 		editor.timeline.updateTracks(updatedTracks);

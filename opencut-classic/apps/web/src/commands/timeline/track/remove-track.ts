@@ -12,10 +12,17 @@ export class RemoveTrackCommand extends Command {
 	execute(): CommandResult | undefined {
 		const editor = EditorCore.getInstance();
 		this.savedState = editor.scenes.getActiveScene().tracks;
+		const target = this.trackId;
+		// The ripple video track (video[0]) is never removed; every other track
+		// filters out by id-match across every band.
 		const updatedTracks: SceneTracks = {
-			...this.savedState,
-			overlay: this.savedState.overlay.filter((track) => track.id !== this.trackId),
-			audio: this.savedState.audio.filter((track) => track.id !== this.trackId),
+			video: this.savedState.video.filter(
+				(track, index) => index === 0 || track.id !== target,
+			),
+			text: this.savedState.text.filter((track) => track.id !== target),
+			graphic: this.savedState.graphic.filter((track) => track.id !== target),
+			effect: this.savedState.effect.filter((track) => track.id !== target),
+			audio: this.savedState.audio.filter((track) => track.id !== target),
 		};
 		editor.timeline.updateTracks(updatedTracks);
 		return undefined;

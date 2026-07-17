@@ -142,8 +142,10 @@ function mapSceneTracks({
 	update: <TTrack extends TimelineTrack>(track: TTrack) => TTrack;
 }): SceneTracks {
 	return {
-		overlay: tracks.overlay.map((track) => update(track)),
-		main: update(tracks.main),
+		video: tracks.video.map((track) => update(track)),
+		text: tracks.text.map((track) => update(track)),
+		graphic: tracks.graphic.map((track) => update(track)),
+		effect: tracks.effect.map((track) => update(track)),
 		audio: tracks.audio.map((track) => update(track)),
 	};
 }
@@ -157,31 +159,72 @@ function insertTrackAtDisplayIndex({
 	track: TimelineTrack;
 	insertIndex: number;
 }): SceneTracks {
+	// Post-R1 each track kind lives in its own band. The requested display
+	// index is translated to a band-local position; effect/text/graphic sit
+	// above the video band with a zero base (insertIndex clamped to band
+	// length), audio sits after everything.
 	if (track.type === "audio") {
-		const audioInsertIndex = Math.max(
+		const bandIndex = Math.max(
 			0,
 			Math.min(insertIndex - getAudioBaseIndex({ tracks }), tracks.audio.length),
 		);
 		return {
 			...tracks,
 			audio: [
-				...tracks.audio.slice(0, audioInsertIndex),
+				...tracks.audio.slice(0, bandIndex),
 				track,
-				...tracks.audio.slice(audioInsertIndex),
+				...tracks.audio.slice(bandIndex),
 			],
 		};
 	}
 
-	const overlayInsertIndex = Math.max(
-		0,
-		Math.min(insertIndex, getMainTrackRowIndex({ tracks })),
-	);
+	if (track.type === "video") {
+		const bandIndex = Math.max(
+			0,
+			Math.min(insertIndex - getMainTrackRowIndex({ tracks }), tracks.video.length),
+		);
+		return {
+			...tracks,
+			video: [
+				...tracks.video.slice(0, bandIndex),
+				track,
+				...tracks.video.slice(bandIndex),
+			],
+		};
+	}
+
+	if (track.type === "text") {
+		const bandIndex = Math.max(0, Math.min(insertIndex, tracks.text.length));
+		return {
+			...tracks,
+			text: [
+				...tracks.text.slice(0, bandIndex),
+				track,
+				...tracks.text.slice(bandIndex),
+			],
+		};
+	}
+
+	if (track.type === "graphic") {
+		const bandIndex = Math.max(0, Math.min(insertIndex, tracks.graphic.length));
+		return {
+			...tracks,
+			graphic: [
+				...tracks.graphic.slice(0, bandIndex),
+				track,
+				...tracks.graphic.slice(bandIndex),
+			],
+		};
+	}
+
+	// effect
+	const bandIndex = Math.max(0, Math.min(insertIndex, tracks.effect.length));
 	return {
 		...tracks,
-		overlay: [
-			...tracks.overlay.slice(0, overlayInsertIndex),
+		effect: [
+			...tracks.effect.slice(0, bandIndex),
 			track,
-			...tracks.overlay.slice(overlayInsertIndex),
+			...tracks.effect.slice(bandIndex),
 		],
 	};
 }

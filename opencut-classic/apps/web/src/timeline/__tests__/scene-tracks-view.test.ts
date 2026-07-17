@@ -22,8 +22,9 @@ import type {
 	VideoTrack,
 } from "@/timeline/types";
 
-// Small shape-only fixtures — no MediaTime arithmetic here, so no wasm mock
-// is needed (the views just walk arrays and read `type`).
+// Post-R1 (project version 32) fixtures — SceneTracks is the uniform
+// { video[], text[], graphic[], effect[], audio[] } shape. No wasm mock
+// needed: the views just walk arrays and read `type`.
 
 function videoTrack({ id }: { id: string }): VideoTrack {
 	return {
@@ -54,25 +55,31 @@ function audioTrack({ id }: { id: string }): AudioTrack {
 }
 
 function scene({
-	main,
-	overlay = [],
+	video,
+	text = [],
+	graphic = [],
+	effect = [],
 	audio = [],
 }: {
-	main: VideoTrack;
-	overlay?: SceneTracks["overlay"];
+	video: VideoTrack[];
+	text?: TextTrack[];
+	graphic?: GraphicTrack[];
+	effect?: EffectTrack[];
 	audio?: AudioTrack[];
 }): SceneTracks {
-	return { main, overlay, audio };
+	return { video, text, graphic, effect, audio };
 }
 
 describe("getAllVideoTracks", () => {
-	test("returns [main, ...overlay-videos] in that order", () => {
-		const main = videoTrack({ id: "V1-main" });
-		const v2 = videoTrack({ id: "V2" });
-		const v3 = videoTrack({ id: "V3" });
+	test("returns tracks.video in place", () => {
 		const tracks = scene({
-			main,
-			overlay: [textTrack({ id: "T1" }), v2, graphicTrack({ id: "G1" }), v3],
+			video: [
+				videoTrack({ id: "V1-main" }),
+				videoTrack({ id: "V2" }),
+				videoTrack({ id: "V3" }),
+			],
+			text: [textTrack({ id: "T1" })],
+			graphic: [graphicTrack({ id: "G1" })],
 		});
 		expect(getAllVideoTracks({ tracks }).map((t) => t.id)).toEqual([
 			"V1-main",
@@ -80,32 +87,25 @@ describe("getAllVideoTracks", () => {
 			"V3",
 		]);
 	});
-
-	test("returns just [main] when no overlay videos", () => {
-		const main = videoTrack({ id: "V1-main" });
-		const tracks = scene({
-			main,
-			overlay: [textTrack({ id: "T1" }), graphicTrack({ id: "G1" })],
-		});
-		expect(getAllVideoTracks({ tracks }).map((t) => t.id)).toEqual(["V1-main"]);
-	});
 });
 
 describe("getMainVideoTrack", () => {
-	test("returns the main track (bottom-most under R1)", () => {
-		const main = videoTrack({ id: "V1-main" });
-		const tracks = scene({ main, overlay: [videoTrack({ id: "V2" })] });
+	test("returns video[0] (the ripple track)", () => {
+		const tracks = scene({
+			video: [videoTrack({ id: "V1-main" }), videoTrack({ id: "V2" })],
+		});
 		expect(getMainVideoTrack({ tracks }).id).toBe("V1-main");
 	});
 });
 
 describe("getOverlayVideoTracks", () => {
-	test("filters overlay to video-typed tracks only, preserving order", () => {
-		const v2 = videoTrack({ id: "V2" });
-		const v3 = videoTrack({ id: "V3" });
+	test("returns video.slice(1)", () => {
 		const tracks = scene({
-			main: videoTrack({ id: "V1-main" }),
-			overlay: [textTrack({ id: "T1" }), v2, graphicTrack({ id: "G1" }), v3],
+			video: [
+				videoTrack({ id: "V1-main" }),
+				videoTrack({ id: "V2" }),
+				videoTrack({ id: "V3" }),
+			],
 		});
 		expect(getOverlayVideoTracks({ tracks }).map((t) => t.id)).toEqual([
 			"V2",
@@ -113,85 +113,73 @@ describe("getOverlayVideoTracks", () => {
 		]);
 	});
 
-	test("returns empty when overlay has no video tracks", () => {
-		const tracks = scene({
-			main: videoTrack({ id: "V1-main" }),
-			overlay: [textTrack({ id: "T1" })],
-		});
+	test("returns empty when only the ripple track exists", () => {
+		const tracks = scene({ video: [videoTrack({ id: "V1-main" })] });
 		expect(getOverlayVideoTracks({ tracks })).toEqual([]);
 	});
 });
 
 describe("getTextTracks", () => {
-	test("returns text tracks in overlay order", () => {
-		const t1 = textTrack({ id: "T1" });
-		const t2 = textTrack({ id: "T2" });
+	test("returns tracks.text in order", () => {
 		const tracks = scene({
-			main: videoTrack({ id: "V1-main" }),
-			overlay: [t1, videoTrack({ id: "V2" }), t2],
+			video: [videoTrack({ id: "V1-main" })],
+			text: [textTrack({ id: "T1" }), textTrack({ id: "T2" })],
 		});
 		expect(getTextTracks({ tracks }).map((t) => t.id)).toEqual(["T1", "T2"]);
 	});
 });
 
 describe("getGraphicTracks", () => {
-	test("returns graphic tracks in overlay order", () => {
-		const g1 = graphicTrack({ id: "G1" });
-		const g2 = graphicTrack({ id: "G2" });
+	test("returns tracks.graphic in order", () => {
 		const tracks = scene({
-			main: videoTrack({ id: "V1-main" }),
-			overlay: [g1, textTrack({ id: "T1" }), g2],
+			video: [videoTrack({ id: "V1-main" })],
+			graphic: [graphicTrack({ id: "G1" }), graphicTrack({ id: "G2" })],
 		});
 		expect(getGraphicTracks({ tracks }).map((t) => t.id)).toEqual(["G1", "G2"]);
 	});
 });
 
 describe("getEffectTracks", () => {
-	test("returns effect tracks in overlay order", () => {
-		const e1 = effectTrack({ id: "E1" });
+	test("returns tracks.effect in order", () => {
 		const tracks = scene({
-			main: videoTrack({ id: "V1-main" }),
-			overlay: [textTrack({ id: "T1" }), e1],
+			video: [videoTrack({ id: "V1-main" })],
+			effect: [effectTrack({ id: "E1" })],
 		});
 		expect(getEffectTracks({ tracks }).map((t) => t.id)).toEqual(["E1"]);
 	});
 });
 
 describe("getAudioTracks", () => {
-	test("returns tracks.audio as-is (shape unchanged under R1)", () => {
-		const a1 = audioTrack({ id: "A1" });
-		const a2 = audioTrack({ id: "A2" });
+	test("returns tracks.audio in order", () => {
 		const tracks = scene({
-			main: videoTrack({ id: "V1-main" }),
-			audio: [a1, a2],
+			video: [videoTrack({ id: "V1-main" })],
+			audio: [audioTrack({ id: "A1" }), audioTrack({ id: "A2" })],
 		});
 		expect(getAudioTracks({ tracks }).map((t) => t.id)).toEqual(["A1", "A2"]);
-	});
-
-	test("empty audio list is preserved", () => {
-		const tracks = scene({ main: videoTrack({ id: "V1-main" }) });
-		expect(getAudioTracks({ tracks })).toEqual([]);
 	});
 });
 
 describe("getOrderedTimelineTracks", () => {
-	test("today's order: [...overlay, main, ...audio]", () => {
+	test("post-R1 order: [text, graphic, effect, video, audio]", () => {
 		const tracks = scene({
-			main: videoTrack({ id: "V1-main" }),
-			overlay: [textTrack({ id: "T1" }), videoTrack({ id: "V2" })],
-			audio: [audioTrack({ id: "A1" }), audioTrack({ id: "A2" })],
+			video: [videoTrack({ id: "V1-main" }), videoTrack({ id: "V2" })],
+			text: [textTrack({ id: "T1" })],
+			graphic: [graphicTrack({ id: "G1" })],
+			effect: [effectTrack({ id: "E1" })],
+			audio: [audioTrack({ id: "A1" })],
 		});
 		expect(getOrderedTimelineTracks({ tracks }).map((t) => t.id)).toEqual([
 			"T1",
-			"V2",
+			"G1",
+			"E1",
 			"V1-main",
+			"V2",
 			"A1",
-			"A2",
 		]);
 	});
 
-	test("empty overlay + empty audio still yields just [main]", () => {
-		const tracks = scene({ main: videoTrack({ id: "V1-main" }) });
+	test("single-video scene yields just [video[0]]", () => {
+		const tracks = scene({ video: [videoTrack({ id: "V1-main" })] });
 		expect(getOrderedTimelineTracks({ tracks }).map((t) => t.id)).toEqual([
 			"V1-main",
 		]);
@@ -199,55 +187,58 @@ describe("getOrderedTimelineTracks", () => {
 });
 
 describe("findTrackById", () => {
-	test("returns the main track when its id matches", () => {
-		const tracks = scene({ main: videoTrack({ id: "V1-main" }) });
-		expect(findTrackById({ tracks, trackId: "V1-main" })?.id).toBe("V1-main");
-	});
-
-	test("returns an overlay track when its id matches", () => {
+	test("finds a track in the video band", () => {
 		const tracks = scene({
-			main: videoTrack({ id: "V1-main" }),
-			overlay: [textTrack({ id: "T1" }), graphicTrack({ id: "G1" })],
+			video: [videoTrack({ id: "V1-main" }), videoTrack({ id: "V2" })],
 		});
-		expect(findTrackById({ tracks, trackId: "G1" })?.id).toBe("G1");
+		expect(findTrackById({ tracks, trackId: "V2" })?.id).toBe("V2");
 	});
 
-	test("returns an audio track when its id matches", () => {
+	test("finds a track in the text band", () => {
 		const tracks = scene({
-			main: videoTrack({ id: "V1-main" }),
+			video: [videoTrack({ id: "V1-main" })],
+			text: [textTrack({ id: "T1" })],
+		});
+		expect(findTrackById({ tracks, trackId: "T1" })?.id).toBe("T1");
+	});
+
+	test("finds a track in the audio band", () => {
+		const tracks = scene({
+			video: [videoTrack({ id: "V1-main" })],
 			audio: [audioTrack({ id: "A1" })],
 		});
 		expect(findTrackById({ tracks, trackId: "A1" })?.id).toBe("A1");
 	});
 
 	test("returns undefined for an unknown id", () => {
-		const tracks = scene({ main: videoTrack({ id: "V1-main" }) });
-		expect(findTrackById({ tracks, trackId: "no-such-id" })).toBeUndefined();
+		const tracks = scene({ video: [videoTrack({ id: "V1-main" })] });
+		expect(findTrackById({ tracks, trackId: "nope" })).toBeUndefined();
 	});
 });
 
 describe("shape-arithmetic helpers", () => {
-	test("getMainTrackRowIndex = overlay.length", () => {
+	test("getMainTrackRowIndex = text + graphic + effect (row of video[0])", () => {
 		const tracks = scene({
-			main: videoTrack({ id: "V1-main" }),
-			overlay: [textTrack({ id: "T1" }), videoTrack({ id: "V2" })],
-			audio: [audioTrack({ id: "A1" })],
+			video: [videoTrack({ id: "V1-main" })],
+			text: [textTrack({ id: "T1" }), textTrack({ id: "T2" })],
+			graphic: [graphicTrack({ id: "G1" })],
+			effect: [],
 		});
-		expect(getMainTrackRowIndex({ tracks })).toBe(2);
+		expect(getMainTrackRowIndex({ tracks })).toBe(3);
 	});
 
-	test("getAudioBaseIndex = overlay.length + 1", () => {
+	test("getAudioBaseIndex = text + graphic + effect + video", () => {
 		const tracks = scene({
-			main: videoTrack({ id: "V1-main" }),
-			overlay: [textTrack({ id: "T1" }), videoTrack({ id: "V2" })],
+			video: [videoTrack({ id: "V1-main" }), videoTrack({ id: "V2" })],
+			text: [textTrack({ id: "T1" })],
 		});
 		expect(getAudioBaseIndex({ tracks })).toBe(3);
 	});
 
-	test("getTotalTrackCount = overlay.length + 1 + audio.length", () => {
+	test("getTotalTrackCount sums every band", () => {
 		const tracks = scene({
-			main: videoTrack({ id: "V1-main" }),
-			overlay: [textTrack({ id: "T1" })],
+			video: [videoTrack({ id: "V1-main" })],
+			text: [textTrack({ id: "T1" })],
 			audio: [audioTrack({ id: "A1" }), audioTrack({ id: "A2" })],
 		});
 		expect(getTotalTrackCount({ tracks })).toBe(4);
@@ -257,14 +248,10 @@ describe("shape-arithmetic helpers", () => {
 describe("view completeness (partition property)", () => {
 	test("across a mixed scene, the views partition every track exactly once", () => {
 		const tracks = scene({
-			main: videoTrack({ id: "V1-main" }),
-			overlay: [
-				textTrack({ id: "T1" }),
-				videoTrack({ id: "V2" }),
-				graphicTrack({ id: "G1" }),
-				effectTrack({ id: "E1" }),
-				textTrack({ id: "T2" }),
-			],
+			video: [videoTrack({ id: "V1-main" }), videoTrack({ id: "V2" })],
+			text: [textTrack({ id: "T1" }), textTrack({ id: "T2" })],
+			graphic: [graphicTrack({ id: "G1" })],
+			effect: [effectTrack({ id: "E1" })],
 			audio: [audioTrack({ id: "A1" })],
 		});
 
@@ -278,7 +265,6 @@ describe("view completeness (partition property)", () => {
 		expect(seenIds.sort()).toEqual(
 			["V1-main", "V2", "T1", "T2", "G1", "E1", "A1"].sort(),
 		);
-		// every track surfaces in exactly one view (no duplication)
 		expect(new Set(seenIds).size).toBe(seenIds.length);
 	});
 });

@@ -6,6 +6,7 @@ import { generateUUID } from "@/utils/id";
 import { storageService } from "@/services/storage/service";
 import type { FrameRate } from "opencut-wasm";
 import { hasMediaId } from "@/timeline/element-utils";
+import { getOrderedTimelineTracks } from "@/timeline/scene-tracks-view";
 import { frameRatesEqual, getHighestImportedVideoFps } from "@/fps/utils";
 import { UpdateProjectSettingsCommand } from "@/commands/project";
 
@@ -66,11 +67,7 @@ export class AddMediaAssetCommand extends Command {
 				const orphanedElements: Array<{ trackId: string; elementId: string }> =
 					[];
 
-				for (const track of [
-					...currentTracks.overlay,
-					currentTracks.main,
-					...currentTracks.audio,
-				]) {
+				for (const track of getOrderedTimelineTracks({ tracks: currentTracks })) {
 					for (const element of track.elements) {
 						if (hasMediaId(element) && element.mediaId === this.assetId) {
 							orphanedElements.push({

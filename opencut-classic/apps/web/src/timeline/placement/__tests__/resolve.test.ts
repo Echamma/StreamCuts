@@ -256,14 +256,29 @@ function buildSceneTracks({
 	main?: VideoTrack;
 	audio?: Array<AudioTrack>;
 }): SceneTracks {
+	// v32 uniform shape — split the caller-supplied `overlay` mix by kind.
+	const mainVideo =
+		main ?? buildTrack({ id: "video-main", type: "video" });
+	const videoOverlays = overlay.filter(
+		(t): t is VideoTrack => t.type === "video",
+	);
+	const textOverlays = overlay.filter((t) => t.type === "text") as Extract<
+		OverlayTrack,
+		{ type: "text" }
+	>[];
+	const graphicOverlays = overlay.filter((t) => t.type === "graphic") as Extract<
+		OverlayTrack,
+		{ type: "graphic" }
+	>[];
+	const effectOverlays = overlay.filter((t) => t.type === "effect") as Extract<
+		OverlayTrack,
+		{ type: "effect" }
+	>[];
 	return {
-		overlay,
-		main:
-			main ??
-			buildTrack({
-				id: "video-main",
-				type: "video",
-			}),
+		video: [mainVideo, ...videoOverlays],
+		text: textOverlays,
+		graphic: graphicOverlays,
+		effect: effectOverlays,
 		audio,
 	};
 }

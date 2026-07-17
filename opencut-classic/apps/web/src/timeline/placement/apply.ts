@@ -65,22 +65,19 @@ export function applyPlacement({
 						}),
 					}),
 				}
-			: {
-					...tracks,
-					overlay: insertIntoOverlayTracks({
-						tracks,
-						insertIndex,
-						track: buildPlacedOverlayTrack({
-							id: newTrackId,
-							type: placementResult.trackType,
-							elements,
-						}),
+			: insertOverlayIntoBand({
+					tracks,
+					insertIndex,
+					track: buildPlacedOverlayTrack({
+						id: newTrackId,
+						type: placementResult.trackType,
+						elements,
 					}),
-				};
+				});
 	return { updatedTracks, targetTrackId: newTrackId };
 }
 
-function insertIntoOverlayTracks({
+function insertOverlayIntoBand({
 	tracks,
 	insertIndex,
 	track,
@@ -88,14 +85,54 @@ function insertIntoOverlayTracks({
 	tracks: SceneTracks;
 	insertIndex: number;
 	track: OverlayTrack;
-}): OverlayTrack[] {
-	const normalizedInsertIndex = Math.max(
-		0,
-		Math.min(insertIndex, getMainTrackRowIndex({ tracks })),
-	);
-	const nextTracks = [...tracks.overlay];
-	nextTracks.splice(normalizedInsertIndex, 0, track);
-	return nextTracks;
+}): SceneTracks {
+	// Post-R1 each overlay kind lives in its own band. The insertIndex is a
+	// row in the ordered enumeration [text, graphic, effect, video, audio];
+	// we translate it to a band-local index and splice.
+	if (track.type === "video") {
+		const bandIndex = Math.max(
+			0,
+			Math.min(insertIndex - getMainTrackRowIndex({ tracks }), tracks.video.length),
+		);
+		return {
+			...tracks,
+			video: spliceInsert({ band: tracks.video, index: bandIndex, track }),
+		};
+	}
+	if (track.type === "text") {
+		const bandIndex = Math.max(0, Math.min(insertIndex, tracks.text.length));
+		return {
+			...tracks,
+			text: spliceInsert({ band: tracks.text, index: bandIndex, track }),
+		};
+	}
+	if (track.type === "graphic") {
+		const bandIndex = Math.max(0, Math.min(insertIndex, tracks.graphic.length));
+		return {
+			...tracks,
+			graphic: spliceInsert({ band: tracks.graphic, index: bandIndex, track }),
+		};
+	}
+	// effect
+	const bandIndex = Math.max(0, Math.min(insertIndex, tracks.effect.length));
+	return {
+		...tracks,
+		effect: spliceInsert({ band: tracks.effect, index: bandIndex, track }),
+	};
+}
+
+function spliceInsert<T>({
+	band,
+	index,
+	track,
+}: {
+	band: T[];
+	index: number;
+	track: T;
+}): T[] {
+	const next = [...band];
+	next.splice(index, 0, track);
+	return next;
 }
 
 function insertIntoAudioTracks({

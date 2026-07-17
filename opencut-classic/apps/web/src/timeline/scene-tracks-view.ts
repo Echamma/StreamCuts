@@ -12,97 +12,74 @@ import type {
  * R1 compatibility views over `SceneTracks` (see
  * `docs/roadmap/50-r1-uniform-tracks-spike.md`).
  *
- * These functions expose the *target* shape of R1 (one uniform video list,
- * plus text/graphic/effect/audio lists) while reading the *current* shape
- * ({ overlay, main, audio }). Consumers migrate to these views one at a time
- * during Phase B; on the Phase C flip only the bodies below change, and every
- * consumer already reads the target shape's slices.
- *
- * Convention for the video list: bottom-to-top by compositing z-order.
- * `getAllVideoTracks()[0]` is the former `main` (the ripple track); higher
- * indices render on top. This matches `tracks.main` sitting below `overlay`
- * in the current renderer.
+ * Post-Phase-C: `SceneTracks` is the uniform shape
+ *   { video: VideoTrack[]; text: TextTrack[]; graphic: GraphicTrack[];
+ *     effect: EffectTrack[]; audio: AudioTrack[] }
+ * with each band ordered bottom-to-top by compositing z-order. `video[0]` is
+ * the ripple track (the former `main`). These views were introduced in Phase A
+ * as adapters over the old `{overlay, main, audio}` shape; consumers migrated
+ * to them during Phase B; now they simply read the new shape directly.
  */
 
 /**
- * Every video track in the scene, bottom-to-top: `[main, ...overlay-videos]`.
- * When R1 lands this becomes `tracks.video` directly.
+ * Every video track in the scene, bottom-to-top. Direct alias for `tracks.video`.
  */
 export function getAllVideoTracks({
 	tracks,
 }: {
 	tracks: SceneTracks;
 }): VideoTrack[] {
-	const overlayVideo = tracks.overlay.filter(
-		(track): track is VideoTrack => track.type === "video",
-	);
-	return [tracks.main, ...overlayVideo];
+	return tracks.video;
 }
 
 /**
- * The bottom-most video track — the current `main` and, post-R1, `video[0]`.
- * Kept as a distinct view for call-sites that need "the ripple track" today
- * without caring about z-order semantics.
+ * The bottom-most video track — the ripple track. Callers that used this to
+ * mean "the former `main`" continue to work: after the R1 flip, `video[0]` is
+ * the same track that was `main` before.
  */
 export function getMainVideoTrack({
 	tracks,
 }: {
 	tracks: SceneTracks;
 }): VideoTrack {
-	return tracks.main;
+	return tracks.video[0];
 }
 
 /**
- * Video tracks above the main one — the current `overlay` filter, post-R1
- * `video.slice(1)`.
+ * Video tracks above the main one. Post-R1 = `video.slice(1)`.
  */
 export function getOverlayVideoTracks({
 	tracks,
 }: {
 	tracks: SceneTracks;
 }): VideoTrack[] {
-	return tracks.overlay.filter(
-		(track): track is VideoTrack => track.type === "video",
-	);
+	return tracks.video.slice(1);
 }
 
-/** All text tracks; today they live inside `overlay`, post-R1 `tracks.text`. */
 export function getTextTracks({
 	tracks,
 }: {
 	tracks: SceneTracks;
 }): TextTrack[] {
-	return tracks.overlay.filter(
-		(track): track is TextTrack => track.type === "text",
-	);
+	return tracks.text;
 }
 
-/** All graphic tracks. */
 export function getGraphicTracks({
 	tracks,
 }: {
 	tracks: SceneTracks;
 }): GraphicTrack[] {
-	return tracks.overlay.filter(
-		(track): track is GraphicTrack => track.type === "graphic",
-	);
+	return tracks.graphic;
 }
 
-/** All effect tracks. */
 export function getEffectTracks({
 	tracks,
 }: {
 	tracks: SceneTracks;
 }): EffectTrack[] {
-	return tracks.overlay.filter(
-		(track): track is EffectTrack => track.type === "effect",
-	);
+	return tracks.effect;
 }
 
-/**
- * Audio tracks. Kept as a view for symmetry — the shape doesn't change under
- * R1, but a single migration point makes future audio-track refactors cheap.
- */
 export function getAudioTracks({
 	tracks,
 }: {
@@ -113,31 +90,28 @@ export function getAudioTracks({
 
 /**
  * Every timeline track in a stable enumeration order — a superset covering
- * `overlay`, `main`, and `audio`. Concretely today: `[...overlay, main, ...audio]`.
- * Post-R1 this becomes `[...video, ...text, ...graphic, ...effect, ...audio]`;
- * consumers that just want to iterate every track (snap-point collection, audio
- * silence checks, mute enumeration) do not care about the exact interleaving,
- * only that every track shows up exactly once.
- *
- * Consumers that *do* rely on the concrete `[overlay, main, audio]` layout —
- * insertion-index arithmetic (`overlay.length` = the main-track's row) — must
- * NOT migrate to this view yet; a future batch introduces dedicated helpers
- * (`getInsertPosition`, `getTrackRowIndex`) so the layout assumption stops
- * leaking through the enumeration order.
+ * every band. Post-R1 concretely: `[...text, ...graphic, ...effect, ...video,
+ * ...audio]` with `video[0]` (the former `main`) at the index that
+ * `getMainTrackRowIndex` returns, preserving the pre-R1 layout so consumers
+ * that use the enumeration as a row-index space keep working.
  */
 export function getOrderedTimelineTracks({
 	tracks,
 }: {
 	tracks: SceneTracks;
 }): TimelineTrack[] {
-	return [...tracks.overlay, tracks.main, ...tracks.audio];
+	return [
+		...tracks.text,
+		...tracks.graphic,
+		...tracks.effect,
+		...tracks.video,
+		...tracks.audio,
+	];
 }
 
 /**
- * Look up a track by id across every kind — main, overlay, and audio. Returns
- * `undefined` when no track has that id. Replaces the common pattern
- *   tracks.main.id === id ? tracks.main : overlay.find(...) ?? audio.find(...)
- * with one call so a Phase C shape change only touches this file.
+ * Look up a track by id across every band. Returns `undefined` when no track
+ * has that id.
  */
 export function findTrackById({
 	tracks,
@@ -146,51 +120,62 @@ export function findTrackById({
 	tracks: SceneTracks;
 	trackId: string;
 }): TimelineTrack | undefined {
-	if (tracks.main.id === trackId) return tracks.main;
-	const overlayHit = tracks.overlay.find((track) => track.id === trackId);
-	if (overlayHit) return overlayHit;
+	const textHit = tracks.text.find((track) => track.id === trackId);
+	if (textHit) return textHit;
+	const graphicHit = tracks.graphic.find((track) => track.id === trackId);
+	if (graphicHit) return graphicHit;
+	const effectHit = tracks.effect.find((track) => track.id === trackId);
+	if (effectHit) return effectHit;
+	const videoHit = tracks.video.find((track) => track.id === trackId);
+	if (videoHit) return videoHit;
 	return tracks.audio.find((track) => track.id === trackId);
 }
 
 /**
- * Row index of the main video track in the ordered enumeration
- * `[...overlay, main, ...audio]` — today `overlay.length`. This helper isolates
- * the concrete-shape assumption so insertion-index arithmetic can stop reaching
- * for `overlay.length` directly.
- *
- * Post-R1 the enumeration order changes and this returns `getAllVideoTracks`'s
- * index for the ripple track; callers using it as an insertion pivot will need
- * a follow-up dedicated helper. For now, callers that used
- * `tracks.overlay.length` as "the main-track row" are equivalent to this.
+ * Row index of the main video track in the ordered enumeration. Post-R1 the
+ * ordered enumeration is `[text, graphic, effect, video, audio]`, so
+ * `video[0]` (the ripple track) sits at `text + graphic + effect`. Callers
+ * that used this as an insertion pivot before the flip continue to point at
+ * the same relative row.
  */
 export function getMainTrackRowIndex({
 	tracks,
 }: {
 	tracks: SceneTracks;
 }): number {
-	return tracks.overlay.length;
+	return tracks.text.length + tracks.graphic.length + tracks.effect.length;
 }
 
 /**
- * First row index of the audio band in the ordered enumeration — today
- * `overlay.length + 1`. Same isolation goal as `getMainTrackRowIndex`.
+ * First row index of the audio band in the ordered enumeration.
+ * Post-R1: `text + graphic + effect + video`.
  */
 export function getAudioBaseIndex({
 	tracks,
 }: {
 	tracks: SceneTracks;
 }): number {
-	return tracks.overlay.length + 1;
+	return (
+		tracks.text.length +
+		tracks.graphic.length +
+		tracks.effect.length +
+		tracks.video.length
+	);
 }
 
 /**
- * Total row count across the ordered enumeration — today
- * `overlay.length + 1 + audio.length`.
+ * Total row count across the ordered enumeration.
  */
 export function getTotalTrackCount({
 	tracks,
 }: {
 	tracks: SceneTracks;
 }): number {
-	return tracks.overlay.length + 1 + tracks.audio.length;
+	return (
+		tracks.text.length +
+		tracks.graphic.length +
+		tracks.effect.length +
+		tracks.video.length +
+		tracks.audio.length
+	);
 }

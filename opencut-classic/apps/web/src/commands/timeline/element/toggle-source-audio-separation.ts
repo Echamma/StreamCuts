@@ -10,6 +10,7 @@ import {
 	resolveTrackPlacement,
 } from "@/timeline/placement";
 import { updateElementInSceneTracks } from "@/timeline/track-element-update";
+import { findTrackById } from "@/timeline/scene-tracks-view";
 import type {
 	SceneTracks,
 	TimelineElement,
@@ -33,11 +34,10 @@ export class ToggleSourceAudioSeparationCommand extends Command {
 		const editor = EditorCore.getInstance();
 		this.savedState = editor.scenes.getActiveScene().tracks;
 
-		const sourceTrack = [
-			...this.savedState.overlay,
-			this.savedState.main,
-			...this.savedState.audio,
-		].find((track) => track.id === this.params.trackId);
+		const sourceTrack = findTrackById({
+			tracks: this.savedState,
+			trackId: this.params.trackId,
+		});
 		if (!sourceTrack) {
 			return;
 		}

@@ -7,6 +7,7 @@ import type { SceneTracks, TimelineElement } from "@/timeline";
 import { generateUUID } from "@/utils/id";
 import { EditorCore } from "@/core";
 import { applyPlacement, resolveTrackPlacement } from "@/timeline/placement";
+import { getOrderedTimelineTracks } from "@/timeline/scene-tracks-view";
 import { cloneAnimations } from "@/animation";
 import type { MediaTime } from "@/wasm";
 
@@ -31,11 +32,7 @@ export class DuplicateElementsCommand extends Command {
 
 		let updatedTracks = this.savedState;
 
-		for (const track of [
-			...this.savedState.overlay,
-			this.savedState.main,
-			...this.savedState.audio,
-		]) {
+		for (const track of getOrderedTimelineTracks({ tracks: this.savedState })) {
 			const elementsToDuplicate = this.elements.filter(
 				(elementEntry) => elementEntry.trackId === track.id,
 			);

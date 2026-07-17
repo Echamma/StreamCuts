@@ -1,5 +1,5 @@
 import { Command, type CommandResult } from "@/commands/base-command";
-import type { SceneTracks, TimelineElement } from "@/timeline";
+import type { SceneTracks, TimelineElement, TimelineTrack } from "@/timeline";
 import { isRetimableElement } from "@/timeline";
 import { EditorCore } from "@/core";
 import { generateUUID } from "@/utils/id";
@@ -138,10 +138,15 @@ export class RemoveSilenceCommand extends Command {
 			return { ...track, elements: newElements } as TTrack;
 		};
 
+		const applyBand = <T extends TimelineTrack>(band: T[]): T[] =>
+			band.map((t) => applyToTrack(t));
+
 		const newTracks: SceneTracks = {
-			overlay: this.savedTracks.overlay.map((t) => applyToTrack(t)),
-			main: applyToTrack(this.savedTracks.main),
-			audio: this.savedTracks.audio.map((t) => applyToTrack(t)),
+			video: applyBand(this.savedTracks.video),
+			text: applyBand(this.savedTracks.text),
+			graphic: applyBand(this.savedTracks.graphic),
+			effect: applyBand(this.savedTracks.effect),
+			audio: applyBand(this.savedTracks.audio),
 		};
 
 		editor.timeline.updateTracks(newTracks);
