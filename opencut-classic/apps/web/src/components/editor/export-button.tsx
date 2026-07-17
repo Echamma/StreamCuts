@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { TransitionTopIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
@@ -55,6 +55,7 @@ import {
 	useUserExportPresets,
 } from "@/export/user-presets-store";
 import { Input } from "@/components/ui/input";
+import { isAv1EncodeSupported } from "@/export/codec-support";
 import {
 	Section,
 	SectionContent,
@@ -246,6 +247,17 @@ function ExportPopover({
 	const userPresets = useUserExportPresets();
 	const [savePresetName, setSavePresetName] = useState<string>("");
 	const [isNamingPreset, setIsNamingPreset] = useState<boolean>(false);
+	const [isAv1Supported, setIsAv1Supported] = useState<boolean>(false);
+
+	useEffect(() => {
+		let alive = true;
+		isAv1EncodeSupported().then((supported) => {
+			if (alive) setIsAv1Supported(supported);
+		});
+		return () => {
+			alive = false;
+		};
+	}, []);
 
 	const handlePresetChange = (next: ExportPresetId) => {
 		setPresetId(next);
@@ -576,6 +588,14 @@ function ExportPopover({
 														WebM (VP9) - Smaller file size
 													</Label>
 												</div>
+												{isAv1Supported && (
+													<div className="flex items-center space-x-2">
+														<RadioGroupItem value="webm-av1" id="webm-av1" />
+														<Label htmlFor="webm-av1">
+															WebM (AV1) - Smallest file, newer codec
+														</Label>
+													</div>
+												)}
 											</RadioGroup>
 										</SectionContent>
 									</Section>
