@@ -8,9 +8,19 @@ export const EXPORT_QUALITY_VALUES = [
 	"very_high",
 ] as const;
 
-export const EXPORT_FORMAT_VALUES = ["mp4", "webm"] as const;
+export const EXPORT_FORMAT_VALUES = ["mp4", "webm", "webm-av1"] as const;
 
 export type ExportFormat = (typeof EXPORT_FORMAT_VALUES)[number];
+
+/** File extension per format; `webm-av1` uses `.webm` (AV1 in a WebM container). */
+export function getFormatFileExtension({
+	format,
+}: {
+	format: ExportFormat;
+}): ".mp4" | ".webm" {
+	if (format === "mp4") return ".mp4";
+	return ".webm";
+}
 export type ExportQuality = (typeof EXPORT_QUALITY_VALUES)[number];
 
 export type ExportSceneTarget =
@@ -63,7 +73,7 @@ export function getExportFileExtension({
 }: {
 	format: ExportFormat;
 }): string {
-	return `.${format}`;
+	return getFormatFileExtension({ format });
 }
 
 export function downloadBuffer({

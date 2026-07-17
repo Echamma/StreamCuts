@@ -32,7 +32,9 @@ function isValidPresetArray(value: unknown): value is UserExportPreset[] {
 			item.fps !== null &&
 			typeof item.fps.numerator === "number" &&
 			typeof item.fps.denominator === "number" &&
-			(item.format === "mp4" || item.format === "webm") &&
+			(item.format === "mp4" ||
+				item.format === "webm" ||
+				item.format === "webm-av1") &&
 			typeof item.quality === "string" &&
 			typeof item.createdAt === "number",
 	);

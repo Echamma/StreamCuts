@@ -119,7 +119,7 @@ export class SceneExporter extends EventEmitter<SceneExporterEvents> {
 		const frameCount = Math.floor(rootNode.duration / ticksPerFrame);
 
 		const outputFormat =
-			this.format === "webm"
+			this.format === "webm" || this.format === "webm-av1"
 				? new WebMOutputFormat()
 				: new Mp4OutputFormat(
 						this.target instanceof StreamTarget ? { fastStart: false } : undefined,
@@ -130,7 +130,12 @@ export class SceneExporter extends EventEmitter<SceneExporterEvents> {
 			target: this.target,
 		});
 
-		const videoCodec = this.format === "webm" ? "vp9" : "avc";
+		const videoCodec: "avc" | "vp9" | "av1" =
+			this.format === "webm-av1"
+				? "av1"
+				: this.format === "webm"
+					? "vp9"
+					: "avc";
 		const videoBitrate = getTargetVideoBitrate({
 			codec: videoCodec,
 			width: this.renderer.width,
@@ -151,7 +156,8 @@ export class SceneExporter extends EventEmitter<SceneExporterEvents> {
 
 		let audioSource: AudioBufferSource | null = null;
 		if (this.shouldIncludeAudio && (this.audioBuffer || this.writeAudioToSource)) {
-			let audioCodec: "aac" | "opus" = this.format === "webm" ? "opus" : "aac";
+			let audioCodec: "aac" | "opus" =
+			this.format === "webm" || this.format === "webm-av1" ? "opus" : "aac";
 			let audioBitrate = getTargetAudioBitrate({
 				codec: audioCodec,
 				quality: this.quality,
@@ -265,20 +271,27 @@ function getTargetVideoBitrate({
 	fps,
 	quality,
 }: {
-	codec: "avc" | "vp9";
+	codec: "avc" | "vp9" | "av1";
 	width: number;
 	height: number;
 	fps: number;
 	quality: ExportQuality;
 }): number {
 	const safeFps = Math.max(1, fps);
+	// AV1 is ~30% more efficient than VP9 at the same visual quality — target a
+	// lower bits-per-pixel so users see a smaller file, not a bigger one, when
+	// they pick AV1. VP9/H.264 numbers are unchanged.
 	const bitsPerPixelPerFrame =
-		codec === "vp9"
-			? 0.085 * VIDEO_QUALITY_MULTIPLIER[quality]
-			: 0.13 * VIDEO_QUALITY_MULTIPLIER[quality];
+		codec === "av1"
+			? 0.06 * VIDEO_QUALITY_MULTIPLIER[quality]
+			: codec === "vp9"
+				? 0.085 * VIDEO_QUALITY_MULTIPLIER[quality]
+				: 0.13 * VIDEO_QUALITY_MULTIPLIER[quality];
 	const rawBitrate = width * height * safeFps * bitsPerPixelPerFrame;
-	const minimumBitrate = codec === "vp9" ? 2_000_000 : 3_500_000;
-	const maximumBitrate = codec === "vp9" ? 60_000_000 : 80_000_000;
+	const minimumBitrate =
+		codec === "av1" ? 1_500_000 : codec === "vp9" ? 2_000_000 : 3_500_000;
+	const maximumBitrate =
+		codec === "av1" ? 50_000_000 : codec === "vp9" ? 60_000_000 : 80_000_000;
 
 	return roundBitrate({
 		bitrate: Math.max(minimumBitrate, Math.min(maximumBitrate, rawBitrate)),
