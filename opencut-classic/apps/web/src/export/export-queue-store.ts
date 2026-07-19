@@ -17,6 +17,10 @@ import {
 	runExportQueue,
 	type ExportQueueJob,
 } from "@/export/queue-runner";
+import {
+	loadQueueSnapshot,
+	saveQueueSnapshot,
+} from "@/export/queue-persistence";
 
 interface ExportQueueSnapshot {
 	jobs: ExportQueueJob[];
@@ -29,12 +33,37 @@ let cancelRequested = false;
 let snapshot: ExportQueueSnapshot = { jobs, isRunning };
 const listeners = new Set<() => void>();
 
+let hydratePromise: Promise<void> | null = null;
+
 function commit(): void {
 	snapshot = { jobs, isRunning };
 	for (const listener of listeners) listener();
+	// Fire-and-forget: persisting the snapshot must not block UI work; failures
+	// are swallowed because a missing save is preferable to a UI hang.
+	void saveQueueSnapshot({ jobs }).catch(() => {});
+}
+
+async function hydrateOnce(): Promise<void> {
+	if (hydratePromise) return hydratePromise;
+	hydratePromise = (async () => {
+		try {
+			const restored = await loadQueueSnapshot();
+			if (restored.length === 0) return;
+			// If a caller already added jobs while we were loading, merge — the
+			// caller's fresh jobs come first so the persisted queue tails.
+			jobs = [...jobs, ...restored];
+			commit();
+		} catch {
+			// Ignore restore failures — a corrupt or missing DB is not a crash.
+		}
+	})();
+	return hydratePromise;
 }
 
 function subscribe(listener: () => void): () => void {
+	if (listeners.size === 0) {
+		void hydrateOnce();
+	}
 	listeners.add(listener);
 	return () => listeners.delete(listener);
 }
