@@ -9,6 +9,11 @@ const buttonVariants = cva(
 		variants: {
 			variant: {
 				default: "bg-foreground text-background hover:bg-foreground/90",
+				// Brand CTA on --primary. Slotted per the design-tokens gradient policy
+				// (21 §5): flat --primary, no bespoke gradient. UX-015 will later
+				// promote this to be `default`.
+				primary:
+					"bg-primary text-primary-foreground hover:bg-primary/90 shadow-sm",
 				background: "bg-background text-foreground hover:bg-background/90",
 				destructive:
 					"bg-destructive text-destructive-foreground hover:bg-destructive/80",
