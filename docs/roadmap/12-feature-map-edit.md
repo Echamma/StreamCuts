@@ -55,7 +55,7 @@ A compound clip is a `SceneRefElement` pointing at a (possibly hidden) scene, re
 |---|---|---|---|---|---|---|---|
 | EDIT-013 | Keyframe animation + curve editor | HAVE — mature | `animation/`, `timeline/components/graph-editor/` | Keep; it's the reuse substrate for COL curves, FAIR automation, EDIT-010 | — | — | — |
 | EDIT-023 | Transform / position animation | HAVE | transform + `reframe.x/y/scale` params, keyframable | Keep | — | — | — |
-| EDIT-016 | Auto-reframe (16:9 → 9:16) | PARTIAL — **dormant quick win**: saliency crate done+tested, runner has no caller | `rust/crates/saliency`, `apps/web/src/saliency/runner.ts` | Wire `analyzeMediaForReframe` to a "Auto-reframe" action + progress UI; verify published `opencut-wasm` includes `SaliencyAnalyzer` (risk R4) | rust-wgsl (wiring is browser-native) | S–M | 1 |
+| EDIT-016 | Auto-reframe (16:9 → 9:16) | PARTIAL — **dormant quick win**: saliency crate done+tested, runner has no caller | `rust/crates/saliency`, `apps/web/src/saliency/runner.ts` | Wire `analyzeMediaForReframe` to a "Auto-reframe" action + progress UI. R4 resolved local-only (2026-07-19): `SaliencyAnalyzer` resolves via the local `file:rust/wasm/pkg` override — no npm publish needed | rust-wgsl (wiring is browser-native) | S–M | 1 |
 
 ## Text & captions
 

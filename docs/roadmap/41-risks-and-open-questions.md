@@ -27,13 +27,17 @@ Register format: statement · affected · severity · mitigation · decision nee
 - **Mitigation**: ratify the boundary **"engine math + parsers in crates; interaction state in TS"** (this roadmap assumes it; estimates price the bridge overhead for math only).
 - **Decision by**: Phase 1 start.
 
-## R4 — opencut-wasm build/publish loop
+## R4 — opencut-wasm build/publish loop — RESOLVED 2026-07-19: local-only
 
-The web app consumes `opencut-wasm@^0.2.10` from npm; new crate work (saliency already, color next) needs `wasm-pack build` + publish or a local-link workflow. EDIT-016 is *blocked today* if the published package lacks `SaliencyAnalyzer`.
+**Decision (owner, 2026-07-19): StreamCuts is a local-only deployment.** There is no CI, no other dev machine, and no hosted deploy consuming the repo — so the npm publish step is dropped entirely. The sanctioned workflow is the local-link one:
 
-- **Affected**: EDIT-016 (P1!), all COL shader work, FUS-005. Severity: Medium — but it hits in Phase 1.
-- **Mitigation**: document/automate the loop (`build:wasm` + workspace link) before P1; verify the published package's exports first.
-- **Decision by**: Phase 1 start.
+- `opencut-classic/package.json` carries an *uncommitted* `"overrides": { "opencut-wasm": "file:./rust/wasm/pkg" }` (plus the resulting `bun.lock` churn), and `rust/wasm/Cargo.toml` carries an *uncommitted* `wasm-opt = false`. These three local modifications stay out of every commit but are required on the machine.
+- After any merge touching `rust/`, run `bun run build:wasm` from `opencut-classic/` to refresh `rust/wasm/pkg` before the new UI works. PRs that need this must say so.
+- Feature code may import new `opencut-wasm` exports (e.g. `SaliencyAnalyzer`, future color-wheel entry points) directly — the published `0.2.10` no longer constrains anything. A fresh clone on another machine would need the same local setup (build wasm + add the override) before it builds; that is accepted.
+- If the project ever stops being local-only (collaborator, CI, hosted deploy), re-open this risk: either publish under a package name the owner controls (`opencut-wasm` on npm belongs to upstream OpenCut — a rename such as `streamcuts-wasm` plus an import codemod would be required) or vendor `pkg/` into the repo.
+
+- **Affected**: EDIT-016 (now unblocked), all COL shader work, FUS-005 — all buildable + verifiable locally.
+- **Residual severity**: Low (setup friction on a fresh machine only).
 
 ## R5 — WebGPU dependency for scopes/NR
 
