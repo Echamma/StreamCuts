@@ -4,7 +4,7 @@ The verified current state of StreamCuts, at commit `ffd6575`. Every inventory r
 
 ## 1. Monorepo topology
 
-- `opencut-classic/` — the OpenCut-fork web editor. Turborepo + Bun; app at `opencut-classic/apps/web` (Next.js 16.1, React 19, TypeScript 5.8, Tailwind CSS v4); Rust workspace at `opencut-classic/rust/` publishing the `opencut-wasm` npm package; a stub GPUI desktop shell at `opencut-classic/apps/desktop`.
+- `opencut-classic/` — the OpenCut-fork web editor. Turborepo + Bun; app at `opencut-classic/apps/web` (Next.js 16.1, React 19, TypeScript 5.8, Tailwind CSS v4); Rust workspace at `opencut-classic/rust/` building the `opencut-wasm` package — consumed **locally** via `bun run build:wasm` + an uncommitted `file:rust/wasm/pkg` override, not from npm (see [41 R4](./41-risks-and-open-questions.md#r4--opencut-wasm-buildpublish-loop--resolved-2026-07-19-local-only)); a stub GPUI desktop shell at `opencut-classic/apps/desktop`.
 - `backend/long-to-short/` — local NestJS 11 service on `:4000`: faster-whisper transcription (warm Python worker, `backend/long-to-short/python/transcribe.py`), Gemini clip planning, ffmpeg-static rendering. Jobs under `backend/long-to-short/data/jobs/<uuid>/`.
 - `launcher/` — Rust Windows launcher (`launcher/src/main.rs`): starts backend `:4000` + frontend `:3000` with a Job Object (kill-on-close), opens the browser. Start-only; artifacts prepared by `script/prepare-windows-launcher.ps1`.
 - Product shape: **local-first Windows tool**. Postgres/Drizzle + better-auth are scaffolded but inactive (only the feedback API touches the DB); project data lives client-side (see §14).
