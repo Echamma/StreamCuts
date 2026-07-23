@@ -31,6 +31,7 @@ import { ShortcutsDialog } from "@/actions/components/shortcuts-dialog";
 import Image from "next/image";
 import { cn } from "@/utils/ui";
 import { openExportsFolder } from "@/long-to-short/api";
+import { FlagsMenuItems } from "@/flags/components/flags-menu-items";
 
 export function EditorHeader() {
 	const [isOpeningExportsFolder, setIsOpeningExportsFolder] = useState(false);
@@ -173,6 +174,10 @@ function ProjectDropdown() {
 					>
 						Shortcuts
 					</DropdownMenuItem>
+
+					<DropdownMenuSeparator />
+
+					<FlagsMenuItems />
 
 					<DropdownMenuSeparator />
 

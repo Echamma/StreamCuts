@@ -66,7 +66,7 @@ export const PAGE_META: Record<PageId, PageMeta> = {
 		label: "Color",
 		icon: RainDropIcon,
 		shortcut: "shift+3",
-		ready: false,
+		ready: true,
 	},
 	audio: {
 		id: "audio",
