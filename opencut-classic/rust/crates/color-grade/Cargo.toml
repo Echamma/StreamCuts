@@ -1,0 +1,14 @@
+[package]
+name = "color-grade"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/color_grade.rs"
+crate-type = ["rlib"]
+
+# naga (the WGSL front-end, no wgpu) validates the sibling color_wheels.wgsl
+# against this crate's reference math — see tests/shader.rs. Dev-only so it
+# never enters the wasm build.
+[dev-dependencies]
+naga = { version = "29", features = ["wgsl-in"] }

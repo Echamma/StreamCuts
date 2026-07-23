@@ -9,4 +9,5 @@ members = [
     "rust/crates/masks",
     "rust/wasm", "rust/crates/compositor",
     "rust/crates/saliency",
+    "rust/crates/color-grade",
 ]
