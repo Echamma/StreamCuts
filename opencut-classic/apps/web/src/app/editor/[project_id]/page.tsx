@@ -38,6 +38,7 @@ import {
 	getSafeAreaPreviewOverlaySource,
 	safeAreaPreviewOverlay,
 } from "@/preview/safe-areas";
+import { getScopesPreviewOverlaySource } from "@/preview/scopes";
 import { loadAllUserFonts } from "@/fonts/user-fonts-store";
 
 export default function Editor() {
@@ -113,6 +114,7 @@ function EditorLayout() {
 						guideId: activeGuide,
 					}),
 					getSafeAreaPreviewOverlaySource({ isVisible: showSafeAreas }),
+					getScopesPreviewOverlaySource(),
 					activeScene
 						? getBookmarkPreviewOverlaySource({
 								bookmarks: activeScene.bookmarks,

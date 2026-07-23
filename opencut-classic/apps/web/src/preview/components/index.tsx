@@ -23,6 +23,10 @@ import {
 	PreviewViewportProvider,
 	usePreviewViewportState,
 } from "./preview-viewport";
+import { ScopesPanel } from "@/scopes/components/scopes-panel";
+import { scopesPreviewOverlay } from "@/preview/scopes";
+import { isPreviewOverlayVisible } from "@/preview/overlays";
+import { usePreviewStore } from "@/preview/preview-store";
 
 function usePreviewSize() {
 	const canvasSize = useEditor(
@@ -180,6 +184,11 @@ function PreviewCanvas({
 }) {
 	const canvasMountRef = useRef<HTMLDivElement>(null);
 	const viewportRef = useRef<HTMLDivElement>(null);
+	const overlays = usePreviewStore((state) => state.overlays);
+	const isScopesVisible = isPreviewOverlayVisible({
+		overlay: scopesPreviewOverlay,
+		overlays,
+	});
 	const { width: nativeWidth, height: nativeHeight } = usePreviewSize();
 	const viewportSize = useContainerSize({ containerRef: viewportRef });
 	const editor = useEditor();
@@ -395,6 +404,10 @@ function PreviewCanvas({
 								<PreviewOverlayLayer
 									instances={overlayInstances}
 									plane="over-interaction"
+								/>
+								<ScopesPanel
+									sourceCanvasContainerRef={canvasMountRef}
+									isVisible={isScopesVisible}
 								/>
 							</div>
 						</ContextMenuTrigger>
