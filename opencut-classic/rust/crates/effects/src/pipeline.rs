@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use bytemuck::{Pod, Zeroable};
+use color_grade::{ColorGradeParams, Wheel};
 use gpu::{FULLSCREEN_SHADER_SOURCE, GpuContext};
 use thiserror::Error;
 use wgpu::util::DeviceExt;
@@ -9,6 +10,8 @@ use crate::{EffectPass, UniformValue};
 
 const GAUSSIAN_BLUR_SHADER_ID: &str = "gaussian-blur";
 const GAUSSIAN_BLUR_SHADER_SOURCE: &str = include_str!("shaders/gaussian_blur.wgsl");
+const COLOR_WHEELS_SHADER_ID: &str = "color-wheels";
+const COLOR_WHEELS_SHADER_SOURCE: &str = include_str!("shaders/color_wheels.wgsl");
 
 pub struct ApplyEffectsOptions<'a> {
     pub source: &'a wgpu::Texture,
@@ -77,13 +80,6 @@ impl EffectPipeline {
                     label: Some("effects-fullscreen-shader"),
                     source: wgpu::ShaderSource::Wgsl(FULLSCREEN_SHADER_SOURCE.into()),
                 });
-        let gaussian_blur_shader_module =
-            context
-                .device()
-                .create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("effects-gaussian-blur-shader"),
-                    source: wgpu::ShaderSource::Wgsl(GAUSSIAN_BLUR_SHADER_SOURCE.into()),
-                });
         let pipeline_layout =
             context
                 .device()
@@ -95,11 +91,21 @@ impl EffectPipeline {
                     ],
                     immediate_size: 0,
                 });
-        let gaussian_blur_pipeline =
+
+        // Every effect shares the fullscreen vertex shader + pipeline layout and
+        // differs only in its fragment module, so build them from one helper.
+        let build_pipeline = |label: &str, fragment_source: &str| {
+            let fragment_module =
+                context
+                    .device()
+                    .create_shader_module(wgpu::ShaderModuleDescriptor {
+                        label: Some(label),
+                        source: wgpu::ShaderSource::Wgsl(fragment_source.into()),
+                    });
             context
                 .device()
                 .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some("effects-gaussian-blur-pipeline"),
+                    label: Some(label),
                     layout: Some(&pipeline_layout),
                     vertex: wgpu::VertexState {
                         module: &vertex_shader_module,
@@ -116,7 +122,7 @@ impl EffectPipeline {
                         compilation_options: wgpu::PipelineCompilationOptions::default(),
                     },
                     fragment: Some(wgpu::FragmentState {
-                        module: &gaussian_blur_shader_module,
+                        module: &fragment_module,
                         entry_point: Some("fragment_main"),
                         targets: &[Some(wgpu::ColorTargetState {
                             format: context.texture_format(),
@@ -130,9 +136,19 @@ impl EffectPipeline {
                     multisample: wgpu::MultisampleState::default(),
                     multiview_mask: None,
                     cache: None,
-                });
-        let pipelines =
-            HashMap::from([(GAUSSIAN_BLUR_SHADER_ID.to_string(), gaussian_blur_pipeline)]);
+                })
+        };
+
+        let pipelines = HashMap::from([
+            (
+                GAUSSIAN_BLUR_SHADER_ID.to_string(),
+                build_pipeline("effects-gaussian-blur-pipeline", GAUSSIAN_BLUR_SHADER_SOURCE),
+            ),
+            (
+                COLOR_WHEELS_SHADER_ID.to_string(),
+                build_pipeline("effects-color-wheels-pipeline", COLOR_WHEELS_SHADER_SOURCE),
+            ),
+        ]);
 
         Self {
             uniform_bind_group_layout,
@@ -206,12 +222,13 @@ impl EffectPipeline {
                             },
                         ],
                     });
+            let uniform_bytes = pack_effect_uniforms(pass, width, height)?;
             let uniform_buffer =
                 context
                     .device()
                     .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                         label: Some("effects-uniform-buffer"),
-                        contents: bytemuck::bytes_of(&pack_effect_uniforms(pass, width, height)?),
+                        contents: &uniform_bytes,
                         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                     });
             let uniform_bind_group =
@@ -262,7 +279,34 @@ impl EffectPipeline {
     }
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct ColorWheelsUniformBuffer {
+    lanes: [[f32; 4]; 6],
+}
+
+/// Pack the uniform bytes for a pass, dispatching on its shader. Different
+/// shaders declare different uniform structs; the shared uniform binding accepts
+/// any buffer size, so each shader gets exactly the bytes its struct expects.
 fn pack_effect_uniforms(
+    pass: &EffectPass,
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, EffectsError> {
+    match pass.shader.as_str() {
+        GAUSSIAN_BLUR_SHADER_ID => {
+            Ok(bytemuck::bytes_of(&pack_blur_uniforms(pass, width, height)?).to_vec())
+        }
+        COLOR_WHEELS_SHADER_ID => {
+            Ok(bytemuck::bytes_of(&pack_color_wheels_uniforms(pass)?).to_vec())
+        }
+        other => Err(EffectsError::UnknownEffectShader {
+            shader: other.to_string(),
+        }),
+    }
+}
+
+fn pack_blur_uniforms(
     pass: &EffectPass,
     width: u32,
     height: u32,
@@ -286,6 +330,34 @@ fn pack_effect_uniforms(
         resolution: [width as f32, height as f32],
         direction,
         scalars: [sigma, step, 0.0, 0.0],
+    })
+}
+
+fn pack_color_wheels_uniforms(
+    pass: &EffectPass,
+) -> Result<ColorWheelsUniformBuffer, EffectsError> {
+    let wheel = |prefix: &str| -> Result<Wheel, EffectsError> {
+        Ok(Wheel {
+            rgb: read_vec3_uniform(pass, &format!("u_{prefix}"))?,
+            master: read_number_uniform(pass, &format!("u_{prefix}_master"))?,
+        })
+    };
+
+    let params = ColorGradeParams {
+        lift: wheel("lift")?,
+        gamma: wheel("gamma")?,
+        gain: wheel("gain")?,
+        offset: wheel("offset")?,
+        contrast: read_number_uniform(pass, "u_contrast")?,
+        pivot: read_number_uniform(pass, "u_pivot")?,
+        saturation: read_number_uniform(pass, "u_saturation")?,
+        temperature: read_number_uniform(pass, "u_temperature")?,
+        tint: read_number_uniform(pass, "u_tint")?,
+        hue: read_number_uniform(pass, "u_hue")?,
+    };
+
+    Ok(ColorWheelsUniformBuffer {
+        lanes: params.gpu_uniforms(),
     })
 }
 
@@ -327,4 +399,28 @@ fn read_vec2_uniform(pass: &EffectPass, uniform: &str) -> Result<[f32; 2], Effec
         });
     }
     Ok([values[0], values[1]])
+}
+
+fn read_vec3_uniform(pass: &EffectPass, uniform: &str) -> Result<[f32; 3], EffectsError> {
+    let Some(value) = pass.uniforms.get(uniform) else {
+        return Err(EffectsError::MissingUniform {
+            shader: pass.shader.clone(),
+            uniform: uniform.to_string(),
+        });
+    };
+    let UniformValue::Vector(values) = value else {
+        return Err(EffectsError::InvalidVectorUniform {
+            shader: pass.shader.clone(),
+            uniform: uniform.to_string(),
+            expected_length: 3,
+        });
+    };
+    if values.len() != 3 {
+        return Err(EffectsError::InvalidVectorUniform {
+            shader: pass.shader.clone(),
+            uniform: uniform.to_string(),
+            expected_length: 3,
+        });
+    }
+    Ok([values[0], values[1], values[2]])
 }
