@@ -40,6 +40,8 @@ import {
 } from "@/preview/safe-areas";
 import { getScopesPreviewOverlaySource } from "@/preview/scopes";
 import { loadAllUserFonts } from "@/fonts/user-fonts-store";
+import { PageBar } from "@/components/editor/page-bar";
+import { useFlag } from "@/flags";
 
 export default function Editor() {
 	const params = useParams();
@@ -54,6 +56,7 @@ export default function Editor() {
 					<div className="min-h-0 min-w-0 flex-1">
 						<EditorLayout />
 					</div>
+					<PageBarSlot />
 					<Onboarding />
 					<MigrationDialog />
 					<ChangelogNotification />
@@ -61,6 +64,12 @@ export default function Editor() {
 			</EditorProvider>
 		</MobileGate>
 	);
+}
+
+function PageBarSlot() {
+	const pagesShellEnabled = useFlag("pages-shell");
+	if (!pagesShellEnabled) return null;
+	return <PageBar />;
 }
 
 function DegradedRendererBanner() {

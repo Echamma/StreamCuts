@@ -9,7 +9,8 @@ export type TActionCategory =
 	| "history"
 	| "timeline"
 	| "controls"
-	| "assets";
+	| "assets"
+	| "workspace";
 
 export interface TActionBaseDefinition {
 	description: string;
@@ -172,6 +173,26 @@ export const ACTIONS = {
 		category: "assets",
 		args: { projectId: "string", assetIds: "string[]" },
 	},
+	"switch-page-media": {
+		description: "Switch to the Media page",
+		category: "workspace",
+	},
+	"switch-page-edit": {
+		description: "Switch to the Edit page",
+		category: "workspace",
+	},
+	"switch-page-color": {
+		description: "Switch to the Color page",
+		category: "workspace",
+	},
+	"switch-page-audio": {
+		description: "Switch to the Audio page",
+		category: "workspace",
+	},
+	"switch-page-deliver": {
+		description: "Switch to the Deliver page",
+		category: "workspace",
+	},
 } as const satisfies Record<string, TActionBaseDefinition>;
 
 export type TAction = keyof typeof ACTIONS;
@@ -198,6 +219,11 @@ const ACTION_DEFAULT_SHORTCUTS = [
 	["duplicate-selected", ["ctrl+d"]],
 	["undo", ["ctrl+z"]],
 	["redo", ["ctrl+shift+z", "ctrl+y"]],
+	["switch-page-media", ["shift+1"]],
+	["switch-page-edit", ["shift+2"]],
+	["switch-page-color", ["shift+3"]],
+	["switch-page-audio", ["shift+4"]],
+	["switch-page-deliver", ["shift+5"]],
 ] as const satisfies ReadonlyArray<
 	readonly [TActionWithOptionalArgs, readonly ShortcutKey[]]
 >;
