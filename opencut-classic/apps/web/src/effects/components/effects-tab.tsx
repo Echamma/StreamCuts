@@ -15,6 +15,7 @@ import {
 	SectionFields,
 } from "@/components/section";
 import { PropertyParamField } from "@/components/editor/panels/properties/components/property-param-field";
+import { getEffectControl } from "./effect-controls";
 import { Button } from "@/components/ui/button";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
@@ -246,6 +247,7 @@ function EffectSection({
 	onRemove?: () => void;
 }) {
 	const definition = effectsRegistry.get(effect.type);
+	const CustomControl = getEffectControl({ effectType: effect.type });
 
 	return (
 		<Section
@@ -288,21 +290,29 @@ function EffectSection({
 			<SectionContent
 				className={cn("p-0", onToggle && !effect.enabled && "opacity-50")}
 			>
-				<SectionFields>
-					{definition.params.map((param) => (
-						<div key={param.key} className="flex flex-col gap-3.5">
-							<div className="px-4">
-								<PropertyParamField
-									param={param}
-									value={renderParams[param.key] ?? param.default}
-									onPreview={previewParam(param.key)}
-									onCommit={onCommit}
-								/>
+				{CustomControl ? (
+					CustomControl({
+						values: renderParams,
+						previewParam,
+						onCommit,
+					})
+				) : (
+					<SectionFields>
+						{definition.params.map((param) => (
+							<div key={param.key} className="flex flex-col gap-3.5">
+								<div className="px-4">
+									<PropertyParamField
+										param={param}
+										value={renderParams[param.key] ?? param.default}
+										onPreview={previewParam(param.key)}
+										onCommit={onCommit}
+									/>
+								</div>
+								<Separator />
 							</div>
-							<Separator />
-						</div>
-					))}
-				</SectionFields>
+						))}
+					</SectionFields>
+				)}
 			</SectionContent>
 		</Section>
 	);
