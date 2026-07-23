@@ -115,6 +115,20 @@
   --ring: hsl(0, 0%, 52%);
 }
 
+/*
+ * Scopes & meters palette (UX-013): theme-independent dark surface + trace
+ * colours per docs/roadmap/21-design-tokens-spec.md §4. Consumed by COL-009
+ * scopes and (future) FAIR-007/008 meters.
+ */
+:root {
+  --scope-bg: hsl(220 10% 8%);
+  --scope-graticule: hsl(220 8% 28%);
+  --scope-trace-r: hsl(0 85% 60%);
+  --scope-trace-g: hsl(140 70% 55%);
+  --scope-trace-b: hsl(210 90% 62%);
+  --scope-trace-luma: hsl(0 0% 82%);
+}
+
 @layer base {
   /*
     The default border color has changed to `currentcolor` in Tailwind CSS v4,
