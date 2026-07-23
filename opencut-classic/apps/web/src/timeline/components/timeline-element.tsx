@@ -393,6 +393,46 @@ export function TimelineElement({
 		}
 	};
 
+	const handleAutoReframe = async ({
+		event,
+	}: {
+		event: React.MouseEvent;
+	}) => {
+		event.stopPropagation();
+		if (element.type !== "video") {
+			return;
+		}
+		const toastId = toast.loading("Analyzing video for auto-reframe…");
+		try {
+			const result = await editor.timeline.autoReframeElement({
+				trackId: track.id,
+				elementId: element.id,
+			});
+			if (result.status === "applied") {
+				toast.success(
+					`Auto-reframe applied — ${result.keyCount} keyframe${result.keyCount === 1 ? "" : "s"}.`,
+					{ id: toastId },
+				);
+			} else if (result.status === "unavailable") {
+				toast.warning("Auto-reframe engine is unavailable in this build.", {
+					id: toastId,
+				});
+			} else if (result.status === "no-media") {
+				toast.warning("Auto-reframe needs a video clip with a decodable source.", {
+					id: toastId,
+				});
+			} else {
+				toast.dismiss(toastId);
+			}
+		} catch (error) {
+			toast.error("Auto-reframe failed", {
+				id: toastId,
+				description:
+					error instanceof Error ? error.message : "Unexpected error.",
+			});
+		}
+	};
+
 	const isMuted = canElementHaveAudio(element) && isElementMuted({ element });
 	const canToggleCurrentSourceAudio =
 		selectedElements.length === 1 &&
@@ -589,6 +629,16 @@ export function TimelineElement({
 								>
 									Save clip to Assets
 								</ContextMenuItem>
+								{element.type === "video" && (
+									<ContextMenuItem
+										icon={<HugeiconsIcon icon={MagicWand05Icon} />}
+										onClick={(event: React.MouseEvent) =>
+											void handleAutoReframe({ event })
+										}
+									>
+										Auto-reframe
+									</ContextMenuItem>
+								)}
 								{adjacentVideoElements ? (
 									<ContextMenuItem
 										icon={<HugeiconsIcon icon={MagicWand05Icon} />}

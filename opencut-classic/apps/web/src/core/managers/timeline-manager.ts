@@ -35,7 +35,13 @@ import { lastFrameMediaTime, type MediaTime, ZERO_MEDIA_TIME } from "@/wasm";
 import {
 	canElementBeHidden,
 	canElementHaveAudio,
+	hasMediaId,
 } from "@/timeline/element-utils";
+import { analyzeMediaForReframe } from "@/saliency/runner";
+import {
+	mergeReframeAnimations,
+	reframeKeyCount,
+} from "@/saliency/apply-reframe";
 import { isElementMuted } from "@/timeline/audio-state";
 import type {
 	AnimationPath,
@@ -89,6 +95,16 @@ import {
 	removeTrackTransition,
 	upsertTrackTransition,
 } from "@/transitions";
+
+/** Outcome of an {@link TimelineManager.autoReframeElement} run (EDIT-016). */
+export type AutoReframeResult =
+	| { status: "applied"; keyCount: number }
+	/** Element isn't a video with a decodable source asset + duration. */
+	| { status: "no-media" }
+	/** The wasm `SaliencyAnalyzer` isn't available or produced no keyframes. */
+	| { status: "unavailable" }
+	/** The caller aborted mid-analysis. */
+	| { status: "aborted" };
 
 export class TimelineManager {
 	private listeners = new Set<() => void>();
@@ -430,6 +446,64 @@ export class TimelineManager {
 		this.updateElements({
 			updates: [{ trackId, elementId, patch: { markers: nextMarkers } }],
 		});
+	}
+
+	/**
+	 * EDIT-016 auto-reframe: analyze the element's source video with the wasm
+	 * saliency analyzer and write `reframe.x`/`.y` keyframe channels that pan the
+	 * crop to follow the salient subject. Async (walks source frames at ~4 Hz).
+	 * Commits one undoable step. Returns a status the UI turns into a toast.
+	 *
+	 * Analysis samples the source from t=0, so keyframes are source-local — best
+	 * on an untrimmed clip; a trimmed clip's keys are applied but offset by its
+	 * `trimStart` (acceptable for the MVP wiring; a trim-aware pass is follow-up).
+	 */
+	async autoReframeElement({
+		trackId,
+		elementId,
+		signal,
+	}: {
+		trackId: string;
+		elementId: string;
+		signal?: AbortSignal;
+	}): Promise<AutoReframeResult> {
+		const element = this.getElementByRef({ trackId, elementId });
+		if (!element || !hasMediaId(element) || element.type !== "video") {
+			return { status: "no-media" };
+		}
+		const asset = this.editor.media
+			.getAssets()
+			.find((candidate) => candidate.id === element.mediaId);
+		if (!asset || asset.type !== "video" || !asset.duration) {
+			return { status: "no-media" };
+		}
+
+		const channels = await analyzeMediaForReframe({
+			mediaId: asset.id,
+			file: asset.file,
+			durationSeconds: asset.duration,
+			signal,
+		});
+		if (signal?.aborted) {
+			return { status: "aborted" };
+		}
+		if (!channels) {
+			return { status: "unavailable" };
+		}
+
+		// Re-read the element: the async analysis could have raced a delete/edit.
+		const latest = this.getElementByRef({ trackId, elementId });
+		if (!latest) {
+			return { status: "no-media" };
+		}
+		const nextAnimations = mergeReframeAnimations({
+			animations: latest.animations,
+			channels,
+		});
+		this.updateElements({
+			updates: [{ trackId, elementId, patch: { animations: nextAnimations } }],
+		});
+		return { status: "applied", keyCount: reframeKeyCount({ channels }) };
 	}
 
 	moveElements({
