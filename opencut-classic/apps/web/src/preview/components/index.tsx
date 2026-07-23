@@ -384,6 +384,7 @@ function PreviewCanvas({
 							>
 							<div
 								ref={canvasMountRef}
+								data-scope-source=""
 								className="absolute block border"
 								style={{
 									left: viewport.sceneLeft,
