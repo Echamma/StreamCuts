@@ -43,6 +43,9 @@ export type TrackType = "video" | "text" | "audio" | "graphic" | "effect";
 interface BaseTrack {
 	id: string;
 	name: string;
+	/** When locked, the track's clips can't be moved, trimmed, or deleted
+	 * (EDIT-024). Optional/additive — absent means unlocked. */
+	locked?: boolean;
 }
 
 export interface VideoTrack extends BaseTrack {

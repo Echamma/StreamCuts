@@ -8,6 +8,7 @@ import {
 } from "@/timeline/group-move";
 import { BASE_TIMELINE_PIXELS_PER_SECOND } from "@/timeline/scale";
 import { getOrderedTimelineTracks } from "@/timeline/scene-tracks-view";
+import { isTrackLocked } from "@/timeline/track-lock";
 import {
 	maxMediaTime,
 	type MediaTime,
@@ -377,6 +378,14 @@ export class ElementInteractionController {
 
 		if (event.metaKey || event.ctrlKey || event.shiftKey) {
 			this.deps.selection.handleClick({ ...ref, isMultiKey: true });
+		}
+
+		// A locked track's clips can be selected (for inspection) but not dragged
+		// (EDIT-024): skip starting a drag session. Plain-click selection still
+		// runs through onElementClick.
+		if (isTrackLocked({ track })) {
+			this.notify();
+			return;
 		}
 
 		const selectedElements = this.deps.selection.isSelected(ref)

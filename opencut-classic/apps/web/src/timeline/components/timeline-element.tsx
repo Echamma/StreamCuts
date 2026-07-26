@@ -56,6 +56,7 @@ import {
 	isElementMuted,
 } from "@/timeline/audio-state";
 import { getTimelinePixelsPerSecond } from "@/timeline";
+import { isTrackLocked } from "@/timeline/track-lock";
 import { buildWaveformSourceKey } from "@/media/waveform-summary";
 import {
 	getAssetSourceStartTime,
@@ -826,7 +827,7 @@ function ElementInner({
 				</div>
 			</div>
 
-			{isSelected && (
+			{isSelected && !isTrackLocked({ track }) && (
 				<>
 					<ResizeHandle
 						side="left"

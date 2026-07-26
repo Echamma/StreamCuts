@@ -5,6 +5,8 @@ import {
 	Delete02Icon,
 	MagicWand05Icon,
 	MusicNote03Icon,
+	SquareLock01Icon,
+	SquareUnlock01Icon,
 	TaskAdd02Icon,
 	TextIcon,
 	ViewIcon,
@@ -57,6 +59,7 @@ import {
 	getTimelineZoomMin,
 	getTimelinePaddingPx,
 } from "@/timeline";
+import { isTrackLocked } from "@/timeline/track-lock";
 import { timelineTimeToPixels } from "@/timeline/pixel-utils";
 import {
 	getTrackHeight,
@@ -705,6 +708,18 @@ function TrackLabelsPanel({
 													}
 												/>
 											)}
+											<TrackToggleIcon
+												isOff={isTrackLocked({ track })}
+												icons={{
+													on: SquareUnlock01Icon,
+													off: SquareLock01Icon,
+												}}
+												onClick={() =>
+													editor.timeline.toggleTrackLock({
+														trackId: track.id,
+													})
+												}
+											/>
 											<TrackIcon track={track} />
 										</div>
 										{expandedRows.length > 0 && (
