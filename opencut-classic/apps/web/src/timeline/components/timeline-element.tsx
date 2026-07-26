@@ -89,6 +89,8 @@ import {
 	KeyframeIcon,
 	MagicWand05Icon,
 	Bookmark02Icon,
+	Link01Icon,
+	Unlink01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { uppercase } from "@/utils/string";
@@ -566,6 +568,30 @@ export function TimelineElement({
 							}}
 						>
 							Add marker
+						</ContextMenuItem>
+					)}
+					{selectedElements.length >= 2 && (
+						<ContextMenuItem
+							icon={<HugeiconsIcon icon={Link01Icon} />}
+							onClick={(event: React.MouseEvent) => {
+								event.stopPropagation();
+								editor.timeline.linkElements({ elements: selectedElements });
+							}}
+						>
+							Link clips
+						</ContextMenuItem>
+					)}
+					{element.linkId !== undefined && (
+						<ContextMenuItem
+							icon={<HugeiconsIcon icon={Unlink01Icon} />}
+							onClick={(event: React.MouseEvent) => {
+								event.stopPropagation();
+								editor.timeline.unlinkElements({
+									elements: [{ trackId: track.id, elementId: element.id }],
+								});
+							}}
+						>
+							Unlink clips
 						</ContextMenuItem>
 					)}
 					{canElementHaveAudio(element) && hasAudio && (
