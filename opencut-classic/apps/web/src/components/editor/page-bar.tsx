@@ -64,7 +64,8 @@ export function PageBar() {
 			role="tablist"
 			aria-label="Workspace pages"
 			aria-orientation="horizontal"
-			className="bg-background flex h-10 shrink-0 items-center justify-center gap-1 border-t px-3"
+			style={{ height: "var(--page-bar-h)" }}
+			className="bg-background flex shrink-0 items-center justify-center gap-1 border-t px-3"
 		>
 			{PAGE_ORDER.map((page) => {
 				const meta = PAGE_META[page];
