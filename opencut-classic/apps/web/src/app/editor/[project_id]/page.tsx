@@ -8,6 +8,9 @@ import { Onboarding } from "@/components/editor/onboarding";
 import { MigrationDialog } from "@/project/components/migration-dialog";
 import { EditPage } from "@/components/editor/pages/edit-page";
 import { ColorPage } from "@/components/editor/pages/color-page";
+import { MediaPage } from "@/components/editor/pages/media-page";
+import { AudioPage } from "@/components/editor/pages/audio-page";
+import { DeliverPage } from "@/components/editor/pages/deliver-page";
 import { usePageStore } from "@/editor/page-store";
 import { usePasteMedia } from "@/media/use-paste-media";
 import { MobileGate } from "@/components/editor/mobile-gate";
@@ -156,6 +159,16 @@ function EditorLayout() {
 	const activePage = usePageStore((state) => state.activePage);
 	const page = pagesShellEnabled ? activePage : "edit";
 
-	if (page === "color") return <ColorPage preview={preview} />;
-	return <EditPage preview={preview} />;
+	switch (page) {
+		case "media":
+			return <MediaPage preview={preview} />;
+		case "color":
+			return <ColorPage preview={preview} />;
+		case "audio":
+			return <AudioPage preview={preview} />;
+		case "deliver":
+			return <DeliverPage preview={preview} />;
+		default:
+			return <EditPage preview={preview} />;
+	}
 }

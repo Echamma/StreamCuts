@@ -838,7 +838,7 @@ function ExportQueueRow({ job }: { job: ExportQueueJob }) {
 	);
 }
 
-function ExportQueueSection() {
+export function ExportQueueSection() {
 	const editor = useEditor();
 	const { jobs, isRunning } = useExportQueue();
 

@@ -52,7 +52,7 @@ export const PAGE_META: Record<PageId, PageMeta> = {
 		label: "Media",
 		icon: Folder01Icon,
 		shortcut: "shift+1",
-		ready: false,
+		ready: true,
 	},
 	edit: {
 		id: "edit",
@@ -73,14 +73,14 @@ export const PAGE_META: Record<PageId, PageMeta> = {
 		label: "Audio",
 		icon: AudioWave01Icon,
 		shortcut: "shift+4",
-		ready: false,
+		ready: true,
 	},
 	deliver: {
 		id: "deliver",
 		label: "Deliver",
 		icon: CloudUploadIcon,
 		shortcut: "shift+5",
-		ready: false,
+		ready: true,
 	},
 };
 
