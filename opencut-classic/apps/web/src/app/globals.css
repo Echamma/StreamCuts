@@ -127,6 +127,42 @@
   --scope-trace-g: hsl(140 70% 55%);
   --scope-trace-b: hsl(210 90% 62%);
   --scope-trace-luma: hsl(0 0% 82%);
+
+  /* Audio meter thresholds (UX-013), same fixed dataviz family as scopes. */
+  --meter-ok: hsl(140 70% 45%);   /* < -18 dBFS */
+  --meter-warn: hsl(38 92% 50%);  /* -18…-6 */
+  --meter-hot: hsl(0 83% 55%);    /* > -6 / clip */
+}
+
+/*
+ * Foundational token scales (UX-010) — role-named, theme-independent layout /
+ * z-index / motion / focus tokens per docs/roadmap/21-design-tokens-spec.md §2.
+ * Additive: these establish the shared vocabulary the later sweep (UX-018)
+ * migrates ad-hoc values onto. The pages shell consumes --page-bar-h today.
+ */
+:root {
+  /* z-index scale — replaces ad-hoc z-10…z-999 */
+  --z-base: 0;       /* canvas, timeline content */
+  --z-sticky: 100;   /* toolbars, track headers, playhead */
+  --z-dropdown: 1000;/* menus, selects, context menus */
+  --z-overlay: 1200; /* drag overlays, panel scrims */
+  --z-modal: 1300;   /* dialogs, sheets */
+  --z-popover: 1400; /* popovers above modals */
+  --z-toast: 1500;
+  --z-tooltip: 1600;
+
+  /* layout semantics — consumed by the pages shell (roadmap 20 §2) */
+  --panel-gap: 0.25rem;
+  --toolbar-h: 2.5rem;
+  --page-bar-h: 2.5rem;
+  --track-h: 3.25rem;
+
+  /* focus & motion */
+  --focus-ring: 0 0 0 2px var(--background), 0 0 0 4px var(--primary);
+  --duration-fast: 120ms;
+  --duration-base: 200ms;
+  --duration-slow: 320ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
 }
 
 @layer base {
