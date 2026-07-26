@@ -12,6 +12,7 @@ import { MediaPage } from "@/components/editor/pages/media-page";
 import { AudioPage } from "@/components/editor/pages/audio-page";
 import { DeliverPage } from "@/components/editor/pages/deliver-page";
 import { usePageStore } from "@/editor/page-store";
+import { usePageDeepLink } from "@/editor/use-page-deep-link";
 import { usePasteMedia } from "@/media/use-paste-media";
 import { MobileGate } from "@/components/editor/mobile-gate";
 import { useEffect, useMemo, useState } from "react";
@@ -43,6 +44,8 @@ import { useFlag } from "@/flags";
 export default function Editor() {
 	const params = useParams();
 	const projectId = params.project_id as string;
+
+	usePageDeepLink({ projectId });
 
 	return (
 		<MobileGate>
