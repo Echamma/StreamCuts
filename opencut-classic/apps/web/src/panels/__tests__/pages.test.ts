@@ -57,12 +57,20 @@ describe("page store", () => {
 		expect(usePageStore.getState().activePage).toBe("edit");
 	});
 
-	test("switching to a not-ready page is ignored", () => {
+	test("the readiness gate controls whether a switch takes effect", () => {
 		const notReady = PAGE_IDS.find((id) => !PAGE_META[id].ready);
-		expect(notReady).toBeDefined();
-		if (!notReady) return;
-		usePageStore.getState().setActivePage({ page: notReady });
-		expect(usePageStore.getState().activePage).toBe(DEFAULT_PAGE);
+		if (notReady) {
+			// A not-ready page is rejected, leaving the active page unchanged.
+			usePageStore.getState().setActivePage({ page: notReady });
+			expect(usePageStore.getState().activePage).toBe(DEFAULT_PAGE);
+			return;
+		}
+		// All pages ready today — assert the complement: each is switchable.
+		for (const id of PAGE_IDS) {
+			usePageStore.getState().resetPage();
+			usePageStore.getState().setActivePage({ page: id });
+			expect(usePageStore.getState().activePage).toBe(id);
+		}
 	});
 });
 
