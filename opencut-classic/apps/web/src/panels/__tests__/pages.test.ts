@@ -57,6 +57,28 @@ describe("page store", () => {
 		expect(usePageStore.getState().activePage).toBe("edit");
 	});
 
+	test("rememberProjectPage records a ready page per project", () => {
+		usePageStore.getState().rememberProjectPage({
+			projectId: "proj-a",
+			page: "color",
+		});
+		expect(usePageStore.getState().lastByProject["proj-a"]).toBe("color");
+	});
+
+	test("rememberProjectPage ignores a not-ready page", () => {
+		const notReady = PAGE_IDS.find((id) => !PAGE_META[id].ready);
+		usePageStore.getState().rememberProjectPage({
+			projectId: "proj-b",
+			page: notReady ?? "edit",
+		});
+		const stored = usePageStore.getState().lastByProject["proj-b"];
+		if (notReady) {
+			expect(stored).toBeUndefined();
+		} else {
+			expect(stored).toBe("edit");
+		}
+	});
+
 	test("the readiness gate controls whether a switch takes effect", () => {
 		const notReady = PAGE_IDS.find((id) => !PAGE_META[id].ready);
 		if (notReady) {
