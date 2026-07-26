@@ -32,6 +32,7 @@ import Image from "next/image";
 import { cn } from "@/utils/ui";
 import { openExportsFolder } from "@/long-to-short/api";
 import { FlagsMenuItems } from "@/flags/components/flags-menu-items";
+import { BossDrawer } from "./boss-drawer";
 
 export function EditorHeader() {
 	const [isOpeningExportsFolder, setIsOpeningExportsFolder] = useState(false);
@@ -63,6 +64,7 @@ export function EditorHeader() {
 				<EditableProjectName />
 			</div>
 			<nav className="flex items-center gap-2">
+				<BossDrawer />
 				<FeedbackPopover />
 				<Button
 					variant="outline"
