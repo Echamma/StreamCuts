@@ -27,6 +27,7 @@ import {
 } from "@/timeline/clip-markers";
 import { TimelineDragSource } from "@/timeline/drag-source";
 import { getOrderedTimelineTracks } from "@/timeline/scene-tracks-view";
+import { filterUnlockedRefs } from "@/timeline/track-lock";
 import {
 	findTrackInSceneTracks,
 	updateTrackInSceneTracks,
@@ -58,6 +59,7 @@ import { BatchCommand } from "@/commands";
 import {
 	AddTrackCommand,
 	RemoveTrackCommand,
+	ToggleTrackLockCommand,
 	ToggleTrackMuteCommand,
 	ToggleTrackSoloCommand,
 	ToggleTrackVisibilityCommand,
@@ -539,6 +541,11 @@ export class TimelineManager {
 		this.editor.command.execute({ command });
 	}
 
+	toggleTrackLock({ trackId }: { trackId: string }): void {
+		const command = new ToggleTrackLockCommand(trackId);
+		this.editor.command.execute({ command });
+	}
+
 	splitElements({
 		elements,
 		splitTime,
@@ -609,7 +616,13 @@ export class TimelineManager {
 	}: {
 		elements: { trackId: string; elementId: string }[];
 	}): void {
-		const command = new DeleteElementsCommand({ elements });
+		// Clips on a locked track can't be deleted (EDIT-024).
+		const deletable = filterUnlockedRefs({
+			tracks: this.editor.scenes.getActiveScene().tracks,
+			refs: elements,
+		});
+		if (deletable.length === 0) return;
+		const command = new DeleteElementsCommand({ elements: deletable });
 		this.editor.command.execute({ command });
 	}
 
