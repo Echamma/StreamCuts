@@ -9,6 +9,7 @@ import type {
 	RetimeConfig,
 	VideoTrack,
 	ClipMarker,
+	ElementRef,
 } from "@/timeline";
 import { calculateTotalDuration, isRetimableElement } from "@/timeline";
 import {
@@ -28,6 +29,10 @@ import {
 import { TimelineDragSource } from "@/timeline/drag-source";
 import { getOrderedTimelineTracks } from "@/timeline/scene-tracks-view";
 import { filterUnlockedRefs } from "@/timeline/track-lock";
+import {
+	expandRefsWithLinked,
+	propagateLinkedMoves,
+} from "@/timeline/linked-elements";
 import {
 	findTrackInSceneTracks,
 	updateTrackInSceneTracks,
@@ -86,6 +91,8 @@ import {
 	UpsertEffectParamKeyframeCommand,
 	RemoveEffectParamKeyframeCommand,
 	ToggleSourceAudioSeparationCommand,
+	LinkElementsCommand,
+	UnlinkElementsCommand,
 } from "@/commands/timeline";
 import type { InsertElementParams } from "@/commands/timeline/element/insert-element";
 import type {
@@ -519,8 +526,15 @@ export class TimelineManager {
 			return;
 		}
 
-		const command = new MoveElementCommand({
+		// Linked clips (EDIT-025) ride along by the same time delta. No-op when
+		// nothing being moved is linked, so unlinked drags are unaffected.
+		const propagatedMoves = propagateLinkedMoves({
+			tracks: this.editor.scenes.getActiveScene().tracks,
 			moves,
+		});
+
+		const command = new MoveElementCommand({
+			moves: propagatedMoves,
 			createTracks,
 		});
 		this.editor.command.execute({ command });
@@ -616,13 +630,23 @@ export class TimelineManager {
 	}: {
 		elements: { trackId: string; elementId: string }[];
 	}): void {
-		// Clips on a locked track can't be deleted (EDIT-024).
-		const deletable = filterUnlockedRefs({
-			tracks: this.editor.scenes.getActiveScene().tracks,
-			refs: elements,
-		});
+		const tracks = this.editor.scenes.getActiveScene().tracks;
+		// Linked clips (EDIT-025) delete as a group; then locked tracks (EDIT-024)
+		// are honoured, so a linked sibling on a locked track is spared.
+		const withLinked = expandRefsWithLinked({ tracks, refs: elements });
+		const deletable = filterUnlockedRefs({ tracks, refs: withLinked });
 		if (deletable.length === 0) return;
 		const command = new DeleteElementsCommand({ elements: deletable });
+		this.editor.command.execute({ command });
+	}
+
+	linkElements({ elements }: { elements: ElementRef[] }): void {
+		const command = new LinkElementsCommand({ elements });
+		this.editor.command.execute({ command });
+	}
+
+	unlinkElements({ elements }: { elements: ElementRef[] }): void {
+		const command = new UnlinkElementsCommand({ elements });
 		this.editor.command.execute({ command });
 	}
 

@@ -148,6 +148,12 @@ interface BaseTimelineElement {
 	/** Clip-level markers (EDIT-005), element-local time. Optional/additive —
 	 * absent on elements that have none, so no migration. See {@link ClipMarker}. */
 	markers?: ClipMarker[];
+	/** Groups this element with its linked siblings (EDIT-025): elements sharing a
+	 * `linkId` move and delete together. Typically an A/V pair (a video clip and
+	 * its separated source audio). Optional/additive — absent means unlinked, so
+	 * there is no migration and unlinked clips behave exactly as before. Link
+	 * expansion lives in {@link "@/timeline/linked-elements"}. */
+	linkId?: string;
 }
 
 export interface VideoElement extends BaseTimelineElement {
