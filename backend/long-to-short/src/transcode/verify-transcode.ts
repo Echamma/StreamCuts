@@ -1,0 +1,119 @@
+import { execFile } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { promisify } from "node:util";
+import {
+	probeMedia,
+	transcodeToProRes,
+	transcodeToProxy,
+} from "./transcode-runner";
+
+/**
+ * End-to-end verification for the transcode core. Synthesises a test clip with
+ * ffmpeg, runs it through the real proxy/ProRes builders, and asserts the
+ * output with ffprobe — objective, non-perceptual proof that the codecs and
+ * scaling come out right. Uses the system `ffmpeg`/`ffprobe` on PATH so it runs
+ * without installing the backend's bundled binaries.
+ *
+ * Run:  node --experimental-strip-types src/transcode/verify-transcode.ts
+ */
+
+const execFileAsync = promisify(execFile);
+const FFMPEG = process.env.FFMPEG_PATH ?? "ffmpeg";
+const FFPROBE = process.env.FFPROBE_PATH ?? "ffprobe";
+
+let failures = 0;
+
+function check(label: string, condition: boolean, detail: string): void {
+	const status = condition ? "PASS" : "FAIL";
+	if (!condition) failures += 1;
+	console.log(`  [${status}] ${label} — ${detail}`);
+}
+
+function near(actual: number | null, expected: number, tolerance: number): boolean {
+	return actual !== null && Math.abs(actual - expected) <= tolerance;
+}
+
+async function main(): Promise<void> {
+	const workDir = await mkdtemp(join(tmpdir(), "transcode-verify-"));
+	const source = join(workDir, "source.mp4");
+	const proxy = join(workDir, "proxy.mp4");
+	const master = join(workDir, "master.mov");
+
+	try {
+		console.log("Generating a 2s 1280x720 test clip with tone…");
+		await execFileAsync(
+			FFMPEG,
+			[
+				"-y",
+				"-f",
+				"lavfi",
+				"-i",
+				"testsrc=duration=2:size=1280x720:rate=30",
+				"-f",
+				"lavfi",
+				"-i",
+				"sine=frequency=440:duration=2",
+				"-c:v",
+				"libx264",
+				"-pix_fmt",
+				"yuv420p",
+				"-c:a",
+				"aac",
+				"-shortest",
+				source,
+			],
+			{ maxBuffer: 1024 * 1024 * 64 },
+		);
+
+		console.log("\nMED-005 — 540p H.264 proxy:");
+		await transcodeToProxy({
+			ffmpegPath: FFMPEG,
+			options: { inputPath: source, outputPath: proxy, height: 540 },
+		});
+		const proxyInfo = await probeMedia({ ffprobePath: FFPROBE, filePath: proxy });
+		check("codec is H.264", proxyInfo.videoCodec === "h264", `got ${proxyInfo.videoCodec}`);
+		check("scaled to 540p", proxyInfo.height === 540, `got ${proxyInfo.height}`);
+		check(
+			"aspect preserved (960x540)",
+			proxyInfo.width === 960,
+			`got ${proxyInfo.width}`,
+		);
+		check("audio carried (aac)", proxyInfo.audioCodec === "aac", `got ${proxyInfo.audioCodec}`);
+		check("duration ~2s", near(proxyInfo.durationSeconds, 2, 0.2), `got ${proxyInfo.durationSeconds}`);
+
+		console.log("\nDEL-003 — ProRes (standard) master:");
+		await transcodeToProRes({
+			ffmpegPath: FFMPEG,
+			inputPath: source,
+			outputPath: master,
+			profile: "standard",
+		});
+		const masterInfo = await probeMedia({ ffprobePath: FFPROBE, filePath: master });
+		check("codec is ProRes", masterInfo.videoCodec === "prores", `got ${masterInfo.videoCodec}`);
+		check(
+			"full resolution kept (1280x720)",
+			masterInfo.width === 1280 && masterInfo.height === 720,
+			`got ${masterInfo.width}x${masterInfo.height}`,
+		);
+		check(
+			"audio is PCM",
+			masterInfo.audioCodec === "pcm_s16le",
+			`got ${masterInfo.audioCodec}`,
+		);
+		check("duration ~2s", near(masterInfo.durationSeconds, 2, 0.2), `got ${masterInfo.durationSeconds}`);
+	} finally {
+		await rm(workDir, { recursive: true, force: true });
+	}
+
+	console.log(
+		`\n${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`}`,
+	);
+	process.exit(failures === 0 ? 0 : 1);
+}
+
+main().catch((error: unknown) => {
+	console.error(error);
+	process.exit(1);
+});
