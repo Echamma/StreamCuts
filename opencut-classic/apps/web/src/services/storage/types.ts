@@ -25,6 +25,20 @@ export interface SubclipMediaAssetSource {
 
 export type MediaAssetSource = FileMediaAssetSource | SubclipMediaAssetSource;
 
+/**
+ * User-authored organisational attributes for a media asset (MED-003): freeform
+ * tags, a notes string, and a 0–5 star rating. Every field is optional and the
+ * whole object is optional on {@link MediaAssetData} — absent means "no
+ * attributes set", so existing assets need no migration. These feed search and
+ * rule-based smart bins (MED-002).
+ */
+export interface ClipAttributes {
+	tags?: string[];
+	notes?: string;
+	/** Integer 0–5; 0 (or absent) means unrated. */
+	rating?: number;
+}
+
 export interface StorageAdapter<T> {
 	get(key: string): Promise<T | null>;
 	set(args: { key: string; value: T }): Promise<void>;
@@ -50,6 +64,8 @@ export interface MediaAssetData {
 	folderId?: string | null;
 	sceneId?: string;
 	source?: MediaAssetSource;
+	/** User-authored tags / notes / rating (MED-003). Additive, no migration. */
+	attributes?: ClipAttributes;
 }
 
 export type SerializedScene = Omit<TScene, "createdAt" | "updatedAt"> & {

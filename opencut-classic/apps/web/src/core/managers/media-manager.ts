@@ -1,6 +1,8 @@
 import type { EditorCore } from "@/core";
 import { toast } from "sonner";
 import type { MediaAsset } from "@/media/types";
+import { normalizeAttributes } from "@/media/metadata";
+import type { ClipAttributes } from "@/services/storage/types";
 import { storageService } from "@/services/storage/service";
 import { generateUUID } from "@/utils/id";
 import { videoCache } from "@/services/video-cache/service";
@@ -238,6 +240,37 @@ export class MediaManager {
 			await storageService.saveMediaAsset({ projectId, mediaAsset: updated });
 		} catch (error) {
 			console.error("Failed to persist asset folder move:", error);
+			this.assets = this.assets.map((a) => (a.id === assetId ? asset : a));
+			this.notify();
+		}
+	}
+
+	/**
+	 * Set an asset's user attributes (tags / notes / rating, MED-003). The input
+	 * is normalised: an all-empty set clears the field, so a cleared editor
+	 * leaves the asset identical to one that never had attributes.
+	 */
+	async updateAssetAttributes({
+		projectId,
+		assetId,
+		attributes,
+	}: {
+		projectId: string;
+		assetId: string;
+		attributes: ClipAttributes;
+	}): Promise<void> {
+		const asset = this.assets.find((a) => a.id === assetId);
+		if (!asset) return;
+
+		const normalized = normalizeAttributes({ attributes });
+		const updated = { ...asset, attributes: normalized };
+		this.assets = this.assets.map((a) => (a.id === assetId ? updated : a));
+		this.notify();
+
+		try {
+			await storageService.saveMediaAsset({ projectId, mediaAsset: updated });
+		} catch (error) {
+			console.error("Failed to persist asset attributes:", error);
 			this.assets = this.assets.map((a) => (a.id === assetId ? asset : a));
 			this.notify();
 		}
