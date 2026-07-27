@@ -35,10 +35,20 @@ override with `FFMPEG_PATH` / `FFPROBE_PATH`.
 ProRes: `proxy` · `lt` · `standard` (default) · `hq` · `4444` · `4444xq`. The
 4444 profiles carry alpha (`yuva444p10le`); the rest are `yuv422p10le`.
 
+## HTTP endpoint
+
+Wired in `../transcode.controller.ts` + `../transcode.service.ts` (registered in
+`app.module.ts`), shaped like `long-to-short.controller.ts`:
+
+- `POST /api/transcode/proxy` — multipart `video` (+ optional `height`) → JSON
+  `{ id, fileName, video }`.
+- `POST /api/transcode/prores` — multipart `video` (+ optional `profile`) → same.
+- `GET /api/transcode/outputs/:fileName` — download the result.
+
+The service resolves `ffmpeg-static`/`ffprobe-static`, or honours `FFMPEG_PATH`
+/`FFPROBE_PATH` when the host has its own (fuller) ffmpeg build.
+
 ## Not yet wired
 
-The HTTP endpoint (a NestJS controller + service that resolves
-`ffmpeg-static`/`ffprobe-static`, accepts an upload, and streams the result —
-shaped like `long-to-short.controller.ts`) and the editor's
-proxy-preference/ProRes-export UI are the follow-up. This module is the proven
-engine underneath them.
+The editor's proxy-preference (prefer the proxy sink while editing, full-res on
+export) and the ProRes option in the export menu are the remaining follow-up.
