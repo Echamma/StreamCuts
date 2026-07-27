@@ -5,7 +5,9 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/main.js",
-    "start:dev": "ts-node src/main.ts"
+    "start:dev": "ts-node src/main.ts",
+    "test:transcode": "npm run build && node --test dist/transcode/transcode-args.test.js",
+    "verify:transcode": "npm run build && node dist/transcode/verify-transcode.js"
   },
   "dependencies": {
     "@nestjs/common": "^11.1.8",
