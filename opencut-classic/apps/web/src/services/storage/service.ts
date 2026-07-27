@@ -515,6 +515,7 @@ class StorageService {
 			socialCopy: mediaAsset.socialCopy,
 			folderId: mediaAsset.folderId,
 			sceneId: mediaAsset.sceneId,
+			attributes: mediaAsset.attributes,
 			source,
 		};
 
@@ -595,6 +596,7 @@ class StorageService {
 			socialCopy: metadata.socialCopy,
 			folderId: metadata.folderId,
 			sceneId: metadata.sceneId,
+			attributes: metadata.attributes,
 			source,
 		};
 	}

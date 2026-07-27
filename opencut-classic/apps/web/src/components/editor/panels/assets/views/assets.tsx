@@ -34,6 +34,7 @@ import { useEditor } from "@/editor/use-editor";
 import { useFileUpload } from "@/media/use-file-upload";
 import { invokeAction } from "@/actions";
 import { processMediaAssets } from "@/media/processing";
+import { MediaAttributesDialog } from "@/components/editor/panels/assets/media-attributes-dialog";
 import { showMediaUploadToast } from "@/media/upload-toast";
 import { buildSocialDescriptionClipboardText } from "@/socials/copy";
 import { SocialCopyContextMenuSection } from "@/socials/components/context-menu-copy";
@@ -599,6 +600,7 @@ function MediaItemWithContextMenu({
 	const { isSelected, selectedIds } = useSelection();
 	const about = useSocialsStore((state) => state.about);
 	const links = useSocialsStore((state) => state.links);
+	const [attributesOpen, setAttributesOpen] = useState(false);
 	const idsToDelete = isSelected(item.id) ? selectedIds : [item.id];
 	const deleteLabel =
 		idsToDelete.length > 1 ? `Delete ${idsToDelete.length} items` : "Delete";
@@ -647,6 +649,7 @@ function MediaItemWithContextMenu({
 	const canMoveToRoot = !!item.folderId;
 
 	return (
+		<>
 		<ContextMenu>
 			<ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
 			<ContextMenuContent className={cn(item.socialCopy && "w-80")}>
@@ -658,6 +661,9 @@ function MediaItemWithContextMenu({
 					/>
 				) : null}
 				<ContextMenuItem>Export clips</ContextMenuItem>
+				<ContextMenuItem onClick={() => setAttributesOpen(true)}>
+					Edit attributes
+				</ContextMenuItem>
 				{item.sceneId != null && (
 					<ContextMenuItem onClick={handleMakeProjectWide}>
 						Make project-wide
@@ -698,6 +704,13 @@ function MediaItemWithContextMenu({
 				</ContextMenuItem>
 			</ContextMenuContent>
 		</ContextMenu>
+		<MediaAttributesDialog
+			asset={item}
+			projectId={projectId}
+			open={attributesOpen}
+			onOpenChange={setAttributesOpen}
+		/>
+		</>
 	);
 }
 
