@@ -63,16 +63,19 @@ import { cn } from "@/utils/ui";
 import { buildElementFromAsset, isSubclipAsset } from "@/media/asset-source";
 import {
 	ArrowLeft01Icon,
+	Cancel01Icon,
 	CloudUploadIcon,
 	FolderAddIcon,
 	Folder01Icon,
 	GridViewIcon,
 	LeftToRightListDashIcon,
+	Search01Icon,
 	SortingOneNineIcon,
 	Image02Icon,
 	MusicNote03Icon,
 	Video01Icon,
 } from "@hugeicons/core-free-icons";
+import { matchesMediaQuery } from "@/media/metadata";
 import { HugeiconsIcon, type IconSvgElement } from "@hugeicons/react";
 
 export function MediaView() {
@@ -110,6 +113,9 @@ export function MediaView() {
 	const [isCreatingFolder, setIsCreatingFolder] = useState(false);
 	const [newFolderName, setNewFolderName] = useState("New Folder");
 	const newFolderInputRef = useRef<HTMLInputElement>(null);
+	const [searchText, setSearchText] = useState("");
+	const trimmedSearch = searchText.trim();
+	const hasQuery = trimmedSearch !== "";
 
 	const currentFolder = folders.find((f) => f.id === currentFolderId) ?? null;
 
@@ -267,25 +273,32 @@ export function MediaView() {
 		return filtered;
 	}, [mediaFiles, mediaSortBy, mediaSortOrder]);
 
-	const visibleAssets = useMemo(
-		() =>
-			sortedMediaItems.filter((item) =>
-				currentFolderId === null
-					? !item.folderId
-					: item.folderId === currentFolderId,
-			),
-		[sortedMediaItems, currentFolderId],
-	);
+	const visibleAssets = useMemo(() => {
+		// An active search spans every folder; otherwise scope to the open folder.
+		if (hasQuery) {
+			return sortedMediaItems.filter((item) =>
+				matchesMediaQuery({ asset: item, query: { text: trimmedSearch } }),
+			);
+		}
+		return sortedMediaItems.filter((item) =>
+			currentFolderId === null
+				? !item.folderId
+				: item.folderId === currentFolderId,
+		);
+	}, [sortedMediaItems, currentFolderId, hasQuery, trimmedSearch]);
 
 	const orderedMediaIds = useMemo(
 		() => visibleAssets.map((item) => item.id),
 		[visibleAssets],
 	);
 
+	// While searching we never show the drag-to-import overlay — an empty result
+	// set gets a "no matches" hint instead.
 	const isEmpty =
-		currentFolderId === null
+		!hasQuery &&
+		(currentFolderId === null
 			? folders.length === 0 && visibleAssets.length === 0 && !isCreatingFolder
-			: visibleAssets.length === 0;
+			: visibleAssets.length === 0);
 
 	return (
 		<>
@@ -311,7 +324,37 @@ export function MediaView() {
 				contentClassName="h-full"
 				{...dragProps}
 			>
-				{currentFolder ? (
+				<div className="relative mb-3">
+					<HugeiconsIcon
+						icon={Search01Icon}
+						className="text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2"
+					/>
+					<Input
+						value={searchText}
+						onChange={(event) => setSearchText(event.target.value)}
+						placeholder="Search name, tags, notes…"
+						aria-label="Search media"
+						className="h-8 px-8 text-xs"
+					/>
+					{searchText !== "" && (
+						<button
+							type="button"
+							aria-label="Clear search"
+							onClick={() => setSearchText("")}
+							className="text-muted-foreground hover:text-foreground absolute top-1/2 right-2 -translate-y-1/2 transition-colors"
+						>
+							<HugeiconsIcon icon={Cancel01Icon} className="size-3.5" />
+						</button>
+					)}
+				</div>
+
+				{hasQuery && visibleAssets.length === 0 ? (
+					<p className="text-muted-foreground py-6 text-center text-xs">
+						No media matches “{searchText}”.
+					</p>
+				) : null}
+
+				{currentFolder && !hasQuery ? (
 					<button
 						type="button"
 						onClick={() => setCurrentFolder(null)}
@@ -338,7 +381,7 @@ export function MediaView() {
 					>
 						<MediaScopeRegistrar />
 
-						{currentFolderId === null ? (
+						{currentFolderId === null && !hasQuery ? (
 							<>
 								{(folders.length > 0 || isCreatingFolder) && (
 									<div className="mb-4">
