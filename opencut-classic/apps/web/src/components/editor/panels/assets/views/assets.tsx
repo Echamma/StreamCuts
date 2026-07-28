@@ -35,6 +35,11 @@ import { useFileUpload } from "@/media/use-file-upload";
 import { invokeAction } from "@/actions";
 import { processMediaAssets } from "@/media/processing";
 import { MediaAttributesDialog } from "@/components/editor/panels/assets/media-attributes-dialog";
+import {
+	requestProRes,
+	requestProxy,
+	transcodeOutputUrl,
+} from "@/services/transcode/api";
 import { showMediaUploadToast } from "@/media/upload-toast";
 import { buildSocialDescriptionClipboardText } from "@/socials/copy";
 import { SocialCopyContextMenuSection } from "@/socials/components/context-menu-copy";
@@ -610,6 +615,29 @@ function MediaItemWithContextMenu({
 		void editor.media.promoteAssetToProjectWide({ projectId, assetId: item.id });
 	};
 
+	const handleTranscode = async ({ kind }: { kind: "proxy" | "prores" }) => {
+		const label = kind === "proxy" ? "H.264 proxy" : "ProRes";
+		const toastId = toast.loading(`Transcoding ${item.name} to ${label}…`);
+		try {
+			const result =
+				kind === "proxy"
+					? await requestProxy({ file: item.file })
+					: await requestProRes({ file: item.file, profile: "standard" });
+			const anchor = document.createElement("a");
+			anchor.href = transcodeOutputUrl({ fileName: result.fileName });
+			anchor.download = result.fileName;
+			document.body.appendChild(anchor);
+			anchor.click();
+			anchor.remove();
+			toast.success(`${label} ready — downloading.`, { id: toastId });
+		} catch (error) {
+			toast.error(
+				error instanceof Error ? error.message : "Transcode failed.",
+				{ id: toastId },
+			);
+		}
+	};
+
 	const handleCopyToCurrentScene = () => {
 		if (!projectId || !activeSceneId) return;
 		void editor.media.copyAssetToScene({
@@ -664,6 +692,23 @@ function MediaItemWithContextMenu({
 				<ContextMenuItem onClick={() => setAttributesOpen(true)}>
 					Edit attributes
 				</ContextMenuItem>
+				{item.type === "video" && (
+					<ContextMenuSub>
+						<ContextMenuSubTrigger>Transcode</ContextMenuSubTrigger>
+						<ContextMenuSubContent>
+							<ContextMenuItem
+								onClick={() => void handleTranscode({ kind: "proxy" })}
+							>
+								H.264 proxy (540p)
+							</ContextMenuItem>
+							<ContextMenuItem
+								onClick={() => void handleTranscode({ kind: "prores" })}
+							>
+								ProRes (standard)
+							</ContextMenuItem>
+						</ContextMenuSubContent>
+					</ContextMenuSub>
+				)}
 				{item.sceneId != null && (
 					<ContextMenuItem onClick={handleMakeProjectWide}>
 						Make project-wide
