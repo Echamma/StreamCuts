@@ -62,7 +62,14 @@ import {
 	getAssetSourceStartTime,
 	getWaveformSourceKeyForAsset,
 } from "@/media/asset-source";
-import { addMediaTime, type MediaTime, TICKS_PER_SECOND } from "@/wasm";
+import {
+	addMediaTime,
+	mediaTime,
+	type MediaTime,
+	TICKS_PER_SECOND,
+} from "@/wasm";
+import { requestSceneDetect } from "@/services/scene-detect/api";
+import { sourceCutsToClipMarkerTicks } from "@/timeline/scene-cuts";
 import {
 	getActionDefinition,
 	type TAction,
@@ -436,6 +443,50 @@ export function TimelineElement({
 		}
 	};
 
+	const handleDetectScenes = async ({
+		event,
+	}: {
+		event: React.MouseEvent;
+	}) => {
+		event.stopPropagation();
+		if (element.type !== "video") {
+			return;
+		}
+		const asset = mediaAssets.find((item) => item.id === element.mediaId);
+		if (!asset) {
+			toast.warning("Scene detection needs the clip's source media.");
+			return;
+		}
+		const toastId = toast.loading(`Detecting scenes in ${element.name}…`);
+		try {
+			const { cuts } = await requestSceneDetect({ file: asset.file });
+			const markerTicks = sourceCutsToClipMarkerTicks({
+				cuts,
+				trimStartSeconds: element.trimStart / TICKS_PER_SECOND,
+				durationTicks: element.duration,
+				ticksPerSecond: TICKS_PER_SECOND,
+				rate: element.retime?.rate ?? 1,
+			});
+			for (const ticks of markerTicks) {
+				editor.timeline.addClipMarker({
+					trackId: track.id,
+					elementId: element.id,
+					time: mediaTime({ ticks }),
+				});
+			}
+			toast.success(
+				`Added ${markerTicks.length} scene marker${markerTicks.length === 1 ? "" : "s"}.`,
+				{ id: toastId },
+			);
+		} catch (error) {
+			toast.error("Scene detection failed", {
+				id: toastId,
+				description:
+					error instanceof Error ? error.message : "Unexpected error.",
+			});
+		}
+	};
+
 	const isMuted = canElementHaveAudio(element) && isElementMuted({ element });
 	const canToggleCurrentSourceAudio =
 		selectedElements.length === 1 &&
@@ -664,6 +715,16 @@ export function TimelineElement({
 										}
 									>
 										Auto-reframe
+									</ContextMenuItem>
+								)}
+								{element.type === "video" && (
+									<ContextMenuItem
+										icon={<HugeiconsIcon icon={ScissorIcon} />}
+										onClick={(event: React.MouseEvent) =>
+											void handleDetectScenes({ event })
+										}
+									>
+										Detect scenes
 									</ContextMenuItem>
 								)}
 								{adjacentVideoElements ? (
