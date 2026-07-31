@@ -43,6 +43,9 @@ Wired in `../transcode.controller.ts` + `../transcode.service.ts` (registered in
 - `POST /api/transcode/proxy` — multipart `video` (+ optional `height`) → JSON
   `{ id, fileName, video }`.
 - `POST /api/transcode/prores` — multipart `video` (+ optional `profile`) → same.
+- `POST /api/transcode/optimized` — multipart `video` (+ optional `crf`) →
+  same; source-resolution all-intra H.264 (MED-006), for source codecs the
+  browser decodes poorly.
 - `GET /api/transcode/outputs/:fileName` — download the result.
 
 The service resolves `ffmpeg-static`/`ffprobe-static`, or honours `FFMPEG_PATH`

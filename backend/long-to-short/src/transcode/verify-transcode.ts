@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import {
 	probeMedia,
+	transcodeToOptimized,
 	transcodeToProRes,
 	transcodeToProxy,
 } from "./transcode-runner";
@@ -40,6 +41,7 @@ async function main(): Promise<void> {
 	const source = join(workDir, "source.mp4");
 	const proxy = join(workDir, "proxy.mp4");
 	const master = join(workDir, "master.mov");
+	const optimized = join(workDir, "optimized.mp4");
 
 	try {
 		console.log("Generating a 2s 1280x720 test clip with tone…");
@@ -103,6 +105,48 @@ async function main(): Promise<void> {
 			`got ${masterInfo.audioCodec}`,
 		);
 		check("duration ~2s", near(masterInfo.durationSeconds, 2, 0.2), `got ${masterInfo.durationSeconds}`);
+
+		console.log("\nMED-006 — optimized (all-intra H.264) media:");
+		await transcodeToOptimized({
+			ffmpegPath: FFMPEG,
+			options: { inputPath: source, outputPath: optimized },
+		});
+		const optimizedInfo = await probeMedia({
+			ffprobePath: FFPROBE,
+			filePath: optimized,
+		});
+		check("codec is H.264", optimizedInfo.videoCodec === "h264", `got ${optimizedInfo.videoCodec}`);
+		check(
+			"source resolution kept (1280x720)",
+			optimizedInfo.width === 1280 && optimizedInfo.height === 720,
+			`got ${optimizedInfo.width}x${optimizedInfo.height}`,
+		);
+		// All-intra: every frame is a keyframe (no inter frames).
+		const { stdout: frameTypes } = await execFileAsync(
+			FFPROBE,
+			[
+				"-v",
+				"error",
+				"-select_streams",
+				"v:0",
+				"-show_entries",
+				"frame=pict_type",
+				"-of",
+				"csv=p=0",
+				optimized,
+			],
+			{ maxBuffer: 1024 * 1024 * 64 },
+		);
+		// ffprobe's csv output can leave a trailing comma, so split on commas too.
+		const types = frameTypes
+			.split(/[\r\n,]+/)
+			.map((token) => token.trim())
+			.filter((token) => token !== "");
+		check(
+			"every frame is intra (all-I)",
+			types.length > 0 && types.every((type) => type === "I"),
+			`${types.filter((t) => t === "I").length}/${types.length} I-frames`,
+		);
 	} finally {
 		await rm(workDir, { recursive: true, force: true });
 	}

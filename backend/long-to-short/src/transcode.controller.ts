@@ -50,6 +50,18 @@ export class TranscodeController {
 		});
 	}
 
+	@Post("/api/transcode/optimized")
+	@UseInterceptors(FileInterceptor("video", { storage: uploadStorage }))
+	async createOptimized(
+		@UploadedFile() file: Express.Multer.File,
+		@Body("crf") crf?: string,
+	) {
+		return this.transcodeService.createOptimized({
+			file,
+			crf: crf ? Number(crf) : undefined,
+		});
+	}
+
 	@Post("/api/transcode/prores")
 	@UseInterceptors(FileInterceptor("video", { storage: uploadStorage }))
 	async createProRes(

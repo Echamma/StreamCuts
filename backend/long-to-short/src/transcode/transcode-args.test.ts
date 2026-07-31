@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+	buildOptimizedArgs,
 	buildProbeArgs,
 	buildProResArgs,
 	buildProxyArgs,
@@ -71,6 +72,19 @@ test("prores args: 4444 profiles carry alpha (yuva444p10le)", () => {
 		profile: "4444",
 	});
 	assert.equal(valueAfter(args, "-pix_fmt"), "yuva444p10le");
+});
+
+test("optimized args: all-intra H.264 (-g 1), no downscale, faststart", () => {
+	const args = buildOptimizedArgs({ inputPath: "in.mkv", outputPath: "out.mp4" });
+	assert.equal(valueAfter(args, "-c:v"), "libx264");
+	assert.equal(valueAfter(args, "-g"), "1");
+	assert.equal(valueAfter(args, "-keyint_min"), "1");
+	assert.equal(valueAfter(args, "-bf"), "0");
+	assert.equal(valueAfter(args, "-crf"), "18");
+	assert.equal(valueAfter(args, "-movflags"), "+faststart");
+	// no scaling filter — output stays at source resolution
+	assert.ok(!args.includes("-vf"));
+	assert.equal(args[args.length - 1], "out.mp4");
 });
 
 test("probe args request codec/dimensions/duration as JSON", () => {

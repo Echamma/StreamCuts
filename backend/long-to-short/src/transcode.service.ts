@@ -12,6 +12,7 @@ import { basename, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import {
 	probeMedia,
+	transcodeToOptimized,
 	transcodeToProRes,
 	transcodeToProxy,
 } from "./transcode/transcode-runner";
@@ -91,6 +92,24 @@ export class TranscodeService {
 				transcodeToProxy({
 					ffmpegPath: ffmpegBinary,
 					options: { inputPath, outputPath, height },
+				}),
+		});
+	}
+
+	async createOptimized({
+		file,
+		crf,
+	}: {
+		file: Express.Multer.File;
+		crf?: number;
+	}): Promise<TranscodeResult> {
+		return this.run({
+			file,
+			extension: ".mp4",
+			transcode: ({ ffmpegBinary, inputPath, outputPath }) =>
+				transcodeToOptimized({
+					ffmpegPath: ffmpegBinary,
+					options: { inputPath, outputPath, crf },
 				}),
 		});
 	}
