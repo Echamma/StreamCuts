@@ -106,6 +106,9 @@ export function MediaView() {
 		renameFolder,
 		deleteFolder,
 		setCurrentFolder,
+		smartBins,
+		createSmartBin,
+		deleteSmartBin,
 	} = useAssetsPanelStore();
 
 	const [isProcessing, setIsProcessing] = useState(false);
@@ -324,27 +327,71 @@ export function MediaView() {
 				contentClassName="h-full"
 				{...dragProps}
 			>
-				<div className="relative mb-3">
-					<HugeiconsIcon
-						icon={Search01Icon}
-						className="text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2"
-					/>
-					<Input
-						value={searchText}
-						onChange={(event) => setSearchText(event.target.value)}
-						placeholder="Search name, tags, notes…"
-						aria-label="Search media"
-						className="h-8 px-8 text-xs"
-					/>
-					{searchText !== "" && (
-						<button
-							type="button"
-							aria-label="Clear search"
-							onClick={() => setSearchText("")}
-							className="text-muted-foreground hover:text-foreground absolute top-1/2 right-2 -translate-y-1/2 transition-colors"
-						>
-							<HugeiconsIcon icon={Cancel01Icon} className="size-3.5" />
-						</button>
+				<div className="mb-3 flex flex-col gap-2">
+					<div className="flex items-center gap-2">
+						<div className="relative flex-1">
+							<HugeiconsIcon
+								icon={Search01Icon}
+								className="text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2"
+							/>
+							<Input
+								value={searchText}
+								onChange={(event) => setSearchText(event.target.value)}
+								placeholder="Search name, tags, notes…"
+								aria-label="Search media"
+								className="h-8 px-8 text-xs"
+							/>
+							{searchText !== "" && (
+								<button
+									type="button"
+									aria-label="Clear search"
+									onClick={() => setSearchText("")}
+									className="text-muted-foreground hover:text-foreground absolute top-1/2 right-2 -translate-y-1/2 transition-colors"
+								>
+									<HugeiconsIcon icon={Cancel01Icon} className="size-3.5" />
+								</button>
+							)}
+						</div>
+						{hasQuery && (
+							<Button
+								size="sm"
+								variant="outline"
+								className="h-8 shrink-0 text-xs"
+								onClick={() => {
+									createSmartBin({ name: trimmedSearch, query: trimmedSearch });
+									toast.success(`Saved smart bin “${trimmedSearch}”.`);
+								}}
+							>
+								Save bin
+							</Button>
+						)}
+					</div>
+
+					{!hasQuery && smartBins.length > 0 && (
+						<div className="flex flex-wrap gap-1.5">
+							{smartBins.map((bin) => (
+								<span
+									key={bin.id}
+									className="border-border bg-muted/40 text-muted-foreground flex items-center gap-1 rounded-full border py-0.5 pr-1 pl-2.5 text-xs"
+								>
+									<button
+										type="button"
+										className="hover:text-foreground max-w-32 truncate transition-colors"
+										onClick={() => setSearchText(bin.query)}
+									>
+										{bin.name}
+									</button>
+									<button
+										type="button"
+										aria-label={`Delete smart bin ${bin.name}`}
+										className="hover:text-foreground rounded-full px-0.5 transition-colors"
+										onClick={() => deleteSmartBin(bin.id)}
+									>
+										<HugeiconsIcon icon={Cancel01Icon} className="size-3" />
+									</button>
+								</span>
+							))}
+						</div>
 					)}
 				</div>
 

@@ -124,6 +124,14 @@ export interface MediaFolder {
 	name: string;
 }
 
+/** A saved media search (MED-002). `query` is the search text applied when the
+ * bin is opened; matching itself runs through the tested `matchesMediaQuery`. */
+export interface SmartBin {
+	id: string;
+	name: string;
+	query: string;
+}
+
 interface AssetsPanelStore {
 	activeTab: Tab;
 	setActiveTab: (tab: Tab) => void;
@@ -145,6 +153,11 @@ interface AssetsPanelStore {
 	renameFolder: (id: string, name: string) => void;
 	deleteFolder: (id: string) => void;
 	setCurrentFolder: (id: string | null) => void;
+
+	/* Smart bins (saved searches) */
+	smartBins: SmartBin[];
+	createSmartBin: (args: { name: string; query: string }) => void;
+	deleteSmartBin: (id: string) => void;
 }
 
 export const useAssetsPanelStore = create<AssetsPanelStore>()(
@@ -179,6 +192,18 @@ export const useAssetsPanelStore = create<AssetsPanelStore>()(
 					currentFolderId: state.currentFolderId === id ? null : state.currentFolderId,
 				})),
 			setCurrentFolder: (id) => set({ currentFolderId: id }),
+			smartBins: [],
+			createSmartBin: ({ name, query }) =>
+				set((state) => ({
+					smartBins: [
+						...state.smartBins,
+						{ id: crypto.randomUUID(), name, query },
+					],
+				})),
+			deleteSmartBin: (id) =>
+				set((state) => ({
+					smartBins: state.smartBins.filter((bin) => bin.id !== id),
+				})),
 		}),
 		{
 			name: "assets-panel",
@@ -187,6 +212,7 @@ export const useAssetsPanelStore = create<AssetsPanelStore>()(
 				mediaSortBy: state.mediaSortBy,
 				mediaSortOrder: state.mediaSortOrder,
 				folders: state.folders,
+				smartBins: state.smartBins,
 			}),
 		},
 	),
