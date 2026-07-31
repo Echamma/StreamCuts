@@ -118,6 +118,58 @@ export function buildProResArgs({
 	];
 }
 
+export interface OptimizedArgsOptions {
+	inputPath: string;
+	outputPath: string;
+	/** x264 constant-rate-factor (lower = higher quality/size). */
+	crf?: number;
+}
+
+/**
+ * Edit-friendly "optimized media" transcode (MED-006): source-resolution,
+ * all-intra H.264 — every frame is a keyframe (`-g 1`), so any frame seeks
+ * instantly — for source codecs the browser decodes poorly (HEVC, VP9, …).
+ * Larger than a proxy (no downscale), lighter and more compatible than ProRes.
+ */
+export function buildOptimizedArgs({
+	inputPath,
+	outputPath,
+	crf = 18,
+}: OptimizedArgsOptions): string[] {
+	return [
+		"-y",
+		"-i",
+		inputPath,
+		"-map",
+		"0:v:0",
+		"-map",
+		"0:a?",
+		"-c:v",
+		"libx264",
+		"-preset",
+		"fast",
+		"-crf",
+		String(crf),
+		// Every frame a keyframe and no B-frames → strictly all-intra, so any
+		// frame decodes standalone (fast, exact seeking).
+		"-g",
+		"1",
+		"-keyint_min",
+		"1",
+		"-bf",
+		"0",
+		"-pix_fmt",
+		"yuv420p",
+		"-c:a",
+		"aac",
+		"-b:a",
+		"192k",
+		"-movflags",
+		"+faststart",
+		outputPath,
+	];
+}
+
 /** ffprobe args that emit one line of JSON describing the first video + audio
  * streams and the container duration — the shape {@link parseProbeJson} reads. */
 export function buildProbeArgs({ filePath }: { filePath: string }): string[] {

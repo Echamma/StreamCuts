@@ -1,10 +1,12 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import {
+	buildOptimizedArgs,
 	buildProbeArgs,
 	buildProResArgs,
 	buildProxyArgs,
 	parseProbeJson,
+	type OptimizedArgsOptions,
 	type ProbeSummary,
 	type ProResProfile,
 	type ProxyArgsOptions,
@@ -60,6 +62,18 @@ export async function transcodeToProxy({
 	options: ProxyArgsOptions;
 }): Promise<void> {
 	await runFfmpeg({ ffmpegPath, args: buildProxyArgs(options) });
+}
+
+/** Transcode a source file to an all-intra, source-resolution H.264 optimized
+ * intermediate (MED-006). */
+export async function transcodeToOptimized({
+	ffmpegPath,
+	options,
+}: {
+	ffmpegPath: string;
+	options: OptimizedArgsOptions;
+}): Promise<void> {
+	await runFfmpeg({ ffmpegPath, args: buildOptimizedArgs(options) });
 }
 
 /** Transcode a source file to Apple ProRes (DEL-003). */
