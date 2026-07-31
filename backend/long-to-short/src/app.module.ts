@@ -7,6 +7,8 @@ import { BossController } from './boss.controller'
 import { BossService } from './boss.service'
 import { TranscodeController } from './transcode.controller'
 import { TranscodeService } from './transcode.service'
+import { SceneDetectController } from './scene-detect.controller'
+import { SceneDetectService } from './scene-detect.service'
 
 @Module({
   controllers: [
@@ -14,12 +16,14 @@ import { TranscodeService } from './transcode.service'
     TranscriptionController,
     BossController,
     TranscodeController,
+    SceneDetectController,
   ],
   providers: [
     LongToShortService,
     TranscriptionService,
     BossService,
     TranscodeService,
+    SceneDetectService,
   ],
 })
 export class AppModule {}

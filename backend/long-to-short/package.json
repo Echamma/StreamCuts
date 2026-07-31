@@ -7,7 +7,9 @@
     "start": "node dist/main.js",
     "start:dev": "ts-node src/main.ts",
     "test:transcode": "npm run build && node --test dist/transcode/transcode-args.test.js",
-    "verify:transcode": "npm run build && node dist/transcode/verify-transcode.js"
+    "verify:transcode": "npm run build && node dist/transcode/verify-transcode.js",
+    "test:scene-detect": "npm run build && node --test dist/scene-detect/scene-detect-args.test.js",
+    "verify:scene-detect": "npm run build && node dist/scene-detect/verify-scene-detect.js"
   },
   "dependencies": {
     "@nestjs/common": "^11.1.8",
