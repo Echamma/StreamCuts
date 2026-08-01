@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+	AUDIO_EXPORT_EXTENSION,
+	buildAudioExportArgs,
 	buildOptimizedArgs,
 	buildProbeArgs,
 	buildProResArgs,
@@ -85,6 +87,47 @@ test("optimized args: all-intra H.264 (-g 1), no downscale, faststart", () => {
 	// no scaling filter — output stays at source resolution
 	assert.ok(!args.includes("-vf"));
 	assert.equal(args[args.length - 1], "out.mp4");
+});
+
+test("audio export: mp3 drops video, maps first audio, libmp3lame + bitrate", () => {
+	const args = buildAudioExportArgs({
+		inputPath: "in.mp4",
+		outputPath: "out.mp3",
+		format: "mp3",
+		bitrate: "256k",
+	});
+	assert.ok(args.includes("-vn"));
+	assert.equal(valueAfter(args, "-map"), "0:a:0");
+	assert.equal(valueAfter(args, "-c:a"), "libmp3lame");
+	assert.equal(valueAfter(args, "-b:a"), "256k");
+	assert.equal(args[args.length - 1], "out.mp3");
+});
+
+test("audio export: lossless formats set the right codec and no bitrate", () => {
+	const wav = buildAudioExportArgs({
+		inputPath: "in.mov",
+		outputPath: "out.wav",
+		format: "wav",
+	});
+	assert.equal(valueAfter(wav, "-c:a"), "pcm_s16le");
+	assert.ok(!wav.includes("-b:a"));
+
+	const flac = buildAudioExportArgs({
+		inputPath: "in.mov",
+		outputPath: "out.flac",
+		format: "flac",
+	});
+	assert.equal(valueAfter(flac, "-c:a"), "flac");
+	assert.ok(!flac.includes("-b:a"));
+});
+
+test("audio export: format extensions map as expected", () => {
+	assert.deepEqual(AUDIO_EXPORT_EXTENSION, {
+		mp3: ".mp3",
+		aac: ".m4a",
+		wav: ".wav",
+		flac: ".flac",
+	});
 });
 
 test("probe args request codec/dimensions/duration as JSON", () => {

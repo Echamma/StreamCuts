@@ -1,11 +1,13 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import {
+	buildAudioExportArgs,
 	buildOptimizedArgs,
 	buildProbeArgs,
 	buildProResArgs,
 	buildProxyArgs,
 	parseProbeJson,
+	type AudioExportArgsOptions,
 	type OptimizedArgsOptions,
 	type ProbeSummary,
 	type ProResProfile,
@@ -74,6 +76,17 @@ export async function transcodeToOptimized({
 	options: OptimizedArgsOptions;
 }): Promise<void> {
 	await runFfmpeg({ ffmpegPath, args: buildOptimizedArgs(options) });
+}
+
+/** Export the audio track of a source file to a delivery format (DEL-007). */
+export async function transcodeToAudio({
+	ffmpegPath,
+	options,
+}: {
+	ffmpegPath: string;
+	options: AudioExportArgsOptions;
+}): Promise<void> {
+	await runFfmpeg({ ffmpegPath, args: buildAudioExportArgs(options) });
 }
 
 /** Transcode a source file to Apple ProRes (DEL-003). */

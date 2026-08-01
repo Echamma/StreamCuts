@@ -20,6 +20,24 @@ import {
 	TranscodeService,
 } from "./transcode.service";
 
+/** Map an output extension to its Content-Type (video masters + audio stems). */
+function contentTypeFor(fileName: string): string {
+	switch (extname(fileName)) {
+		case ".mov":
+			return "video/quicktime";
+		case ".mp3":
+			return "audio/mpeg";
+		case ".m4a":
+			return "audio/mp4";
+		case ".wav":
+			return "audio/wav";
+		case ".flac":
+			return "audio/flac";
+		default:
+			return "video/mp4";
+	}
+}
+
 const uploadStorage = diskStorage({
 	destination: (_request, _file, callback) => {
 		callback(null, getTranscodeUploadDirectory());
@@ -71,6 +89,16 @@ export class TranscodeController {
 		return this.transcodeService.createProRes({ file, profile });
 	}
 
+	@Post("/api/transcode/audio")
+	@UseInterceptors(FileInterceptor("video", { storage: uploadStorage }))
+	async createAudioExport(
+		@UploadedFile() file: Express.Multer.File,
+		@Body("format") format?: string,
+		@Body("bitrate") bitrate?: string,
+	) {
+		return this.transcodeService.createAudioExport({ file, format, bitrate });
+	}
+
 	@Get("/api/transcode/outputs/:fileName")
 	@Header("Access-Control-Expose-Headers", "Content-Disposition")
 	download(
@@ -79,10 +107,8 @@ export class TranscodeController {
 	) {
 		const outputPath = this.transcodeService.getOutputPath(fileName);
 		const stream = this.transcodeService.getOutputReadStream(fileName);
-		const contentType =
-			extname(fileName) === ".mov" ? "video/quicktime" : "video/mp4";
 
-		response.setHeader("Content-Type", contentType);
+		response.setHeader("Content-Type", contentTypeFor(fileName));
 		response.setHeader(
 			"Content-Disposition",
 			`attachment; filename="${basename(outputPath)}"`,

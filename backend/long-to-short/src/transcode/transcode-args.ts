@@ -170,6 +170,56 @@ export function buildOptimizedArgs({
 	];
 }
 
+/** Audio-only delivery formats (DEL-007). Lossy (mp3/aac) honour `bitrate`;
+ * lossless (wav/flac) ignore it. */
+export type AudioExportFormat = "mp3" | "aac" | "wav" | "flac";
+
+/** Container extension written for each audio-export format. */
+export const AUDIO_EXPORT_EXTENSION: Record<AudioExportFormat, string> = {
+	mp3: ".mp3",
+	aac: ".m4a",
+	wav: ".wav",
+	flac: ".flac",
+};
+
+export interface AudioExportArgsOptions {
+	inputPath: string;
+	outputPath: string;
+	format: AudioExportFormat;
+	/** Bitrate for lossy formats (e.g. "192k"); ignored for wav/flac. */
+	bitrate?: string;
+}
+
+/**
+ * Audio-only export (DEL-007): drop video (`-vn`), map the first audio stream,
+ * and encode to the requested delivery format — MP3/AAC (lossy, `bitrate`) or
+ * WAV/FLAC (lossless). Pulls a stem or podcast track out of a clip.
+ */
+export function buildAudioExportArgs({
+	inputPath,
+	outputPath,
+	format,
+	bitrate = "192k",
+}: AudioExportArgsOptions): string[] {
+	const args = ["-y", "-i", inputPath, "-vn", "-map", "0:a:0"];
+	switch (format) {
+		case "mp3":
+			args.push("-c:a", "libmp3lame", "-b:a", bitrate);
+			break;
+		case "aac":
+			args.push("-c:a", "aac", "-b:a", bitrate);
+			break;
+		case "wav":
+			args.push("-c:a", "pcm_s16le");
+			break;
+		case "flac":
+			args.push("-c:a", "flac");
+			break;
+	}
+	args.push(outputPath);
+	return args;
+}
+
 /** ffprobe args that emit one line of JSON describing the first video + audio
  * streams and the container duration — the shape {@link parseProbeJson} reads. */
 export function buildProbeArgs({ filePath }: { filePath: string }): string[] {
