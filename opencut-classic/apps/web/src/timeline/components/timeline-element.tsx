@@ -69,6 +69,7 @@ import {
 	TICKS_PER_SECOND,
 } from "@/wasm";
 import { requestSceneDetect } from "@/services/scene-detect/api";
+import { requestLoudness } from "@/services/loudness/api";
 import { sourceCutsToClipMarkerTicks } from "@/timeline/scene-cuts";
 import {
 	getActionDefinition,
@@ -487,6 +488,54 @@ export function TimelineElement({
 		}
 	};
 
+	const handleMeasureLoudness = async ({
+		event,
+	}: {
+		event: React.MouseEvent;
+	}) => {
+		event.stopPropagation();
+		// Only clips backed by an uploaded media asset carry a `File` to measure;
+		// library audio is a URL, not a local asset.
+		const mediaId =
+			element.type === "video"
+				? element.mediaId
+				: element.type === "audio" && element.sourceType === "upload"
+					? element.mediaId
+					: null;
+		if (mediaId === null) {
+			return;
+		}
+		const asset = mediaAssets.find((item) => item.id === mediaId);
+		if (!asset) {
+			toast.warning("Loudness needs the clip's source media.");
+			return;
+		}
+		const toastId = toast.loading(`Measuring loudness of ${element.name}…`);
+		try {
+			const summary = await requestLoudness({ file: asset.file });
+			if (summary.integratedLufs === null) {
+				toast.error("No loudness data — the clip may have no audio.", {
+					id: toastId,
+				});
+				return;
+			}
+			const parts = [`${summary.integratedLufs.toFixed(1)} LUFS`];
+			if (summary.truePeakDbfs !== null) {
+				parts.push(`${summary.truePeakDbfs.toFixed(1)} dBFS peak`);
+			}
+			if (summary.loudnessRangeLu !== null) {
+				parts.push(`${summary.loudnessRangeLu.toFixed(1)} LU range`);
+			}
+			toast.success(`Loudness: ${parts.join(" · ")}`, { id: toastId });
+		} catch (error) {
+			toast.error("Loudness measurement failed", {
+				id: toastId,
+				description:
+					error instanceof Error ? error.message : "Unexpected error.",
+			});
+		}
+	};
+
 	const isMuted = canElementHaveAudio(element) && isElementMuted({ element });
 	const canToggleCurrentSourceAudio =
 		selectedElements.length === 1 &&
@@ -725,6 +774,18 @@ export function TimelineElement({
 										}
 									>
 										Detect scenes
+									</ContextMenuItem>
+								)}
+								{(element.type === "video" ||
+									(element.type === "audio" &&
+										element.sourceType === "upload")) && (
+									<ContextMenuItem
+										icon={<HugeiconsIcon icon={VolumeHighIcon} />}
+										onClick={(event: React.MouseEvent) =>
+											void handleMeasureLoudness({ event })
+										}
+									>
+										Measure loudness
 									</ContextMenuItem>
 								)}
 								{adjacentVideoElements ? (
