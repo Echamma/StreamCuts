@@ -146,3 +146,148 @@ export function estimateSyncOffsetSeconds({
 	});
 	return { offsetSeconds: offsetSamples / samplesPerSecond, score };
 }
+
+/**
+ * Resample an amplitude envelope from `fromRate` to `toRate` buckets/second by
+ * linear interpolation (edges clamped). Used to put two source envelopes on a
+ * common timebase before correlating, so a sample of lag means the same amount
+ * of time on both sides.
+ */
+export function resampleEnvelope({
+	envelope,
+	fromRate,
+	toRate,
+}: {
+	envelope: ArrayLike<number>;
+	fromRate: number;
+	toRate: number;
+}): number[] {
+	if (fromRate <= 0 || toRate <= 0) {
+		throw new Error("resampleEnvelope rates must be positive");
+	}
+	const inLength = envelope.length;
+	if (inLength === 0) {
+		return [];
+	}
+	if (fromRate === toRate) {
+		return Array.from({ length: inLength }, (_, i) => envelope[i]);
+	}
+	// Source samples advanced per output sample.
+	const ratio = fromRate / toRate;
+	const outLength = Math.max(1, Math.round(inLength / ratio));
+	const result = new Array<number>(outLength);
+	for (let j = 0; j < outLength; j++) {
+		const srcPos = j * ratio;
+		const i0 = Math.floor(srcPos);
+		const frac = srcPos - i0;
+		const a = envelope[Math.min(i0, inLength - 1)];
+		const b = envelope[Math.min(i0 + 1, inLength - 1)];
+		result[j] = a + (b - a) * frac;
+	}
+	return result;
+}
+
+/**
+ * A whole-source amplitude envelope with the metadata needed to place it in
+ * time. Structurally matches `media/waveform-summary`'s `SourceWaveformSummary`
+ * (`amplitudes` peak buckets, `sampleRate` Hz, `bucketSize` source samples per
+ * bucket), so a summary built for the waveform display feeds straight in.
+ */
+export interface EnvelopeSummary {
+	amplitudes: ArrayLike<number>;
+	sampleRate: number;
+	bucketSize: number;
+}
+
+/** Envelope buckets per second = audio sample rate ÷ source samples per bucket. */
+function envelopeRate(summary: EnvelopeSummary): number {
+	return summary.sampleRate / summary.bucketSize;
+}
+
+/**
+ * Estimate the sync offset between two source media given their waveform
+ * summaries, correcting for differing bucket rates. The finer envelope is
+ * resampled down to the coarser one's rate, then cross-correlated; the result
+ * is reported in seconds (positive = the shared event is *later* in the target
+ * source than in the reference). Degenerate inputs (empty/one-bucket envelopes,
+ * non-positive rates) yield a zero offset with zero confidence.
+ */
+export function estimateSyncOffsetFromSummaries({
+	reference,
+	target,
+	maxLagSeconds,
+}: {
+	reference: EnvelopeSummary;
+	target: EnvelopeSummary;
+	maxLagSeconds?: number;
+}): { offsetSeconds: number; score: number } {
+	const refRate = envelopeRate(reference);
+	const targetRate = envelopeRate(target);
+	if (
+		!Number.isFinite(refRate) ||
+		refRate <= 0 ||
+		!Number.isFinite(targetRate) ||
+		targetRate <= 0 ||
+		reference.amplitudes.length < 2 ||
+		target.amplitudes.length < 2
+	) {
+		return { offsetSeconds: 0, score: 0 };
+	}
+
+	const commonRate = Math.min(refRate, targetRate);
+	const referenceEnvelope = resampleEnvelope({
+		envelope: reference.amplitudes,
+		fromRate: refRate,
+		toRate: commonRate,
+	});
+	const targetEnvelope = resampleEnvelope({
+		envelope: target.amplitudes,
+		fromRate: targetRate,
+		toRate: commonRate,
+	});
+	const maxLagSamples =
+		maxLagSeconds === undefined
+			? undefined
+			: Math.round(maxLagSeconds * commonRate);
+	const { offsetSamples, score } = estimateSyncOffsetSamples({
+		reference: referenceEnvelope,
+		target: targetEnvelope,
+		maxLagSamples,
+	});
+	return { offsetSeconds: offsetSamples / commonRate, score };
+}
+
+/**
+ * The timeline start (seconds) that aligns `target` to `reference` given the
+ * measured content offset from {@link estimateSyncOffsetFromSummaries}.
+ *
+ * Each clip shows source content from its `trimStart`, at its native rate, so a
+ * source event at reference-source-time `Sr` sits at timeline
+ * `referenceTimelineStart + (Sr − referenceTrimStart)`; the same event is at
+ * target-source-time `Sr + offsetSeconds`. Solving for the target start makes
+ * `Sr` cancel — alignment is content-independent — and gives the expression
+ * below. Both clips are assumed un-retimed (rate 1), the dual-system-audio case.
+ *
+ * The result may be negative (the aligned target would begin before the
+ * timeline origin); the caller shifts both clips right, or clamps, as it sees
+ * fit. Pure arithmetic over plain seconds — the caller converts `MediaTime`.
+ */
+export function planClipSyncStart({
+	referenceTimelineStartSeconds,
+	referenceTrimStartSeconds,
+	targetTrimStartSeconds,
+	offsetSeconds,
+}: {
+	referenceTimelineStartSeconds: number;
+	referenceTrimStartSeconds: number;
+	targetTrimStartSeconds: number;
+	offsetSeconds: number;
+}): { targetTimelineStartSeconds: number } {
+	return {
+		targetTimelineStartSeconds:
+			referenceTimelineStartSeconds -
+			referenceTrimStartSeconds +
+			targetTrimStartSeconds -
+			offsetSeconds,
+	};
+}
