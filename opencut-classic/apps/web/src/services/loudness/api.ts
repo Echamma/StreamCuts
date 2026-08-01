@@ -33,6 +33,66 @@ export async function requestLoudness({
 	return parseResult({ payload: await response.json() });
 }
 
+/** A loudness target for normalisation (unset fields use the backend defaults:
+ * −14 LUFS / −1 dBFS TP / 11 LU). */
+export interface LoudnessTarget {
+	targetLufs?: number;
+	targetTruePeak?: number;
+	targetLra?: number;
+}
+
+export interface NormalizeResult {
+	id: string;
+	fileName: string;
+}
+
+/** Normalise `file` to a loudness target; the normalised WAV is then available
+ * at {@link loudnessOutputUrl}. */
+export async function requestLoudnessNormalize({
+	file,
+	target,
+}: {
+	file: File;
+	target?: LoudnessTarget;
+}): Promise<NormalizeResult> {
+	const formData = new FormData();
+	formData.set("media", file);
+	if (target?.targetLufs != null) {
+		formData.set("targetLufs", String(target.targetLufs));
+	}
+	if (target?.targetTruePeak != null) {
+		formData.set("targetTruePeak", String(target.targetTruePeak));
+	}
+	if (target?.targetLra != null) {
+		formData.set("targetLra", String(target.targetLra));
+	}
+
+	const response = await fetch(
+		resolveLongToShortUrl({ path: "/api/loudness/normalize" }),
+		{ method: "POST", body: formData },
+	);
+	if (!response.ok) {
+		throw new Error(await readErrorMessage({ response }));
+	}
+	const payload: unknown = await response.json();
+	if (
+		typeof payload !== "object" ||
+		payload === null ||
+		!("fileName" in payload) ||
+		typeof payload.fileName !== "string" ||
+		!("id" in payload) ||
+		typeof payload.id !== "string"
+	) {
+		throw new Error("Malformed loudness-normalize response.");
+	}
+	return { id: payload.id, fileName: payload.fileName };
+}
+
+/** Download URL for a normalised output produced by {@link requestLoudnessNormalize}. */
+export function loudnessOutputUrl({ fileName }: { fileName: string }): string {
+	return resolveLongToShortUrl({ path: `/api/loudness/outputs/${fileName}` });
+}
+
 async function readErrorMessage({
 	response,
 }: {
