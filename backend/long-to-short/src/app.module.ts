@@ -9,6 +9,8 @@ import { TranscodeController } from './transcode.controller'
 import { TranscodeService } from './transcode.service'
 import { SceneDetectController } from './scene-detect.controller'
 import { SceneDetectService } from './scene-detect.service'
+import { LoudnessController } from './loudness.controller'
+import { LoudnessService } from './loudness.service'
 
 @Module({
   controllers: [
@@ -17,6 +19,7 @@ import { SceneDetectService } from './scene-detect.service'
     BossController,
     TranscodeController,
     SceneDetectController,
+    LoudnessController,
   ],
   providers: [
     LongToShortService,
@@ -24,6 +27,7 @@ import { SceneDetectService } from './scene-detect.service'
     BossService,
     TranscodeService,
     SceneDetectService,
+    LoudnessService,
   ],
 })
 export class AppModule {}
