@@ -61,6 +61,31 @@ export async function requestProRes({
 	return postTranscode({ path: "/api/transcode/prores", formData });
 }
 
+/** Audio-only delivery formats (DEL-007). */
+export type AudioExportFormat = "mp3" | "aac" | "wav" | "flac";
+
+/** Export just the audio track of a file to a delivery format (DEL-007). The
+ * result's `fileName` downloads via {@link transcodeOutputUrl}. */
+export async function requestAudioExport({
+	file,
+	format,
+	bitrate,
+}: {
+	file: File;
+	format?: AudioExportFormat;
+	bitrate?: string;
+}): Promise<TranscodeResult> {
+	const formData = new FormData();
+	formData.set("video", file);
+	if (format) {
+		formData.set("format", format);
+	}
+	if (bitrate) {
+		formData.set("bitrate", bitrate);
+	}
+	return postTranscode({ path: "/api/transcode/audio", formData });
+}
+
 /** Download URL for a transcode output (served with Content-Disposition). */
 export function transcodeOutputUrl({ fileName }: { fileName: string }): string {
 	return resolveLongToShortUrl({

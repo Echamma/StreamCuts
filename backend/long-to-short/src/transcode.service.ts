@@ -12,13 +12,16 @@ import { basename, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import {
 	probeMedia,
+	transcodeToAudio,
 	transcodeToOptimized,
 	transcodeToProRes,
 	transcodeToProxy,
 } from "./transcode/transcode-runner";
-import type {
-	ProbeSummary,
-	ProResProfile,
+import {
+	AUDIO_EXPORT_EXTENSION,
+	type AudioExportFormat,
+	type ProbeSummary,
+	type ProResProfile,
 } from "./transcode/transcode-args";
 
 const BASE_DIR = join(tmpdir(), "streamcuts-transcode");
@@ -36,6 +39,12 @@ const PRORES_PROFILE_NAMES = new Set<string>([
 
 function isProResProfile(value: string): value is ProResProfile {
 	return PRORES_PROFILE_NAMES.has(value);
+}
+
+const AUDIO_EXPORT_FORMATS = new Set<string>(["mp3", "aac", "wav", "flac"]);
+
+function isAudioExportFormat(value: string): value is AudioExportFormat {
+	return AUDIO_EXPORT_FORMATS.has(value);
 }
 
 /** Upload directory for transcode sources, created on demand. Exported so the
@@ -110,6 +119,33 @@ export class TranscodeService {
 				transcodeToOptimized({
 					ffmpegPath: ffmpegBinary,
 					options: { inputPath, outputPath, crf },
+				}),
+		});
+	}
+
+	async createAudioExport({
+		file,
+		format,
+		bitrate,
+	}: {
+		file: Express.Multer.File;
+		format?: string;
+		bitrate?: string;
+	}): Promise<TranscodeResult> {
+		let resolved: AudioExportFormat = "mp3";
+		if (format !== undefined) {
+			if (!isAudioExportFormat(format)) {
+				throw new BadRequestException(`Unknown audio format: ${format}`);
+			}
+			resolved = format;
+		}
+		return this.run({
+			file,
+			extension: AUDIO_EXPORT_EXTENSION[resolved],
+			transcode: ({ ffmpegBinary, inputPath, outputPath }) =>
+				transcodeToAudio({
+					ffmpegPath: ffmpegBinary,
+					options: { inputPath, outputPath, format: resolved, bitrate },
 				}),
 		});
 	}

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import {
 	probeMedia,
+	transcodeToAudio,
 	transcodeToOptimized,
 	transcodeToProRes,
 	transcodeToProxy,
@@ -42,6 +43,8 @@ async function main(): Promise<void> {
 	const proxy = join(workDir, "proxy.mp4");
 	const master = join(workDir, "master.mov");
 	const optimized = join(workDir, "optimized.mp4");
+	const audioMp3 = join(workDir, "audio.mp3");
+	const audioWav = join(workDir, "audio.wav");
 
 	try {
 		console.log("Generating a 2s 1280x720 test clip with tone…");
@@ -146,6 +149,28 @@ async function main(): Promise<void> {
 			"every frame is intra (all-I)",
 			types.length > 0 && types.every((type) => type === "I"),
 			`${types.filter((t) => t === "I").length}/${types.length} I-frames`,
+		);
+
+		console.log("\nDEL-007 — audio-only export (MP3 + WAV):");
+		await transcodeToAudio({
+			ffmpegPath: FFMPEG,
+			options: { inputPath: source, outputPath: audioMp3, format: "mp3" },
+		});
+		const mp3Info = await probeMedia({ ffprobePath: FFPROBE, filePath: audioMp3 });
+		check("MP3: video dropped", mp3Info.videoCodec === null, `got ${mp3Info.videoCodec}`);
+		check("MP3: audio is mp3", mp3Info.audioCodec === "mp3", `got ${mp3Info.audioCodec}`);
+		check("MP3: duration ~2s", near(mp3Info.durationSeconds, 2, 0.2), `got ${mp3Info.durationSeconds}`);
+
+		await transcodeToAudio({
+			ffmpegPath: FFMPEG,
+			options: { inputPath: source, outputPath: audioWav, format: "wav" },
+		});
+		const wavInfo = await probeMedia({ ffprobePath: FFPROBE, filePath: audioWav });
+		check("WAV: video dropped", wavInfo.videoCodec === null, `got ${wavInfo.videoCodec}`);
+		check(
+			"WAV: audio is PCM",
+			wavInfo.audioCodec === "pcm_s16le",
+			`got ${wavInfo.audioCodec}`,
 		);
 	} finally {
 		await rm(workDir, { recursive: true, force: true });
