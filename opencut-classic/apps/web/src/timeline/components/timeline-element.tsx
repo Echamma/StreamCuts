@@ -70,6 +70,7 @@ import {
 } from "@/wasm";
 import { requestSceneDetect } from "@/services/scene-detect/api";
 import { requestLoudness } from "@/services/loudness/api";
+import { buildMediaInfoRows } from "@/media/media-info";
 import { sourceCutsToClipMarkerTicks } from "@/timeline/scene-cuts";
 import {
 	getActionDefinition,
@@ -536,6 +537,29 @@ export function TimelineElement({
 		}
 	};
 
+	const handleMediaInfo = ({ event }: { event: React.MouseEvent }) => {
+		event.stopPropagation();
+		const mediaId =
+			element.type === "video" || element.type === "image"
+				? element.mediaId
+				: element.type === "audio" && element.sourceType === "upload"
+					? element.mediaId
+					: null;
+		if (mediaId === null) {
+			return;
+		}
+		const asset = mediaAssets.find((item) => item.id === mediaId);
+		if (!asset) {
+			toast.warning("No source media for this clip.");
+			return;
+		}
+		toast.info(asset.name, {
+			description: buildMediaInfoRows(asset)
+				.map((row) => `${row.label}: ${row.value}`)
+				.join(" · "),
+		});
+	};
+
 	const isMuted = canElementHaveAudio(element) && isElementMuted({ element });
 	const canToggleCurrentSourceAudio =
 		selectedElements.length === 1 &&
@@ -786,6 +810,18 @@ export function TimelineElement({
 										}
 									>
 										Measure loudness
+									</ContextMenuItem>
+								)}
+								{(element.type === "video" ||
+									(element.type === "audio" &&
+										element.sourceType === "upload")) && (
+									<ContextMenuItem
+										icon={<HugeiconsIcon icon={Search01Icon} />}
+										onClick={(event: React.MouseEvent) =>
+											handleMediaInfo({ event })
+										}
+									>
+										Media info
 									</ContextMenuItem>
 								)}
 								{adjacentVideoElements ? (
