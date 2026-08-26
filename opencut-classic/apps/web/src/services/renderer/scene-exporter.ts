@@ -106,6 +106,30 @@ export class SceneExporter extends EventEmitter<SceneExporterEvents> {
 		this.isCancelled = true;
 	}
 
+	/**
+	 * Block until the GPU has finished drawing the current frame into the output
+	 * canvas, so it isn't snapshotted mid-flight.
+	 *
+	 * `wasmCompositor.render()` submits GPU work synchronously but exposes no
+	 * completion signal, so the export loop — which renders and captures
+	 * back-to-back with no presentation cycle — can grab a frame the GPU hasn't
+	 * finished yet. That surfaces as a *random* duplicated/torn frame in the
+	 * exported video (preview is unaffected: the browser presents each frame on
+	 * its own refresh). Snapshotting the canvas to an `ImageBitmap` forces the
+	 * browser to flush that pending work; we discard the bitmap and let the
+	 * encoder capture the now-settled canvas. Export-only, so preview keeps its
+	 * real-time path. If the snapshot ever fails we fall through unguarded —
+	 * exactly the previous behaviour, never worse.
+	 */
+	private async waitForGpuFrame(canvas: HTMLCanvasElement): Promise<void> {
+		try {
+			const bitmap = await createImageBitmap(canvas);
+			bitmap.close();
+		} catch {
+			// Best-effort barrier; never block the export on a failed snapshot.
+		}
+	}
+
 	async export({
 		rootNode,
 	}: {
@@ -143,7 +167,8 @@ export class SceneExporter extends EventEmitter<SceneExporterEvents> {
 			fps: fpsFloat,
 			quality: this.quality,
 		});
-		const videoSource = new CanvasSource(this.renderer.getOutputCanvas(), {
+		const outputCanvas = this.renderer.getOutputCanvas();
+		const videoSource = new CanvasSource(outputCanvas, {
 			codec: videoCodec,
 			bitrate: videoBitrate,
 			bitrateMode: "variable",
@@ -223,6 +248,9 @@ export class SceneExporter extends EventEmitter<SceneExporterEvents> {
 			// the canvas is safe to overwrite as soon as add() has been called.
 			await prevAddPromise;
 			await this.renderer.render({ node: rootNode, time: timeTicks });
+			// Make sure the GPU has finished this frame before it's captured —
+			// otherwise the encoder can snapshot it mid-draw (random jitter).
+			await this.waitForGpuFrame(outputCanvas);
 			prevAddPromise = videoSource.add(timeSeconds, 1 / fpsFloat);
 
 			this.emit("progress", i / frameCount);
