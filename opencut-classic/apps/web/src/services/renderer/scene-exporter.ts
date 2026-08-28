@@ -107,27 +107,25 @@ export class SceneExporter extends EventEmitter<SceneExporterEvents> {
 	}
 
 	/**
-	 * Block until the GPU has finished drawing the current frame into the output
-	 * canvas, so it isn't snapshotted mid-flight.
+	 * Copy the freshly-composited GPU frame onto the 2D capture surface the
+	 * encoder reads from.
 	 *
 	 * `wasmCompositor.render()` submits GPU work synchronously but exposes no
-	 * completion signal, so the export loop — which renders and captures
-	 * back-to-back with no presentation cycle — can grab a frame the GPU hasn't
-	 * finished yet. That surfaces as a *random* duplicated/torn frame in the
-	 * exported video (preview is unaffected: the browser presents each frame on
-	 * its own refresh). Snapshotting the canvas to an `ImageBitmap` forces the
-	 * browser to flush that pending work; we discard the bitmap and let the
-	 * encoder capture the now-settled canvas. Export-only, so preview keeps its
-	 * real-time path. If the snapshot ever fails we fall through unguarded —
-	 * exactly the previous behaviour, never worse.
+	 * completion signal. Capturing the WebGPU canvas *directly* therefore races
+	 * the GPU: the export loop renders and captures back-to-back with no
+	 * presentation cycle, so some frames get snapshotted mid-draw and surface as
+	 * a random duplicated/torn frame. (Preview never hits this — it already
+	 * draws through a 2D canvas, and the browser presents each frame on its own
+	 * refresh. That asymmetry is exactly why the artefact was export-only.)
+	 *
+	 * Drawing through a 2D context resolves the pending GPU work as part of the
+	 * draw and leaves the encoder reading a stable, already-settled surface —
+	 * the same approach preview takes, and cheap enough to run every frame (no
+	 * per-frame allocation, unlike snapshotting to an `ImageBitmap`).
 	 */
-	private async waitForGpuFrame(canvas: HTMLCanvasElement): Promise<void> {
-		try {
-			const bitmap = await createImageBitmap(canvas);
-			bitmap.close();
-		} catch {
-			// Best-effort barrier; never block the export on a failed snapshot.
-		}
+	private captureCompositedFrame(compositorCanvas: HTMLCanvasElement): void {
+		const { context, width, height } = this.renderer;
+		context.drawImage(compositorCanvas, 0, 0, width, height);
 	}
 
 	async export({
@@ -167,8 +165,10 @@ export class SceneExporter extends EventEmitter<SceneExporterEvents> {
 			fps: fpsFloat,
 			quality: this.quality,
 		});
-		const outputCanvas = this.renderer.getOutputCanvas();
-		const videoSource = new CanvasSource(outputCanvas, {
+		// Encode from the 2D capture surface rather than the live WebGPU canvas —
+		// see `captureCompositedFrame` for why that ordering matters.
+		const compositorCanvas = this.renderer.getOutputCanvas();
+		const videoSource = new CanvasSource(this.renderer.canvas, {
 			codec: videoCodec,
 			bitrate: videoBitrate,
 			bitrateMode: "variable",
@@ -248,9 +248,9 @@ export class SceneExporter extends EventEmitter<SceneExporterEvents> {
 			// the canvas is safe to overwrite as soon as add() has been called.
 			await prevAddPromise;
 			await this.renderer.render({ node: rootNode, time: timeTicks });
-			// Make sure the GPU has finished this frame before it's captured —
-			// otherwise the encoder can snapshot it mid-draw (random jitter).
-			await this.waitForGpuFrame(outputCanvas);
+			// Settle the composited frame onto the capture surface before the
+			// encoder reads it, so it can never snapshot a half-drawn GPU frame.
+			this.captureCompositedFrame(compositorCanvas);
 			prevAddPromise = videoSource.add(timeSeconds, 1 / fpsFloat);
 
 			this.emit("progress", i / frameCount);
