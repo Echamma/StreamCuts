@@ -108,7 +108,7 @@ cp .env.example .env.local     # fill in only what you need (see below)
 bun run dev                    # http://localhost:3000
 ```
 
-The editor is fully usable with an empty/default `.env.local` — the keys in `.env.example` (Gemini, database, auth, etc.) are only needed for the optional AI, accounts, and cloud features.
+**Don't skip the `.env.local` copy** — the app validates its environment at startup and will fail to boot if the required keys are missing. The placeholder values in `.env.example` are enough to run the editor (the app treats them as "disabled" for those services); you only need to fill in *real* values for the optional AI (Gemini), accounts/database, and cloud features.
 
 To reach the backend features (transcode, scene detection, loudness), point the app at it:
 
