@@ -50,10 +50,19 @@ export class CanvasRenderer {
 		this.context = surface.context;
 	}
 
-	async render({ node, time }: { node: AnyBaseNode; time: number }) {
+	async render({
+		node,
+		time,
+		exact = false,
+	}: {
+		node: AnyBaseNode;
+		time: number;
+		/** Demand the exact source frame for `time`; see {@link resolveRenderTree}. */
+		exact?: boolean;
+	}) {
 		await measureSpanAsync({
 			name: "resolve",
-			fn: () => resolveRenderTree({ node, renderer: this, time }),
+			fn: () => resolveRenderTree({ node, renderer: this, time, exact }),
 		});
 		const { frame, textures } = await measureSpanAsync({
 			name: "buildFrame",

@@ -59,22 +59,34 @@ import type {
 type ResolveContext = {
 	renderer: CanvasRenderer;
 	time: number;
+	/** See {@link resolveRenderTree}'s `exact`. */
+	exact: boolean;
 };
 
 export async function resolveRenderTree({
 	node,
 	renderer,
 	time,
+	exact = false,
 }: {
 	node: AnyBaseNode;
 	renderer: CanvasRenderer;
 	time: number;
+	/**
+	 * Require the exact source frame for `time` rather than the most recently
+	 * decoded one. Export sets this: it shares the frame cache with the preview
+	 * that keeps rendering alongside it, and a stale frame there is written into
+	 * the file permanently. Preview leaves it off to stay responsive while
+	 * scrubbing.
+	 */
+	exact?: boolean;
 }): Promise<void> {
 	await resolveNode({
 		node,
 		context: {
 			renderer,
 			time,
+			exact,
 		},
 	});
 }
@@ -259,6 +271,7 @@ async function resolveVisualSourceNode({
 		time: mediaTimeToSeconds({
 			time: roundMediaTime({ time: sourceTimeTicks }),
 		}),
+		exact: context.exact,
 	});
 	if (!frame) {
 		return null;
@@ -506,7 +519,11 @@ async function resolveBlurBackgroundNode({
 		return null;
 	}
 
-	const backdropSource = await resolveBackdropSource({ node, clipTime });
+	const backdropSource = await resolveBackdropSource({
+		node,
+		clipTime,
+		exact: context.exact,
+	});
 	if (!backdropSource) {
 		return null;
 	}
@@ -531,9 +548,11 @@ async function resolveBlurBackgroundNode({
 async function resolveBackdropSource({
 	node,
 	clipTime,
+	exact,
 }: {
 	node: BlurBackgroundNode;
 	clipTime: number;
+	exact: boolean;
 }): Promise<BackdropSource | null> {
 	if (node.params.mediaType === "video") {
 		const sourceTimeTicks =
@@ -548,6 +567,7 @@ async function resolveBackdropSource({
 			time: mediaTimeToSeconds({
 				time: roundMediaTime({ time: sourceTimeTicks }),
 			}),
+			exact,
 		});
 		if (!frame) {
 			return null;

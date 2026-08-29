@@ -247,7 +247,14 @@ export class SceneExporter extends EventEmitter<SceneExporterEvents> {
 			// VideoFrame pixels are captured synchronously inside videoSource.add(), so
 			// the canvas is safe to overwrite as soon as add() has been called.
 			await prevAddPromise;
-			await this.renderer.render({ node: rootNode, time: timeTicks });
+			// `exact`: never accept a stale source frame. The frame cache is shared
+			// with the preview, which keeps rendering while we export and would
+			// otherwise supersede our requests — baking its frame into the file.
+			await this.renderer.render({
+				node: rootNode,
+				time: timeTicks,
+				exact: true,
+			});
 			// Settle the composited frame onto the capture surface before the
 			// encoder reads it, so it can never snapshot a half-drawn GPU frame.
 			this.captureCompositedFrame(compositorCanvas);
