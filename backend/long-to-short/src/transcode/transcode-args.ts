@@ -44,8 +44,18 @@ export interface ProxyArgsOptions {
 /**
  * H.264 editing-proxy transcode (MED-005). Scales to `height` (default 540p),
  * keeping aspect with an even width (`scale=-2:H`), 8-bit 4:2:0, `+faststart`
- * for progressive playback, AAC audio. Small and universally decodable so the
- * editor can prefer it over heavy source media while editing.
+ * for progressive playback, AAC audio.
+ *
+ * Deliberately **all-intra** (`-g 1 -keyint_min 1 -bf 0`), which is what makes
+ * this an editing proxy rather than merely a small file. Camera and screen
+ * captures routinely use multi-second keyframe intervals, so displaying one
+ * arbitrary frame means decoding every frame back to the previous keyframe —
+ * the reason scrubbing such media crawls. With every frame a keyframe, a seek
+ * decodes exactly one frame. This is why the professional proxy formats
+ * (ProRes Proxy, DNxHR LB) are all-intra too.
+ *
+ * Frame rate and duration are untouched — only the picture is scaled — so the
+ * proxy stays frame-aligned with its master and edits conform without drift.
  */
 export function buildProxyArgs({
 	inputPath,
@@ -69,6 +79,14 @@ export function buildProxyArgs({
 		String(crf),
 		"-vf",
 		`scale=-2:${height}`,
+		// Every frame a keyframe and no B-frames → any frame decodes standalone,
+		// so scrubbing never pays for a long GOP.
+		"-g",
+		"1",
+		"-keyint_min",
+		"1",
+		"-bf",
+		"0",
 		"-pix_fmt",
 		"yuv420p",
 		"-c:a",
@@ -227,7 +245,7 @@ export function buildProbeArgs({ filePath }: { filePath: string }): string[] {
 		"-v",
 		"error",
 		"-show_entries",
-		"stream=codec_type,codec_name,width,height:format=duration",
+		"stream=codec_type,codec_name,width,height,r_frame_rate:format=duration",
 		"-of",
 		"json",
 		filePath,
@@ -240,6 +258,13 @@ export interface ProbeSummary {
 	width: number | null;
 	height: number | null;
 	durationSeconds: number | null;
+	/**
+	 * Frame rate exactly as ffprobe reports it (`"60/1"`, `"30000/1001"`), kept
+	 * as the rational string so an editing proxy can be proven to match its
+	 * master frame-for-frame — a proxy that drifts in frame rate silently
+	 * misplaces every edit made against it.
+	 */
+	frameRate: string | null;
 }
 
 interface RawProbeStream {
@@ -247,6 +272,7 @@ interface RawProbeStream {
 	codec_name?: string;
 	width?: number;
 	height?: number;
+	r_frame_rate?: string;
 }
 
 interface RawProbe {
@@ -268,5 +294,6 @@ export function parseProbeJson({ json }: { json: string }): ProbeSummary {
 		width: video?.width ?? null,
 		height: video?.height ?? null,
 		durationSeconds: duration === undefined ? null : Number(duration),
+		frameRate: video?.r_frame_rate ?? null,
 	};
 }

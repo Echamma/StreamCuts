@@ -33,6 +33,22 @@ test("proxy args: H.264, scaled to height, faststart, output last", () => {
 	assert.ok(args.includes("0:a?"));
 });
 
+test("proxy args: all-intra so seeking never decodes a long GOP", () => {
+	const args = buildProxyArgs({ inputPath: "in.mov", outputPath: "out.mp4" });
+	assert.equal(valueAfter(args, "-g"), "1");
+	assert.equal(valueAfter(args, "-keyint_min"), "1");
+	assert.equal(valueAfter(args, "-bf"), "0");
+});
+
+test("proxy args: never re-times — no fps or duration flags", () => {
+	const args = buildProxyArgs({ inputPath: "in.mov", outputPath: "out.mp4" });
+	// A proxy that changes frame rate or length stops being frame-aligned with
+	// its master, silently misplacing every edit made against it.
+	for (const flag of ["-r", "-t", "-ss", "-vsync", "-fpsmax"]) {
+		assert.ok(!args.includes(flag), `proxy must not pass ${flag}`);
+	}
+});
+
 test("proxy args: height and crf are configurable", () => {
 	const args = buildProxyArgs({
 		inputPath: "in.mov",
@@ -140,7 +156,13 @@ test("probe args request codec/dimensions/duration as JSON", () => {
 test("parseProbeJson reduces ffprobe JSON to the summary", () => {
 	const json = JSON.stringify({
 		streams: [
-			{ codec_type: "video", codec_name: "prores", width: 1280, height: 720 },
+			{
+				codec_type: "video",
+				codec_name: "prores",
+				width: 1280,
+				height: 720,
+				r_frame_rate: "30/1",
+			},
 			{ codec_type: "audio", codec_name: "pcm_s16le" },
 		],
 		format: { duration: "2.000000" },
@@ -151,6 +173,7 @@ test("parseProbeJson reduces ffprobe JSON to the summary", () => {
 		width: 1280,
 		height: 720,
 		durationSeconds: 2,
+		frameRate: "30/1",
 	});
 });
 
