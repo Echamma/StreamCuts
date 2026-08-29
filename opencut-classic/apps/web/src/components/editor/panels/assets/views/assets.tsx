@@ -728,6 +728,45 @@ function MediaItemWithContextMenu({
 		}
 	};
 
+	/**
+	 * Build an editing proxy and attach it to this asset, so preview scrubs the
+	 * lightweight all-intra copy instead of the master. Export is unaffected —
+	 * it always renders from the master.
+	 */
+	const handleGenerateProxy = async () => {
+		if (!projectId) return;
+		const toastId = toast.loading(
+			`Building editing proxy for ${item.name}… this runs once.`,
+		);
+		try {
+			const result = await requestProxy({ file: item.file });
+			const response = await fetch(
+				transcodeOutputUrl({ fileName: result.fileName }),
+			);
+			if (!response.ok) {
+				throw new Error(`Could not download the proxy (${response.status}).`);
+			}
+			const blob = await response.blob();
+			const proxyFile = new File([blob], `${item.name}.proxy.mp4`, {
+				type: "video/mp4",
+			});
+			await editor.media.attachAssetProxy({
+				projectId,
+				assetId: item.id,
+				proxyFile,
+			});
+			toast.success("Editing proxy ready — preview now uses it.", {
+				id: toastId,
+				description: "Exports still render from the original media.",
+			});
+		} catch (error) {
+			toast.error(
+				error instanceof Error ? error.message : "Proxy generation failed.",
+				{ id: toastId },
+			);
+		}
+	};
+
 	const handleCopyToCurrentScene = () => {
 		if (!projectId || !activeSceneId) return;
 		void editor.media.copyAssetToScene({
@@ -783,13 +822,20 @@ function MediaItemWithContextMenu({
 					Edit attributes
 				</ContextMenuItem>
 				{item.type === "video" && (
+					<ContextMenuItem onClick={() => void handleGenerateProxy()}>
+						{item.hasProxy
+							? "Rebuild editing proxy"
+							: "Use editing proxy (smooth playback)"}
+					</ContextMenuItem>
+				)}
+				{item.type === "video" && (
 					<ContextMenuSub>
 						<ContextMenuSubTrigger>Transcode</ContextMenuSubTrigger>
 						<ContextMenuSubContent>
 							<ContextMenuItem
 								onClick={() => void handleTranscode({ kind: "proxy" })}
 							>
-								H.264 proxy (540p)
+								H.264 proxy (540p) — download
 							</ContextMenuItem>
 							<ContextMenuItem
 								onClick={() => void handleTranscode({ kind: "prores" })}

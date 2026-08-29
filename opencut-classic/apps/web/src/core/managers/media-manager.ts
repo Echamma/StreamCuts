@@ -276,6 +276,38 @@ export class MediaManager {
 		}
 	}
 
+	/**
+	 * Attach an all-intra editing proxy to an asset (MED-005). Preview switches
+	 * to it immediately — the scene builder prefers `proxyFile` — while export
+	 * keeps using the master, so this only ever changes how smoothly the clip
+	 * scrubs, never the rendered result.
+	 */
+	async attachAssetProxy({
+		projectId,
+		assetId,
+		proxyFile,
+	}: {
+		projectId: string;
+		assetId: string;
+		proxyFile: File;
+	}): Promise<void> {
+		const asset = this.assets.find((a) => a.id === assetId);
+		if (!asset) return;
+
+		const updated = { ...asset, proxyFile, hasProxy: true };
+		this.assets = this.assets.map((a) => (a.id === assetId ? updated : a));
+		this.notify();
+
+		try {
+			await storageService.saveMediaAsset({ projectId, mediaAsset: updated });
+		} catch (error) {
+			console.error("Failed to persist asset proxy:", error);
+			this.assets = this.assets.map((a) => (a.id === assetId ? asset : a));
+			this.notify();
+			throw error;
+		}
+	}
+
 	isLoadingMedia(): boolean {
 		return this.isLoading;
 	}
