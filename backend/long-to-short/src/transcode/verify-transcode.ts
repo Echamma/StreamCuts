@@ -37,6 +37,31 @@ function near(actual: number | null, expected: number, tolerance: number): boole
 	return actual !== null && Math.abs(actual - expected) <= tolerance;
 }
 
+/** True when every video frame is an I-frame, i.e. any frame decodes standalone. */
+async function isAllIntra({ filePath }: { filePath: string }): Promise<boolean> {
+	const { stdout } = await execFileAsync(
+		FFPROBE,
+		[
+			"-v",
+			"error",
+			"-select_streams",
+			"v:0",
+			"-show_entries",
+			"frame=pict_type",
+			"-of",
+			"csv=p=0",
+			filePath,
+		],
+		{ maxBuffer: 1024 * 1024 * 64 },
+	);
+	// ffprobe's csv output can leave a trailing comma, so split on commas too.
+	const types = stdout
+		.split(/[\r\n,]+/)
+		.map((token) => token.trim())
+		.filter((token) => token !== "");
+	return types.length > 0 && types.every((type) => type === "I");
+}
+
 async function main(): Promise<void> {
 	const workDir = await mkdtemp(join(tmpdir(), "transcode-verify-"));
 	const source = join(workDir, "source.mp4");
@@ -72,7 +97,9 @@ async function main(): Promise<void> {
 			{ maxBuffer: 1024 * 1024 * 64 },
 		);
 
-		console.log("\nMED-005 — 540p H.264 proxy:");
+		const sourceInfo = await probeMedia({ ffprobePath: FFPROBE, filePath: source });
+
+		console.log("\nMED-005 — 540p all-intra H.264 editing proxy:");
 		await transcodeToProxy({
 			ffmpegPath: FFMPEG,
 			options: { inputPath: source, outputPath: proxy, height: 540 },
@@ -87,6 +114,28 @@ async function main(): Promise<void> {
 		);
 		check("audio carried (aac)", proxyInfo.audioCodec === "aac", `got ${proxyInfo.audioCodec}`);
 		check("duration ~2s", near(proxyInfo.durationSeconds, 2, 0.2), `got ${proxyInfo.durationSeconds}`);
+
+		// A proxy is only usable for editing if every frame decodes standalone —
+		// otherwise scrubbing still pays for the source's keyframe interval.
+		check(
+			"every frame is intra (instant seeking)",
+			await isAllIntra({ filePath: proxy }),
+			"all frames I",
+		);
+		// ...and only *correct* if it stays frame-aligned with its master, or
+		// every edit made against it lands on the wrong frame of the original.
+		check(
+			"frame rate matches master",
+			proxyInfo.frameRate === sourceInfo.frameRate,
+			`proxy ${proxyInfo.frameRate} vs master ${sourceInfo.frameRate}`,
+		);
+		check(
+			"duration matches master",
+			proxyInfo.durationSeconds !== null &&
+				sourceInfo.durationSeconds !== null &&
+				Math.abs(proxyInfo.durationSeconds - sourceInfo.durationSeconds) <= 0.05,
+			`proxy ${proxyInfo.durationSeconds} vs master ${sourceInfo.durationSeconds}`,
+		);
 
 		console.log("\nDEL-003 — ProRes (standard) master:");
 		await transcodeToProRes({
