@@ -66,6 +66,22 @@ export interface MediaAssetData {
 	source?: MediaAssetSource;
 	/** User-authored tags / notes / rating (MED-003). Additive, no migration. */
 	attributes?: ClipAttributes;
+	/**
+	 * True when an all-intra editing proxy has been generated for this asset
+	 * (MED-005). The proxy file itself lives beside the master in the media
+	 * adapter under {@link mediaProxyStorageKey}; preview reads it instead of
+	 * the master, while export always uses the master. Additive, no migration —
+	 * absent means "no proxy", which is how every existing asset behaves.
+	 */
+	hasProxy?: boolean;
+}
+
+/**
+ * Storage key for an asset's editing proxy, kept beside the master in the same
+ * media adapter so it is removed with the project like any other media blob.
+ */
+export function mediaProxyStorageKey(mediaAssetId: string): string {
+	return `${mediaAssetId}:proxy`;
 }
 
 export type SerializedScene = Omit<TScene, "createdAt" | "updatedAt"> & {

@@ -10,6 +10,7 @@ import {
 	isStorageQuotaExceededError,
 	readStorageQuotaStatus,
 } from "./quota";
+import { mediaProxyStorageKey } from "./types";
 import type {
 	MediaAssetData,
 	MediaAssetSource,
@@ -516,6 +517,7 @@ class StorageService {
 			folderId: mediaAsset.folderId,
 			sceneId: mediaAsset.sceneId,
 			attributes: mediaAsset.attributes,
+			hasProxy: mediaAsset.proxyFile !== undefined,
 			source,
 		};
 
@@ -524,6 +526,14 @@ class StorageService {
 				await mediaAssetsAdapter.set({
 					key: mediaAsset.id,
 					value: mediaAsset.file,
+				});
+			}
+			// The proxy is stored beside the master under its own key, so it is
+			// cleaned up with the project and never confused with the original.
+			if (mediaAsset.proxyFile) {
+				await mediaAssetsAdapter.set({
+					key: mediaProxyStorageKey(mediaAsset.id),
+					value: mediaAsset.proxyFile,
 				});
 			}
 			await mediaMetadataAdapter.set({
@@ -566,6 +576,10 @@ class StorageService {
 
 		if (!metadata) return null;
 
+		const proxyFile = metadata.hasProxy
+			? ((await mediaAssetsAdapter.get(mediaProxyStorageKey(id))) ?? undefined)
+			: undefined;
+
 		const source = normalizeMediaAssetSource({ source: metadata.source });
 		const resolvedFile =
 			source.kind === "file"
@@ -597,6 +611,8 @@ class StorageService {
 			folderId: metadata.folderId,
 			sceneId: metadata.sceneId,
 			attributes: metadata.attributes,
+			hasProxy: metadata.hasProxy,
+			proxyFile,
 			source,
 		};
 	}

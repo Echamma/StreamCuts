@@ -2,6 +2,7 @@ import type { SceneTracks, TimelineTrack } from "@/timeline";
 import { getMainVideoTrack } from "@/timeline/scene-tracks-view";
 import type { MediaAsset } from "@/media/types";
 import { getAssetSourceStartTime } from "@/media/asset-source";
+import { mediaProxyStorageKey } from "@/services/storage/types";
 import { RootNode } from "./nodes/root-node";
 import { VideoNode } from "./nodes/video-node";
 import { ImageNode } from "./nodes/image-node";
@@ -311,10 +312,16 @@ function buildVideoLikeNode({
 	};
 
 	if (element.type === "video" && mediaAsset.type === "video") {
+		// Preview decodes the editing proxy when there is one: masters are
+		// routinely long-GOP, high-bitrate captures that no browser can scrub,
+		// whereas the proxy is all-intra so any frame decodes standalone. Export
+		// deliberately falls through to the master, keeping renders full quality.
+		// The proxy gets its own cache id so the two never share a decoder sink.
+		const proxy = isPreview ? mediaAsset.proxyFile : undefined;
 		return new VideoNode({
-			mediaId: mediaAsset.id,
+			mediaId: proxy ? mediaProxyStorageKey(mediaAsset.id) : mediaAsset.id,
 			url: mediaAsset.url,
-			file: mediaAsset.file,
+			file: proxy ?? mediaAsset.file,
 			retime: element.retime,
 			...commonParams,
 		});
