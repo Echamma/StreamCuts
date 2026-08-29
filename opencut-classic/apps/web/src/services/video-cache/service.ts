@@ -111,14 +111,14 @@ export class VideoCache {
 		}
 
 		try {
-			const frame = await this.resolveFrame({ sinkData, time });
+			const frame = await this.resolveFrame({ sinkData, time, exact });
 			if (!exact || (frame && this.isFrameValid({ frame, time }))) {
 				return frame;
 			}
 			// The pipeline handed back something that doesn't cover `time` (it
 			// races the preview's own requests through this shared cache). Take
 			// the deterministic path and decode from `time` directly.
-			return await this.seekToTime({ sinkData, time });
+			return await this.seekToTime({ sinkData, time, prefetch: false });
 		} catch (error) {
 			console.warn("VideoCache: frame resolve failed:", error);
 			// Never let an exact caller bake a stale frame into an export.
@@ -128,26 +128,44 @@ export class VideoCache {
 		}
 	}
 
+	/**
+	 * `exact` callers (export) consume frames strictly in order, which changes
+	 * the right strategy in two ways:
+	 *
+	 * - **Walk the open decoder instead of re-seeking.** Scrubbing jumps around,
+	 *   so preview caps forward iteration and re-seeks past that cap. Export
+	 *   never jumps, and on long-GOP media every seek re-decodes back to the
+	 *   previous keyframe — up to a few hundred frames. Iterating forward
+	 *   decodes each packet once, which is what the format is good at.
+	 * - **Skip prefetch.** Reading ahead buys nothing for a caller that consumes
+	 *   one frame at a time in order, and it competes for the same iterator.
+	 */
 	private async resolveFrame({
 		sinkData,
 		time,
+		exact = false,
 	}: {
 		sinkData: VideoSinkData;
 		time: number;
+		exact?: boolean;
 	}): Promise<WrappedCanvas | null> {
+		const prefetch = () => {
+			if (!exact && !sinkData.nextFrame && !sinkData.prefetching) {
+				this.startPrefetch({ sinkData });
+			}
+		};
+
 		if (sinkData.nextFrame && sinkData.nextFrame.timestamp <= time) {
 			sinkData.currentFrame = sinkData.nextFrame;
 			sinkData.nextFrame = null;
-			this.startPrefetch({ sinkData });
+			prefetch();
 		}
 
 		if (
 			sinkData.currentFrame &&
 			this.isFrameValid({ frame: sinkData.currentFrame, time })
 		) {
-			if (!sinkData.nextFrame && !sinkData.prefetching) {
-				this.startPrefetch({ sinkData });
-			}
+			prefetch();
 			return sinkData.currentFrame;
 		}
 
@@ -155,21 +173,17 @@ export class VideoCache {
 			sinkData.iterator &&
 			sinkData.currentFrame &&
 			time >= sinkData.lastTime &&
-			time < sinkData.lastTime + 2.0
+			(exact || time < sinkData.lastTime + 2.0)
 		) {
 			const frame = await this.iterateToTime({ sinkData, targetTime: time });
 			if (frame) {
-				if (!sinkData.nextFrame && !sinkData.prefetching) {
-					this.startPrefetch({ sinkData });
-				}
+				prefetch();
 				return frame;
 			}
 		}
 
-		const frame = await this.seekToTime({ sinkData, time });
-		if (frame && !sinkData.nextFrame && !sinkData.prefetching) {
-			this.startPrefetch({ sinkData });
-		}
+		const frame = await this.seekToTime({ sinkData, time, prefetch: !exact });
+		prefetch();
 		return frame;
 	}
 
@@ -234,9 +248,12 @@ export class VideoCache {
 	private async seekToTime({
 		sinkData,
 		time,
+		prefetch = true,
 	}: {
 		sinkData: VideoSinkData;
 		time: number;
+		/** In-order consumers read ahead themselves; see {@link resolveFrame}. */
+		prefetch?: boolean;
 	}): Promise<WrappedCanvas | null> {
 		try {
 			if (sinkData.prefetching && sinkData.prefetchPromise) {
@@ -256,7 +273,9 @@ export class VideoCache {
 
 			if (frame) {
 				sinkData.currentFrame = frame;
-				this.startPrefetch({ sinkData });
+				if (prefetch) {
+					this.startPrefetch({ sinkData });
+				}
 				return frame;
 			}
 		} catch (error) {
