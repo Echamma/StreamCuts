@@ -60,10 +60,23 @@ export class VideoCache {
 		mediaId,
 		file,
 		time,
+		exact = false,
 	}: {
 		mediaId: string;
 		file: File;
 		time: number;
+		/**
+		 * Demand the frame that actually covers `time`, never a stale stand-in.
+		 *
+		 * Preview deliberately trades accuracy for responsiveness: when a newer
+		 * scrub arrives it abandons the older request and hands back whatever
+		 * frame is currently decoded, because being one frame behind for a
+		 * moment is invisible while dragging. Export cannot accept that — a
+		 * stale frame is written into the file permanently — and export shares
+		 * this cache with the preview that keeps rendering alongside it, so its
+		 * requests are exactly the ones that get superseded.
+		 */
+		exact?: boolean;
 	}): Promise<WrappedCanvas | null> {
 		await this.ensureSink({ mediaId, file });
 
@@ -88,8 +101,9 @@ export class VideoCache {
 			// Previous resolve errored; proceed anyway.
 		}
 
-		// After acquiring the lock, check if we've been superseded.
-		if (sinkData.latestRequestedTime !== time) {
+		// After acquiring the lock, check if we've been superseded.  Exact callers
+		// opt out: they need *their* frame, not whoever asked last.
+		if (!exact && sinkData.latestRequestedTime !== time) {
 			// A newer request arrived while we were waiting.  Return the current
 			// frame as a best-effort result and let the newer caller do the decode.
 			releaseLock();
@@ -97,10 +111,18 @@ export class VideoCache {
 		}
 
 		try {
-			return await this.resolveFrame({ sinkData, time });
+			const frame = await this.resolveFrame({ sinkData, time });
+			if (!exact || (frame && this.isFrameValid({ frame, time }))) {
+				return frame;
+			}
+			// The pipeline handed back something that doesn't cover `time` (it
+			// races the preview's own requests through this shared cache). Take
+			// the deterministic path and decode from `time` directly.
+			return await this.seekToTime({ sinkData, time });
 		} catch (error) {
 			console.warn("VideoCache: frame resolve failed:", error);
-			return sinkData.currentFrame ?? null;
+			// Never let an exact caller bake a stale frame into an export.
+			return exact ? null : (sinkData.currentFrame ?? null);
 		} finally {
 			releaseLock();
 		}
