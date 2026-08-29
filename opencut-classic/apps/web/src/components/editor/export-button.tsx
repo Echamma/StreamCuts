@@ -170,10 +170,18 @@ export function ExportButton() {
 	const activeProject = useEditor((e) => e.project.getActiveOrNull());
 	const hasProject = !!activeProject;
 
+	const { isExporting, progress } = useEditor((e) => e.project.getExportState());
+
 	const handlePopoverOpenChange = ({ open }: { open: boolean }) => {
 		if (!open) {
-			editor.project.cancelExport();
-			editor.project.clearExportState();
+			// Closing this popover must not kill a running export. It closes on any
+			// outside click or Escape, so cancelling here meant that clicking
+			// anywhere in the app threw away the render. Leave the job running and
+			// let the editor stay usable; only the explicit Cancel button stops it.
+			// Clearing the state is only safe once nothing is in flight.
+			if (!editor.project.getExportState().isExporting) {
+				editor.project.clearExportState();
+			}
 		}
 		setIsExportPopoverOpen(open);
 	};
@@ -193,7 +201,11 @@ export function ExportButton() {
 					disabled={!hasProject}
 				>
 					<HugeiconsIcon icon={TransitionTopIcon} className="size-3.5" />
-					Export
+					{/* A background export is otherwise invisible once the popover is
+					    closed, so the trigger doubles as its progress readout. */}
+					{isExporting
+						? `Exporting ${Math.round(progress * 100)}%`
+						: "Export"}
 				</Button>
 			</PopoverTrigger>
 			{hasProject && <ExportPopover onOpenChange={setIsExportPopoverOpen} />}
