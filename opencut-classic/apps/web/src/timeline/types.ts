@@ -154,6 +154,16 @@ interface BaseTimelineElement {
 	 * there is no migration and unlinked clips behave exactly as before. Link
 	 * expansion lives in {@link "@/timeline/linked-elements"}. */
 	linkId?: string;
+	/**
+	 * Groups this element with others the user grouped explicitly (EDIT-006):
+	 * elements sharing a `groupId` are selected, moved and deleted as one unit.
+	 * Unlike {@link linkId} — which the editor creates for an A/V pair — a group
+	 * is arbitrary and user-authored, and the two compose: a group containing a
+	 * linked clip carries that clip's partner too. Optional/additive, so absent
+	 * means ungrouped and there is no migration. Expansion lives in
+	 * {@link "@/timeline/element-groups"}.
+	 */
+	groupId?: string;
 }
 
 export interface VideoElement extends BaseTimelineElement {
