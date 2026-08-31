@@ -617,6 +617,16 @@ export function TimelineElement({
 			<ContextMenu>
 				<ContextMenuTrigger asChild>
 					<div
+						// Stable hooks for end-to-end tests (see `e2e/`). Attributes only:
+						// they never affect rendering, and they spare the suite from
+						// selecting clips by pixel coordinates, which silently rot as the
+						// timeline layout changes.
+						data-testid="timeline-clip"
+						data-element-id={element.id}
+						data-element-type={element.type}
+						data-selected={isSelected ? "true" : "false"}
+						data-grouped={element.groupId === undefined ? "false" : "true"}
+						data-linked={element.linkId === undefined ? "false" : "true"}
 						className="absolute top-0 select-none"
 						style={{
 							left: `${elementLeft}px`,

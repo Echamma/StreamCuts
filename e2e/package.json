@@ -1,0 +1,14 @@
+{
+  "name": "streamcuts-e2e",
+  "private": true,
+  "description": "End-to-end tests for the StreamCuts editor. Standalone npm package: it is deliberately outside opencut-classic's bun workspace so installing it never rewrites that lockfile.",
+  "scripts": {
+    "test": "playwright test",
+    "test:ui": "playwright test --ui",
+    "test:debug": "playwright test --debug",
+    "report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0"
+  }
+}
