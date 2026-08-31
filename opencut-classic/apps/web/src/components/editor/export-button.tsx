@@ -196,6 +196,10 @@ export function ExportButton() {
 					type="button"
 					variant="primary"
 					size="sm"
+					// Test hooks (see `e2e/`): the trigger and the confirm button both
+					// read "Export", so a label alone cannot tell them apart.
+					data-testid="export-trigger"
+					data-exporting={isExporting ? "true" : "false"}
 					className="gap-1.5"
 					onClick={hasProject ? () => setIsExportPopoverOpen(true) : undefined}
 					disabled={!hasProject}
@@ -711,6 +715,7 @@ function ExportPopover({
 									<Button
 										onClick={handleExport}
 										disabled={isQueueRunning}
+										data-testid="export-start"
 										className="flex-1 gap-2"
 									>
 										<Download className="size-4" />
