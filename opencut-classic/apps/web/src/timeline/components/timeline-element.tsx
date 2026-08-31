@@ -705,6 +705,30 @@ export function TimelineElement({
 							Link clips
 						</ContextMenuItem>
 					)}
+					{selectedElements.length >= 2 && (
+						<ContextMenuItem
+							icon={<HugeiconsIcon icon={Link01Icon} />}
+							onClick={(event: React.MouseEvent) => {
+								event.stopPropagation();
+								editor.timeline.groupElements({ elements: selectedElements });
+							}}
+						>
+							Group clips
+						</ContextMenuItem>
+					)}
+					{element.groupId !== undefined && (
+						<ContextMenuItem
+							icon={<HugeiconsIcon icon={Unlink01Icon} />}
+							onClick={(event: React.MouseEvent) => {
+								event.stopPropagation();
+								editor.timeline.ungroupElements({
+									elements: [{ trackId: track.id, elementId: element.id }],
+								});
+							}}
+						>
+							Ungroup clips
+						</ContextMenuItem>
+					)}
 					{element.linkId !== undefined && (
 						<ContextMenuItem
 							icon={<HugeiconsIcon icon={Unlink01Icon} />}

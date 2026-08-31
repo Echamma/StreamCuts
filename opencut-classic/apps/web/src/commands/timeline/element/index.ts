@@ -10,6 +10,10 @@ export {
 	LinkElementsCommand,
 	UnlinkElementsCommand,
 } from "./link-elements";
+export {
+	GroupElementsCommand,
+	UngroupElementsCommand,
+} from "./group-elements";
 
 export * from "./keyframes";
 export * from "./effects";

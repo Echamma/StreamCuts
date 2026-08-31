@@ -30,9 +30,9 @@ import { TimelineDragSource } from "@/timeline/drag-source";
 import { getOrderedTimelineTracks } from "@/timeline/scene-tracks-view";
 import { filterUnlockedRefs } from "@/timeline/track-lock";
 import {
-	expandRefsWithLinked,
-	propagateLinkedMoves,
-} from "@/timeline/linked-elements";
+	expandRefsWithGroups,
+	propagateGroupMoves,
+} from "@/timeline/element-groups";
 import {
 	findTrackInSceneTracks,
 	updateTrackInSceneTracks,
@@ -93,6 +93,8 @@ import {
 	ToggleSourceAudioSeparationCommand,
 	LinkElementsCommand,
 	UnlinkElementsCommand,
+	GroupElementsCommand,
+	UngroupElementsCommand,
 } from "@/commands/timeline";
 import type { InsertElementParams } from "@/commands/timeline/element/insert-element";
 import type {
@@ -526,9 +528,11 @@ export class TimelineManager {
 			return;
 		}
 
-		// Linked clips (EDIT-025) ride along by the same time delta. No-op when
-		// nothing being moved is linked, so unlinked drags are unaffected.
-		const propagatedMoves = propagateLinkedMoves({
+		// Grouped (EDIT-006) and linked (EDIT-025) clips ride along by the same
+		// time delta. propagateGroupMoves closes over BOTH relations, so it
+		// subsumes the link-only propagation it replaces. No-op when nothing
+		// being moved is grouped or linked, so ordinary drags are unaffected.
+		const propagatedMoves = propagateGroupMoves({
 			tracks: this.editor.scenes.getActiveScene().tracks,
 			moves,
 		});
@@ -631,10 +635,11 @@ export class TimelineManager {
 		elements: { trackId: string; elementId: string }[];
 	}): void {
 		const tracks = this.editor.scenes.getActiveScene().tracks;
-		// Linked clips (EDIT-025) delete as a group; then locked tracks (EDIT-024)
-		// are honoured, so a linked sibling on a locked track is spared.
-		const withLinked = expandRefsWithLinked({ tracks, refs: elements });
-		const deletable = filterUnlockedRefs({ tracks, refs: withLinked });
+		// Grouped (EDIT-006) and linked (EDIT-025) clips delete as one unit —
+		// expandRefsWithGroups closes over both relations; then locked tracks
+		// (EDIT-024) are honoured, so a relative on a locked track is spared.
+		const withRelatives = expandRefsWithGroups({ tracks, refs: elements });
+		const deletable = filterUnlockedRefs({ tracks, refs: withRelatives });
 		if (deletable.length === 0) return;
 		const command = new DeleteElementsCommand({ elements: deletable });
 		this.editor.command.execute({ command });
@@ -642,6 +647,18 @@ export class TimelineManager {
 
 	linkElements({ elements }: { elements: ElementRef[] }): void {
 		const command = new LinkElementsCommand({ elements });
+		this.editor.command.execute({ command });
+	}
+
+	/** Group the given elements so they select/move/delete together (EDIT-006). */
+	groupElements({ elements }: { elements: ElementRef[] }): void {
+		const command = new GroupElementsCommand({ elements });
+		this.editor.command.execute({ command });
+	}
+
+	/** Dissolve the group the given elements belong to (EDIT-006). */
+	ungroupElements({ elements }: { elements: ElementRef[] }): void {
+		const command = new UngroupElementsCommand({ elements });
 		this.editor.command.execute({ command });
 	}
 
