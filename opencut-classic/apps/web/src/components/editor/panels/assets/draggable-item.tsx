@@ -211,6 +211,11 @@ function PlusButton({
 	const button = (
 		<Button
 			size="icon"
+			// Stable hook for end-to-end tests (see `e2e/`): this is how every asset
+			// panel adds an item to the timeline, and it is otherwise only findable
+			// by icon, which no selector can address reliably.
+			data-testid="add-to-timeline"
+			aria-label="Add to timeline"
 			className={cn(
 				"bg-background hover:bg-background text-foreground absolute right-2 bottom-2 size-5",
 				className,
