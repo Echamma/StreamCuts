@@ -7,6 +7,7 @@ import type {
 	SelectedMaskPointSelection,
 } from "@/selection/editor-selection";
 import type { ElementRef } from "@/timeline/types";
+import { expandRefsWithGroups } from "@/timeline/element-groups";
 
 export class SelectionManager {
 	private selectedElements: ElementRef[] = [];
@@ -15,9 +16,7 @@ export class SelectionManager {
 	private selectedMaskPoints: SelectedMaskPointSelection | null = null;
 	private listeners = new Set<() => void>();
 
-	constructor(editor: EditorCore) {
-		void editor;
-	}
+	constructor(private readonly editor: EditorCore) {}
 
 	getSelectedElements(): ElementRef[] {
 		return this.selectedElements;
@@ -63,7 +62,19 @@ export class SelectionManager {
 	}
 
 	setSelectedElements({ elements }: { elements: ElementRef[] }): void {
-		this.selectedElements = elements;
+		// Selecting one member of a group selects the whole group (EDIT-006), so
+		// the next drag or delete acts on all of it. This is the single choke
+		// point for element selection, so clicking, box-select and programmatic
+		// selection all behave consistently. Expansion closes over links too, and
+		// is an identity when nothing selected is grouped or linked — so an
+		// editor with no groups selects exactly as before.
+		this.selectedElements =
+			elements.length === 0
+				? elements
+				: expandRefsWithGroups({
+						tracks: this.editor.scenes.getActiveScene().tracks,
+						refs: elements,
+					});
 		this.selectedKeyframes = [];
 		this.keyframeSelectionAnchor = null;
 		this.selectedMaskPoints = null;
