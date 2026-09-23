@@ -144,10 +144,8 @@ async function collectNode({
 		const textureId = `${path}:blur-background`;
 		const { width, height } = renderer;
 		const { backdropSource, passes } = node.resolved;
-		// Backdrop pixels come from a decoded video/image frame whose identity
-		// already changes when it changes. Hashing the source reference is
-		// enough to let us skip redraws on frozen frames.
-		const contentHash = `blur:${identityKey(backdropSource.source)}:${backdropSource.width}x${backdropSource.height}:${width}x${height}`;
+		// Include frame time: a canvas reference alone does not identify pixels.
+		const contentHash = `blur:${identityKey(backdropSource)}:${backdropSource.width}x${backdropSource.height}:${width}x${height}`;
 		textures.set(textureId, {
 			kind: "rendered",
 			id: textureId,
@@ -308,6 +306,8 @@ async function collectVisualSourceNode({
 		kind: "external",
 		id: textureId,
 		source,
+		sourceTimestamp:
+			node instanceof GraphicNode ? undefined : node.resolved.sourceTimestamp,
 		width: sourceWidth,
 		height: sourceHeight,
 	});
@@ -424,11 +424,12 @@ function renderTransitionNodeToContext({
 		ctx.drawImage(fromCanvas, 0, 0, renderer.width, renderer.height);
 		return;
 	}
+	if (!fromCanvas || !toCanvas) return;
 
 	resolved.definition.render({
 		context: ctx,
-		from: fromCanvas as CanvasImageSource,
-		to: toCanvas as CanvasImageSource,
+		from: fromCanvas,
+		to: toCanvas,
 		width: renderer.width,
 		height: renderer.height,
 		progress: resolved.progress,
@@ -730,21 +731,27 @@ function transformHash(transform: QuadTransformDescriptor): string {
 // hash string length bounded and avoids holding sources alive.
 const identityKeys = new WeakMap<object, number>();
 let nextIdentity = 1;
-function identityKey(source: CanvasImageSource): string {
+function identityKey({
+	source,
+	sourceTimestamp,
+}: {
+	source: CanvasImageSource;
+	sourceTimestamp?: number;
+}): string {
 	if (typeof source === "object" && source !== null) {
 		let key = identityKeys.get(source);
 		if (key === undefined) {
 			key = nextIdentity++;
 			identityKeys.set(source, key);
 		}
-		return `@${key}`;
+		return `@${key}:${sourceTimestamp ?? "static"}`;
 	}
 	return "@?";
 }
 
 function hashTransitionSource(resolved: ResolvedTransitionNodeState): string {
 	return [
-		resolved.outgoing ? identityKey(resolved.outgoing.source) : "none",
-		resolved.incoming ? identityKey(resolved.incoming.source) : "none",
+		resolved.outgoing ? identityKey(resolved.outgoing) : "none",
+		resolved.incoming ? identityKey(resolved.incoming) : "none",
 	].join(":");
 }

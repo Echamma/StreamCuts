@@ -17,6 +17,8 @@ export type BlurBackgroundNodeParams = {
 
 export type BackdropSource = {
 	source: CanvasImageSource;
+	/** Decoded frame time in seconds; absent for static sources. */
+	sourceTimestamp?: number;
 	width: number;
 	height: number;
 };

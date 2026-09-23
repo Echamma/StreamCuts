@@ -290,6 +290,7 @@ async function resolveVisualSourceNode({
 	return {
 		...visualState,
 		source: frame.canvas,
+		sourceTimestamp: frame.timestamp,
 		sourceWidth: frame.canvas.width,
 		sourceHeight: frame.canvas.height,
 	};
@@ -575,6 +576,7 @@ async function resolveBackdropSource({
 
 		return {
 			source: frame.canvas,
+			sourceTimestamp: frame.timestamp,
 			width: frame.canvas.width,
 			height: frame.canvas.height,
 		};
