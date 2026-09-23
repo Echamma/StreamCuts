@@ -209,6 +209,11 @@ export function MediaView() {
 		}
 	};
 
+	const handleGenerateAllProxies = () => {
+		const count = editor.assetPrep.generateProxiesForAllMedia();
+		if (count === 0) toast.info("All videos already have editing proxies.");
+	};
+
 	const handleStartCreateFolder = () => {
 		setNewFolderName("New Folder");
 		setIsCreatingFolder(true);
@@ -318,7 +323,9 @@ export function MediaView() {
 						sortOrder={mediaSortOrder}
 						onSort={handleSort}
 						onImport={openFilePicker}
-						onNewFolder={currentFolderId === null ? handleStartCreateFolder : undefined}
+						onNewFolder={
+							currentFolderId === null ? handleStartCreateFolder : undefined
+						}
 						showAllScenes={showAllScenes}
 						onToggleAllScenes={() => setShowAllScenes((v) => !v)}
 					/>
@@ -328,6 +335,19 @@ export function MediaView() {
 				{...dragProps}
 			>
 				<div className="mb-3 flex flex-col gap-2">
+					{mediaFiles.some(
+						(asset) => asset.type === "video" && !asset.ephemeral,
+					) && (
+						<Button
+							data-testid="generate-all-proxies"
+							size="sm"
+							variant="outline"
+							className="w-full"
+							onClick={handleGenerateAllProxies}
+						>
+							Generate proxies for all media
+						</Button>
+					)}
 					<div className="flex items-center gap-2">
 						<div className="relative flex-1">
 							<HugeiconsIcon
@@ -545,7 +565,10 @@ function FolderList({
 							: "rounded-md border bg-accent/30 px-3 py-2",
 					)}
 				>
-					<HugeiconsIcon icon={Folder01Icon} className="size-5 shrink-0 text-muted-foreground" />
+					<HugeiconsIcon
+						icon={Folder01Icon}
+						className="size-5 shrink-0 text-muted-foreground"
+					/>
 					<Input
 						ref={newFolderInputRef}
 						value={newFolderName}
@@ -556,7 +579,6 @@ function FolderList({
 							if (e.key === "Escape") onCancelCreate();
 						}}
 						className="h-6 px-1 py-0 text-xs"
-						autoFocus
 					/>
 				</div>
 			) : null}
@@ -686,7 +708,13 @@ function MediaItemWithContextMenu({
 	folders: MediaFolder[];
 	currentFolderId: string | null;
 	children: React.ReactNode;
-	onRemove: ({ event, ids }: { event: React.MouseEvent; ids: string[] }) => void;
+	onRemove: ({
+		event,
+		ids,
+	}: {
+		event: React.MouseEvent;
+		ids: string[];
+	}) => void;
 	onMoveToFolder: (assetId: string, folderId: string | null) => void;
 	activeSceneId: string | null;
 	projectId: string;
@@ -702,7 +730,10 @@ function MediaItemWithContextMenu({
 
 	const handleMakeProjectWide = () => {
 		if (!projectId) return;
-		void editor.media.promoteAssetToProjectWide({ projectId, assetId: item.id });
+		void editor.media.promoteAssetToProjectWide({
+			projectId,
+			assetId: item.id,
+		});
 	};
 
 	const handleTranscode = async ({ kind }: { kind: "proxy" | "prores" }) => {
@@ -733,38 +764,11 @@ function MediaItemWithContextMenu({
 	 * lightweight all-intra copy instead of the master. Export is unaffected —
 	 * it always renders from the master.
 	 */
-	const handleGenerateProxy = async () => {
-		if (!projectId) return;
-		const toastId = toast.loading(
-			`Building editing proxy for ${item.name}… this runs once.`,
-		);
-		try {
-			const result = await requestProxy({ file: item.file });
-			const response = await fetch(
-				transcodeOutputUrl({ fileName: result.fileName }),
-			);
-			if (!response.ok) {
-				throw new Error(`Could not download the proxy (${response.status}).`);
-			}
-			const blob = await response.blob();
-			const proxyFile = new File([blob], `${item.name}.proxy.mp4`, {
-				type: "video/mp4",
-			});
-			await editor.media.attachAssetProxy({
-				projectId,
-				assetId: item.id,
-				proxyFile,
-			});
-			toast.success("Editing proxy ready — preview now uses it.", {
-				id: toastId,
-				description: "Exports still render from the original media.",
-			});
-		} catch (error) {
-			toast.error(
-				error instanceof Error ? error.message : "Proxy generation failed.",
-				{ id: toastId },
-			);
-		}
+	const handleGenerateProxy = () => {
+		editor.assetPrep.generateProxyForAsset({
+			assetId: item.id,
+			force: item.hasProxy,
+		});
 	};
 
 	const handleCopyToCurrentScene = () => {
@@ -807,90 +811,96 @@ function MediaItemWithContextMenu({
 
 	return (
 		<>
-		<ContextMenu>
-			<ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
-			<ContextMenuContent className={cn(item.socialCopy && "w-80")}>
-				{item.socialCopy ? (
-					<SocialCopyContextMenuSection
-						socialCopy={item.socialCopy}
-						onCopyTitle={() => { void copyTitle(); }}
-						onCopyDescription={() => { void copyDescription(); }}
-					/>
-				) : null}
-				<ContextMenuItem>Export clips</ContextMenuItem>
-				<ContextMenuItem onClick={() => setAttributesOpen(true)}>
-					Edit attributes
-				</ContextMenuItem>
-				{item.type === "video" && (
-					<ContextMenuItem onClick={() => void handleGenerateProxy()}>
-						{item.hasProxy
-							? "Rebuild editing proxy"
-							: "Use editing proxy (smooth playback)"}
+			<ContextMenu>
+				<ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
+				<ContextMenuContent className={cn(item.socialCopy && "w-80")}>
+					{item.socialCopy ? (
+						<SocialCopyContextMenuSection
+							socialCopy={item.socialCopy}
+							onCopyTitle={() => {
+								void copyTitle();
+							}}
+							onCopyDescription={() => {
+								void copyDescription();
+							}}
+						/>
+					) : null}
+					<ContextMenuItem>Export clips</ContextMenuItem>
+					<ContextMenuItem onClick={() => setAttributesOpen(true)}>
+						Edit attributes
 					</ContextMenuItem>
-				)}
-				{item.type === "video" && (
-					<ContextMenuSub>
-						<ContextMenuSubTrigger>Transcode</ContextMenuSubTrigger>
-						<ContextMenuSubContent>
-							<ContextMenuItem
-								onClick={() => void handleTranscode({ kind: "proxy" })}
-							>
-								H.264 proxy (540p) — download
-							</ContextMenuItem>
-							<ContextMenuItem
-								onClick={() => void handleTranscode({ kind: "prores" })}
-							>
-								ProRes (standard)
-							</ContextMenuItem>
-						</ContextMenuSubContent>
-					</ContextMenuSub>
-				)}
-				{item.sceneId != null && (
-					<ContextMenuItem onClick={handleMakeProjectWide}>
-						Make project-wide
-					</ContextMenuItem>
-				)}
-				{activeSceneId && item.sceneId !== activeSceneId && (
-					<ContextMenuItem onClick={handleCopyToCurrentScene}>
-						Copy to current scene
-					</ContextMenuItem>
-				)}
-				{(movableFolders.length > 0 || canMoveToRoot) && (
-					<ContextMenuSub>
-						<ContextMenuSubTrigger>Move to folder</ContextMenuSubTrigger>
-						<ContextMenuSubContent>
-							{canMoveToRoot && (
-								<ContextMenuItem onClick={() => onMoveToFolder(item.id, null)}>
-									Root (no folder)
-								</ContextMenuItem>
-							)}
-							{movableFolders.map((folder) => (
+					{item.type === "video" && (
+						<ContextMenuItem onClick={handleGenerateProxy}>
+							{item.hasProxy
+								? "Rebuild editing proxy"
+								: "Use editing proxy (smooth playback)"}
+						</ContextMenuItem>
+					)}
+					{item.type === "video" && (
+						<ContextMenuSub>
+							<ContextMenuSubTrigger>Transcode</ContextMenuSubTrigger>
+							<ContextMenuSubContent>
 								<ContextMenuItem
-									key={folder.id}
-									onClick={() => onMoveToFolder(item.id, folder.id)}
+									onClick={() => void handleTranscode({ kind: "proxy" })}
 								>
-									{folder.name}
+									H.264 proxy (540p) — download
 								</ContextMenuItem>
-							))}
-						</ContextMenuSubContent>
-					</ContextMenuSub>
-				)}
-				<ContextMenuItem
-					variant="destructive"
-					onClick={(event: React.MouseEvent<HTMLDivElement>) =>
-						onRemove({ event, ids: idsToDelete })
-					}
-				>
-					{deleteLabel}
-				</ContextMenuItem>
-			</ContextMenuContent>
-		</ContextMenu>
-		<MediaAttributesDialog
-			asset={item}
-			projectId={projectId}
-			open={attributesOpen}
-			onOpenChange={setAttributesOpen}
-		/>
+								<ContextMenuItem
+									onClick={() => void handleTranscode({ kind: "prores" })}
+								>
+									ProRes (standard)
+								</ContextMenuItem>
+							</ContextMenuSubContent>
+						</ContextMenuSub>
+					)}
+					{item.sceneId != null && (
+						<ContextMenuItem onClick={handleMakeProjectWide}>
+							Make project-wide
+						</ContextMenuItem>
+					)}
+					{activeSceneId && item.sceneId !== activeSceneId && (
+						<ContextMenuItem onClick={handleCopyToCurrentScene}>
+							Copy to current scene
+						</ContextMenuItem>
+					)}
+					{(movableFolders.length > 0 || canMoveToRoot) && (
+						<ContextMenuSub>
+							<ContextMenuSubTrigger>Move to folder</ContextMenuSubTrigger>
+							<ContextMenuSubContent>
+								{canMoveToRoot && (
+									<ContextMenuItem
+										onClick={() => onMoveToFolder(item.id, null)}
+									>
+										Root (no folder)
+									</ContextMenuItem>
+								)}
+								{movableFolders.map((folder) => (
+									<ContextMenuItem
+										key={folder.id}
+										onClick={() => onMoveToFolder(item.id, folder.id)}
+									>
+										{folder.name}
+									</ContextMenuItem>
+								))}
+							</ContextMenuSubContent>
+						</ContextMenuSub>
+					)}
+					<ContextMenuItem
+						variant="destructive"
+						onClick={(event: React.MouseEvent<HTMLDivElement>) =>
+							onRemove({ event, ids: idsToDelete })
+						}
+					>
+						{deleteLabel}
+					</ContextMenuItem>
+				</ContextMenuContent>
+			</ContextMenu>
+			<MediaAttributesDialog
+				asset={item}
+				projectId={projectId}
+				open={attributesOpen}
+				onOpenChange={setAttributesOpen}
+			/>
 		</>
 	);
 }
@@ -909,7 +919,13 @@ function MediaItemList({
 	mode: MediaViewMode;
 	folders: MediaFolder[];
 	currentFolderId: string | null;
-	onRemove: ({ event, ids }: { event: React.MouseEvent; ids: string[] }) => void;
+	onRemove: ({
+		event,
+		ids,
+	}: {
+		event: React.MouseEvent;
+		ids: string[];
+	}) => void;
 	onMoveToFolder: (assetId: string, folderId: string | null) => void;
 	activeSceneId: string | null;
 	projectId: string;
@@ -1045,6 +1061,7 @@ function MediaPreview({
 					{isSubclipAsset({ asset: item }) ? (
 						<SubclipBadge className="left-2" />
 					) : null}
+					{item.hasProxy ? <ProxyBadge /> : null}
 					{shouldShowDurationBadge ? (
 						<MediaDurationBadge duration={item.duration} />
 					) : null}
@@ -1052,12 +1069,15 @@ function MediaPreview({
 			);
 		}
 		return (
-			<MediaTypePlaceholder
-				icon={Video01Icon}
-				label="Video"
-				duration={item.duration}
-				variant="muted"
-			/>
+			<div className="relative size-full">
+				<MediaTypePlaceholder
+					icon={Video01Icon}
+					label="Video"
+					duration={item.duration}
+					variant="muted"
+				/>
+				{item.hasProxy ? <ProxyBadge /> : null}
+			</div>
 		);
 	}
 
@@ -1079,6 +1099,17 @@ function MediaPreview({
 
 	return (
 		<MediaTypePlaceholder icon={Image02Icon} label="Unknown" variant="muted" />
+	);
+}
+
+function ProxyBadge() {
+	return (
+		<span
+			data-testid="proxy-badge"
+			className="bg-background/90 text-foreground absolute top-1 right-1 rounded border px-1 text-[10px] font-medium shadow-sm"
+		>
+			Proxy
+		</span>
 	);
 }
 
@@ -1225,7 +1256,11 @@ function MediaActions({
 					disabled={isProcessing}
 					size="sm"
 					className="items-center justify-center gap-1.5 text-xs"
-					title={showAllScenes ? "Showing all scenes' media" : "Showing current scene's media"}
+					title={
+						showAllScenes
+							? "Showing all scenes' media"
+							: "Showing current scene's media"
+					}
 				>
 					{showAllScenes ? "All scenes" : "This scene"}
 				</Button>

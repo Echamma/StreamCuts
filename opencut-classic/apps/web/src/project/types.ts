@@ -97,6 +97,8 @@ export interface TProjectMetadata {
 
 export interface TProjectSettings {
 	fps: FrameRate;
+	/** Build editing proxies for newly imported videos. Defaults to off. */
+	autoProxies?: boolean;
 	canvasSize: TCanvasSize;
 	canvasSizeMode?: "preset" | "custom";
 	lastCustomCanvasSize?: TCanvasSize | null;

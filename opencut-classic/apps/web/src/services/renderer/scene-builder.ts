@@ -2,7 +2,7 @@ import type { SceneTracks, TimelineTrack } from "@/timeline";
 import { getMainVideoTrack } from "@/timeline/scene-tracks-view";
 import type { MediaAsset } from "@/media/types";
 import { getAssetSourceStartTime } from "@/media/asset-source";
-import { mediaProxyStorageKey } from "@/services/storage/types";
+import { selectVideoAssetSource } from "./video-source";
 import { RootNode } from "./nodes/root-node";
 import { VideoNode } from "./nodes/video-node";
 import { ImageNode } from "./nodes/image-node";
@@ -300,7 +300,8 @@ function buildVideoLikeNode({
 		playbackStartTime: playbackStartTimeOverride,
 		visibleStartTime: timeOffsetOverride,
 		visibleEndTime,
-		trimStart: getAssetSourceStartTime({ asset: mediaAsset }) + element.trimStart,
+		trimStart:
+			getAssetSourceStartTime({ asset: mediaAsset }) + element.trimStart,
 		trimEnd: element.trimEnd,
 		transform: buildTransformFromParams({ params: element.params }),
 		reframe: readReframeFromParams({ params: element.params }),
@@ -317,11 +318,14 @@ function buildVideoLikeNode({
 		// whereas the proxy is all-intra so any frame decodes standalone. Export
 		// deliberately falls through to the master, keeping renders full quality.
 		// The proxy gets its own cache id so the two never share a decoder sink.
-		const proxy = isPreview ? mediaAsset.proxyFile : undefined;
+		const source = selectVideoAssetSource({
+			asset: mediaAsset,
+			isPreview: isPreview === true,
+		});
 		return new VideoNode({
-			mediaId: proxy ? mediaProxyStorageKey(mediaAsset.id) : mediaAsset.id,
+			mediaId: source.mediaId,
 			url: mediaAsset.url,
-			file: proxy ?? mediaAsset.file,
+			file: source.file,
 			retime: element.retime,
 			...commonParams,
 		});

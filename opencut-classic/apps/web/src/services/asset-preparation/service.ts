@@ -2,12 +2,19 @@ import type { EditorCore } from "@/core";
 import type { MediaAsset } from "@/media/types";
 import { getWaveformSourceKeyForAsset } from "@/media/asset-source";
 import { waveformCache } from "@/services/waveform-cache/service";
+import { requestProxy, transcodeOutputUrl } from "@/services/transcode/api";
+import { toast } from "sonner";
+import {
+	derivedAssetTaskKey,
+	shouldQueueProxy,
+	type DerivedAssetKind,
+} from "./queue-policy";
 
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
 
-export type DerivedAssetKind = "waveform";
+export type { DerivedAssetKind } from "./queue-policy";
 
 export interface DerivedAssetState {
 	kind: DerivedAssetKind;
@@ -47,6 +54,7 @@ export class AssetPreparationService {
 	constructor(private readonly editor: EditorCore) {
 		this.unsubscribers.push(
 			this.editor.media.subscribe(this.handleMediaChange),
+			this.editor.project.subscribe(this.handleMediaChange),
 		);
 		this.handleMediaChange();
 	}
@@ -70,20 +78,92 @@ export class AssetPreparationService {
 		};
 	}
 
+	/** Queue every video without a proxy, even when automatic proxies are off. */
+	generateProxiesForAllMedia(): number {
+		let queued = 0;
+		for (const asset of this.editor.media.getAssets()) {
+			if (this.queueProxy({ asset, retryOnError: true })) queued++;
+		}
+		return queued;
+	}
+
+	generateProxyForAsset({
+		assetId,
+		force = false,
+	}: {
+		assetId: string;
+		force?: boolean;
+	}): boolean {
+		const asset = this.editor.media
+			.getAssets()
+			.find((item) => item.id === assetId);
+		return asset
+			? this.queueProxy({ asset, force, retryOnError: true })
+			: false;
+	}
+
 	// -------------------------------------------------------------------------
 	// Internals
 	// -------------------------------------------------------------------------
 
 	private handleMediaChange = (): void => {
 		const assets = this.editor.media.getAssets();
+		const autoProxies =
+			this.editor.project.getActiveOrNull()?.settings.autoProxies === true;
 		for (const asset of assets) {
-			if (this.queued.has(asset.id)) continue;
-			if (!this.needsWaveform(asset)) continue;
-
-			this.queued.add(asset.id);
-			this.enqueue(asset);
+			if (this.needsWaveform(asset)) {
+				const key = derivedAssetTaskKey({
+					assetId: asset.id,
+					kind: "waveform",
+				});
+				if (!this.queued.has(key)) {
+					this.queued.add(key);
+					this.enqueue(() => this.prepareWaveform(asset));
+				}
+			}
+			if (shouldQueueProxy({ asset, autoProxies })) {
+				this.queueProxy({ asset });
+			}
 		}
 	};
+
+	private queueProxy({
+		asset,
+		force = false,
+		retryOnError = false,
+	}: {
+		asset: MediaAsset;
+		force?: boolean;
+		retryOnError?: boolean;
+	}): boolean {
+		const projectId = this.editor.project.getActiveOrNull()?.metadata.id;
+		if (
+			!projectId ||
+			asset.type !== "video" ||
+			asset.ephemeral ||
+			(!force && asset.hasProxy)
+		)
+			return false;
+		const key = derivedAssetTaskKey({ assetId: asset.id, kind: "proxy" });
+		if (this.queued.has(key)) return false;
+		if (
+			!retryOnError &&
+			this.byAssetId
+				.get(asset.id)
+				?.some((state) => state.kind === "proxy" && state.status === "error")
+		)
+			return false;
+		this.queued.add(key);
+		this.setAssetState({ assetId: asset.id, kind: "proxy", status: "pending" });
+		this.enqueue(async () => {
+			try {
+				await this.prepareProxy({ assetId: asset.id, projectId, force });
+			} finally {
+				this.queued.delete(key);
+			}
+		});
+		return true;
+	}
 
 	private needsWaveform(asset: MediaAsset): boolean {
 		if (asset.type === "audio") return true;
@@ -91,8 +171,8 @@ export class AssetPreparationService {
 		return false;
 	}
 
-	private enqueue(asset: MediaAsset): void {
-		this.taskQueue.push(() => this.prepareWaveform(asset));
+	private enqueue(task: () => Promise<void>): void {
+		this.taskQueue.push(task);
 		this.runQueue();
 	}
 
@@ -104,7 +184,7 @@ export class AssetPreparationService {
 		this.isRunning = true;
 		task()
 			.catch(() => {
-				// prepareWaveform already records the error state
+				// Each preparation task records its own error state.
 			})
 			.finally(() => {
 				this.isRunning = false;
@@ -143,6 +223,65 @@ export class AssetPreparationService {
 				status: "error",
 				error: String(error),
 			});
+		}
+	}
+
+	private async prepareProxy({
+		assetId,
+		projectId,
+		force,
+	}: {
+		assetId: string;
+		projectId: string;
+		force: boolean;
+	}): Promise<void> {
+		if (
+			this.disposed ||
+			this.editor.project.getActiveOrNull()?.metadata.id !== projectId
+		)
+			return;
+		const asset = this.editor.media
+			.getAssets()
+			.find((item) => item.id === assetId);
+		if (!asset || (asset.hasProxy && !force)) return;
+		const toastId = toast.loading(`Building editing proxy for ${asset.name}…`);
+		try {
+			const result = await requestProxy({ file: asset.file });
+			const response = await fetch(
+				transcodeOutputUrl({ fileName: result.fileName }),
+			);
+			if (!response.ok)
+				throw new Error(`Could not download the proxy (${response.status}).`);
+			const blob = await response.blob();
+			if (
+				this.disposed ||
+				this.editor.project.getActiveOrNull()?.metadata.id !== projectId ||
+				!this.editor.media.getAssets().some((item) => item.id === assetId)
+			) {
+				toast.dismiss(toastId);
+				return;
+			}
+			const proxyFile = new File([blob], `${asset.name}.proxy.mp4`, {
+				type: "video/mp4",
+			});
+			await this.editor.media.attachAssetProxy({
+				projectId,
+				assetId,
+				proxyFile,
+			});
+			this.setAssetState({ assetId, kind: "proxy", status: "ready" });
+			toast.success(`Editing proxy ready for ${asset.name}.`, { id: toastId });
+		} catch (error) {
+			this.setAssetState({
+				assetId,
+				kind: "proxy",
+				status: "error",
+				error: String(error),
+			});
+			toast.error(
+				error instanceof Error ? error.message : "Proxy generation failed.",
+				{ id: toastId },
+			);
 		}
 	}
 
