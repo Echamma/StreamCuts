@@ -373,7 +373,10 @@ export class VideoCache {
 			}
 
 			const sink = new CanvasSink(videoTrack, {
-				poolSize: 3,
+				// Resolved render nodes retain frames until all layers are decoded.
+				// No finite ring is safe when another clip/preview seeks this asset.
+				// Give each decoded frame its own canvas; unreferenced frames are GCed.
+				poolSize: 0,
 				fit: "contain",
 			});
 
