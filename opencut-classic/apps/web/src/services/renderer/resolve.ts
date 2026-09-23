@@ -50,6 +50,10 @@ import {
 	type ResolvedTransitionNodeState,
 } from "./nodes/transition-node";
 import { VideoNode } from "./nodes/video-node";
+import {
+	CompoundNode,
+	type ResolvedCompoundNodeState,
+} from "./nodes/compound-node";
 import type {
 	ResolvedVisualNodeState,
 	ResolvedVisualSourceNodeState,
@@ -114,11 +118,39 @@ async function resolveNode({
 		node.resolved = await resolveBlurBackgroundNode({ node, context });
 	} else if (node instanceof EffectLayerNode) {
 		node.resolved = resolveEffectLayerNode({ node, context });
+	} else if (node instanceof CompoundNode) {
+		node.resolved = resolveCompoundNode({ node, context });
+		if (!node.resolved) return;
+		const childContext = { ...context, time: node.resolved.contentTime };
+		await Promise.all(
+			node.children.map((child) => resolveNode({ node: child, context: childContext })),
+		);
+		return;
 	}
 
 	await Promise.all(
 		node.children.map((child) => resolveNode({ node: child, context })),
 	);
+}
+
+function resolveCompoundNode({
+	node,
+	context,
+}: {
+	node: CompoundNode;
+	context: ResolveContext;
+}): ResolvedCompoundNodeState | null {
+	const visual = resolveVisualState({
+		params: node.params,
+		context,
+		sourceWidth: context.renderer.width,
+		sourceHeight: context.renderer.height,
+	});
+	if (!visual) return null;
+	return {
+		...visual,
+		contentTime: context.time - node.params.timeOffset + node.params.trimStart,
+	};
 }
 
 function resolveEffectPassGroups({

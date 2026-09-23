@@ -17,7 +17,7 @@ import { DEFAULT_BACKGROUND_COLOR } from "@/background/color";
 import { DEFAULT_CANVAS_SIZE } from "@/canvas/sizes";
 import { DEFAULT_FPS } from "@/fps/defaults";
 import { buildDefaultScene, getProjectDurationFromScenes, mergeSceneTracks } from "@/timeline/scenes";
-import type { SceneTracks } from "@/timeline";
+import { calculateTotalDuration, type SceneTracks } from "@/timeline";
 import { buildScene } from "@/services/renderer/scene-builder";
 import { CanvasRenderer } from "@/services/renderer/canvas-renderer";
 import {
@@ -705,9 +705,9 @@ export class ProjectManager {
 	private async updateThumbnailFromTimeline(): Promise<boolean> {
 		if (!this.active) return false;
 
-		const tracks = this.editor.scenes.getActiveScene().tracks;
+		const tracks = this.editor.scenes.getRootActiveScene().tracks;
 		const mediaAssets = this.editor.media.getAssets();
-		const duration = this.editor.timeline.getTotalDuration();
+		const duration = calculateTotalDuration({ tracks });
 		const { canvasSize, background } = this.active.settings;
 
 		const scene = buildScene({

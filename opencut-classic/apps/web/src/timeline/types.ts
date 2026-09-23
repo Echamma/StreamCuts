@@ -50,7 +50,7 @@ interface BaseTrack {
 
 export interface VideoTrack extends BaseTrack {
 	type: "video";
-	elements: (VideoElement | ImageElement)[];
+	elements: (VideoElement | ImageElement | CompoundElement)[];
 	transitions?: TrackTransition[];
 	muted: boolean;
 	/** When any audio-capable track is soloed, non-soloed tracks are silenced
@@ -184,6 +184,15 @@ export interface ImageElement extends BaseTimelineElement {
 	masks?: Mask[];
 }
 
+/** A nested timeline that renders as one visual layer on its parent track. */
+export interface CompoundElement extends BaseTimelineElement {
+	type: "compound";
+	/** Child starts are relative to this clip's content start. */
+	tracks: SceneTracks;
+	hidden?: boolean;
+	effects?: Effect[];
+}
+
 /** Per-word timing for a caption element, in element-local seconds
  * (`0` = the element's own start). Populated from transcription word timings
  * when available; when absent the renderer falls back to even-split timing.
@@ -243,6 +252,7 @@ export type TimelineElement =
 	| AudioElement
 	| VideoElement
 	| ImageElement
+	| CompoundElement
 	| TextElement
 	| StickerElement
 	| GraphicElement
@@ -271,6 +281,7 @@ export type RetimableElement = Extract<
 export const VISUAL_ELEMENT_TYPES = elementTypes(
 	"video",
 	"image",
+	"compound",
 	"text",
 	"sticker",
 	"graphic",
@@ -288,6 +299,7 @@ export type CreateAudioElement =
 	| CreateLibraryAudioElement;
 export type CreateVideoElement = Omit<VideoElement, "id">;
 export type CreateImageElement = Omit<ImageElement, "id">;
+export type CreateCompoundElement = Omit<CompoundElement, "id">;
 export type CreateTextElement = Omit<TextElement, "id">;
 export type CreateStickerElement = Omit<StickerElement, "id">;
 export type CreateGraphicElement = Omit<GraphicElement, "id">;
@@ -296,6 +308,7 @@ export type CreateTimelineElement =
 	| CreateAudioElement
 	| CreateVideoElement
 	| CreateImageElement
+	| CreateCompoundElement
 	| CreateTextElement
 	| CreateStickerElement
 	| CreateGraphicElement

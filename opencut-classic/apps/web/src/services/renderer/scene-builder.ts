@@ -1,4 +1,4 @@
-import type { SceneTracks, TimelineTrack } from "@/timeline";
+import type { CompoundElement, SceneTracks, TimelineTrack } from "@/timeline";
 import { getMainVideoTrack } from "@/timeline/scene-tracks-view";
 import type { MediaAsset } from "@/media/types";
 import { getAssetSourceStartTime } from "@/media/asset-source";
@@ -13,6 +13,7 @@ import { ColorNode } from "./nodes/color-node";
 import { BlurBackgroundNode } from "./nodes/blur-background-node";
 import { EffectLayerNode } from "./nodes/effect-layer-node";
 import { TransitionNode } from "./nodes/transition-node";
+import { CompoundNode } from "./nodes/compound-node";
 import type { AnyBaseNode } from "./nodes/base-node";
 import type { TBackground, TCanvasSize } from "@/project/types";
 import { DEFAULT_BACKGROUND_BLUR_INTENSITY } from "@/background/blur";
@@ -46,11 +47,13 @@ function buildTrackNodes({
 	mediaMap,
 	canvasSize,
 	isPreview,
+	activeCompoundIds,
 }: {
 	tracks: TimelineTrack[];
 	mediaMap: Map<string, MediaAsset>;
 	canvasSize: TCanvasSize;
 	isPreview?: boolean;
+	activeCompoundIds: ReadonlySet<string>;
 }): AnyBaseNode[] {
 	const nodes: AnyBaseNode[] = [];
 
@@ -62,6 +65,7 @@ function buildTrackNodes({
 					mediaMap,
 					canvasSize,
 					isPreview,
+					activeCompoundIds,
 				}),
 			);
 			continue;
@@ -158,11 +162,13 @@ function buildVideoTrackNodes({
 	mediaMap,
 	canvasSize,
 	isPreview,
+	activeCompoundIds,
 }: {
 	track: VideoTrack;
 	mediaMap: Map<string, MediaAsset>;
 	canvasSize: TCanvasSize;
 	isPreview?: boolean;
+	activeCompoundIds: ReadonlySet<string>;
 }): AnyBaseNode[] {
 	const elements = getVisibleSortedElements({ track });
 	const nodes: AnyBaseNode[] = [];
@@ -171,6 +177,17 @@ function buildVideoTrackNodes({
 		const element = elements[index];
 		const previousElement = elements[index - 1];
 		const nextElement = elements[index + 1];
+		if (element.type === "compound") {
+			const compoundNode = buildCompoundNode({
+				element,
+				mediaMap,
+				canvasSize,
+				isPreview,
+				activeCompoundIds,
+			});
+			if (compoundNode) nodes.push(compoundNode);
+			continue;
+		}
 		if (element.type !== "video" && element.type !== "image") {
 			continue;
 		}
@@ -270,6 +287,53 @@ function buildVideoTrackNodes({
 	}
 
 	return nodes;
+}
+
+function buildCompoundNode({
+	element,
+	mediaMap,
+	canvasSize,
+	isPreview,
+	activeCompoundIds,
+}: {
+	element: CompoundElement;
+	mediaMap: Map<string, MediaAsset>;
+	canvasSize: TCanvasSize;
+	isPreview?: boolean;
+	activeCompoundIds: ReadonlySet<string>;
+}): CompoundNode | null {
+	// Imported or hand-edited projects can contain a self-reference. Guard the
+	// active ancestry, while allowing independent occurrences of a clip id.
+	if (activeCompoundIds.has(element.id)) return null;
+	const ancestry = new Set(activeCompoundIds);
+	ancestry.add(element.id);
+	const node = new CompoundNode({
+		compoundId: element.id,
+		duration: element.duration,
+		timeOffset: element.startTime,
+		trimStart: element.trimStart,
+		trimEnd: element.trimEnd,
+		transform: buildTransformFromParams({ params: element.params }),
+		animations: element.animations,
+		opacity: readOpacityFromParams({ params: element.params }),
+		blendMode: readBlendModeFromParams({ params: element.params }),
+		effects: element.effects ?? [],
+	});
+	const tracks = element.tracks;
+	const visibleTracks = [
+		...tracks.video.filter((track) => !track.hidden),
+		...tracks.text.filter((track) => !track.hidden),
+		...tracks.graphic.filter((track) => !track.hidden),
+		...tracks.effect.filter((track) => !track.hidden),
+	];
+	for (const child of buildTrackNodes({
+		tracks: visibleTracks,
+		mediaMap,
+		canvasSize,
+		isPreview,
+		activeCompoundIds: ancestry,
+	})) node.add(child);
+	return node;
 }
 
 function buildVideoLikeNode({
@@ -433,6 +497,7 @@ export function buildScene({
 		mediaMap,
 		canvasSize,
 		isPreview,
+		activeCompoundIds: new Set(),
 	});
 
 	if (background.type === "blur") {

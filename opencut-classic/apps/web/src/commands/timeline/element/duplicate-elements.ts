@@ -9,6 +9,7 @@ import { EditorCore } from "@/core";
 import { applyPlacement, resolveTrackPlacement } from "@/timeline/placement";
 import { getOrderedTimelineTracks } from "@/timeline/scene-tracks-view";
 import { cloneAnimations } from "@/animation";
+import { cloneCompoundTracks } from "@/timeline/compound-clips";
 import type { MediaTime } from "@/wasm";
 
 interface DuplicateElementsParams {
@@ -119,6 +120,22 @@ function buildDuplicateElement({
 	id: string;
 	startTime: MediaTime;
 }): TimelineElement {
+	if (element.type === "compound") {
+		return {
+			...element,
+			id,
+			name: `${element.name} (copy)`,
+			startTime,
+			animations: cloneAnimations({
+				animations: element.animations,
+				shouldRegenerateKeyframeIds: true,
+			}),
+			tracks: cloneCompoundTracks({
+				tracks: element.tracks,
+				generateId: generateUUID,
+			}),
+		};
+	}
 	return {
 		...element,
 		id,

@@ -363,6 +363,7 @@ elementParamRegistry.register({
 	definition: [...visualElementParams, ...audioElementParams],
 });
 elementParamRegistry.register({ key: "image", definition: visualElementParams });
+elementParamRegistry.register({ key: "compound", definition: visualElementParams });
 elementParamRegistry.register({
 	key: "text",
 	definition: [...textElementParams, ...visualElementParams],

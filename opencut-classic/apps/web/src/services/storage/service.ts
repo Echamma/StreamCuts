@@ -26,7 +26,8 @@ import {
 	migrations,
 	runStorageMigrations,
 } from "@/services/storage/migrations";
-import type { Bookmark, SceneTracks, TScene } from "@/timeline";
+import type { Bookmark, TScene } from "@/timeline";
+import { stripAudioBuffersFromTracks } from "@/timeline/compound-storage";
 import { roundMediaTime } from "@/wasm";
 import { measureSpanAsync } from "@/diagnostics/render-perf";
 import { FILE_MEDIA_ASSET_SOURCE } from "@/media/asset-source";
@@ -169,19 +170,6 @@ class StorageService {
 		return isStorageQuotaExceededError({ error });
 	}
 
-	private stripAudioBuffers({ tracks }: { tracks: SceneTracks }): SceneTracks {
-		return {
-			...tracks,
-			audio: tracks.audio.map((track) => ({
-				...track,
-				elements: track.elements.map((element) => {
-					const { buffer: _buffer, ...rest } = element;
-					return rest;
-				}),
-			})),
-		};
-	}
-
 	async saveProject({ project }: { project: TProject }): Promise<void> {
 		const duration =
 			project.metadata.duration ??
@@ -190,7 +178,7 @@ class StorageService {
 			id: scene.id,
 			name: scene.name,
 			isMain: scene.isMain,
-			tracks: this.stripAudioBuffers({ tracks: scene.tracks }),
+			tracks: stripAudioBuffersFromTracks({ tracks: scene.tracks }),
 			bookmarks: scene.bookmarks,
 			createdAt: scene.createdAt.toISOString(),
 			updatedAt: scene.updatedAt.toISOString(),
@@ -333,7 +321,7 @@ class StorageService {
 			id: scene.id,
 			name: scene.name,
 			isMain: scene.isMain,
-			tracks: this.stripAudioBuffers({ tracks: scene.tracks }),
+			tracks: stripAudioBuffersFromTracks({ tracks: scene.tracks }),
 			bookmarks: scene.bookmarks,
 			createdAt: scene.createdAt.toISOString(),
 			updatedAt: scene.updatedAt.toISOString(),

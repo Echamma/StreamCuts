@@ -3,9 +3,12 @@ import type { Command, CommandResult } from "@/commands";
 import type { EditorSelectionSnapshot } from "@/selection/editor-selection";
 import { applyRippleAdjustments, computeRippleAdjustments } from "@/ripple";
 import type { SceneTracks } from "@/timeline/types";
+import type { TimelineEditScope } from "./scenes-manager";
 
 interface CommandHistoryEntry {
 	command: Command;
+	scope: TimelineEditScope;
+	suppressRipple?: boolean;
 	previousSelection: EditorSelectionSnapshot;
 	selectionOverride?: EditorSelectionSnapshot;
 }
@@ -18,8 +21,15 @@ export class CommandManager {
 
 	constructor(private editor: EditorCore) {}
 
-	execute({ command }: { command: Command }): Command {
-		const beforeTracks = this.isRippleEnabled
+	execute({
+		command,
+		suppressRipple = false,
+	}: {
+		command: Command;
+		suppressRipple?: boolean;
+	}): Command {
+		const scope = this.editor.scenes.getEditScope();
+		const beforeTracks = this.isRippleEnabled && !suppressRipple
 			? (this.editor.scenes.getActiveSceneOrNull()?.tracks ?? null)
 			: null;
 		const previousSelection = this.getSelectionSnapshot();
@@ -29,6 +39,8 @@ export class CommandManager {
 		this.runReactors();
 		this.history.push({
 			command,
+			scope,
+			suppressRipple,
 			previousSelection,
 			selectionOverride,
 		});
@@ -39,6 +51,7 @@ export class CommandManager {
 	push({ command }: { command: Command }): void {
 		this.history.push({
 			command,
+			scope: this.editor.scenes.getEditScope(),
 			previousSelection: this.getSelectionSnapshot(),
 		});
 		this.redoStack = [];
@@ -51,6 +64,10 @@ export class CommandManager {
 	undo(): void {
 		if (this.history.length === 0) return;
 		const entry = this.history.pop();
+		if (entry && !this.editor.scenes.restoreEditScope({ scope: entry.scope })) {
+			this.history.push(entry);
+			return;
+		}
 		entry?.command.undo();
 		if (entry) {
 			// Only restore selection for commands that explicitly changed it.
@@ -73,8 +90,12 @@ export class CommandManager {
 		if (!entry) {
 			return;
 		}
+		if (!this.editor.scenes.restoreEditScope({ scope: entry.scope })) {
+			this.redoStack.push(entry);
+			return;
+		}
 
-		const beforeTracks = this.isRippleEnabled
+		const beforeTracks = this.isRippleEnabled && !entry.suppressRipple
 			? (this.editor.scenes.getActiveSceneOrNull()?.tracks ?? null)
 			: null;
 		const previousSelection = this.getSelectionSnapshot();
@@ -85,6 +106,8 @@ export class CommandManager {
 
 		this.history.push({
 			command: entry.command,
+			scope: entry.scope,
+			suppressRipple: entry.suppressRipple,
 			previousSelection,
 			selectionOverride,
 		});

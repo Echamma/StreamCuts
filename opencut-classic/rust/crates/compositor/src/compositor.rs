@@ -1,18 +1,18 @@
 use bytemuck::{Pod, Zeroable};
 use effects::{ApplyEffectsOptions, EffectPass, EffectPipeline, UniformValue};
-use gpu::{FULLSCREEN_SHADER_SOURCE, GpuContext, wgpu};
+use gpu::{wgpu, GpuContext, FULLSCREEN_SHADER_SOURCE};
 use masks::{ApplyMaskFeatherOptions, MaskFeatherPipeline};
 use thiserror::Error;
 use wgpu::util::DeviceExt;
 
 use crate::{
-    BlendMode,
     frame::{
         EffectPassDescriptor, EffectUniformValueDescriptor, FrameDescriptor, FrameItemDescriptor,
         LayerDescriptor,
     },
     texture_pool::TexturePool,
     texture_store::TextureStore,
+    BlendMode,
 };
 
 const LAYER_SHADER_SOURCE: &str = include_str!("shaders/layer.wgsl");
@@ -302,40 +302,13 @@ impl Compositor {
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("compositor-frame-encoder"),
                 });
-        let mut scene = self.create_cleared_texture(
+        let scene = self.render_items_to_texture(
             context,
             &mut encoder,
-            frame.width,
-            frame.height,
+            frame,
+            &frame.items,
             frame.clear.color,
-        );
-
-        for item in &frame.items {
-            match item {
-                FrameItemDescriptor::Layer(layer) => {
-                    let layer_texture = self.render_layer(context, &mut encoder, frame, layer)?;
-                    scene = self.blend_texture(
-                        context,
-                        &mut encoder,
-                        &scene,
-                        &layer_texture,
-                        layer.blend_mode,
-                        frame.width,
-                        frame.height,
-                    )?;
-                }
-                FrameItemDescriptor::SceneEffect { effect_pass_groups } => {
-                    scene = self.apply_effect_groups(
-                        context,
-                        &mut encoder,
-                        &scene,
-                        frame.width,
-                        frame.height,
-                        effect_pass_groups,
-                    )?;
-                }
-            }
-        }
+        )?;
 
         context.queue().submit([encoder.finish()]);
         Ok(scene)
@@ -358,40 +331,13 @@ impl Compositor {
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("compositor-frame-encoder"),
                 });
-        let mut scene = self.create_cleared_texture(
+        let scene = self.render_items_to_texture(
             context,
             &mut encoder,
-            frame.width,
-            frame.height,
+            frame,
+            &frame.items,
             frame.clear.color,
-        );
-
-        for item in &frame.items {
-            match item {
-                FrameItemDescriptor::Layer(layer) => {
-                    let layer_texture = self.render_layer(context, &mut encoder, frame, layer)?;
-                    scene = self.blend_texture(
-                        context,
-                        &mut encoder,
-                        &scene,
-                        &layer_texture,
-                        layer.blend_mode,
-                        frame.width,
-                        frame.height,
-                    )?;
-                }
-                FrameItemDescriptor::SceneEffect { effect_pass_groups } => {
-                    scene = self.apply_effect_groups(
-                        context,
-                        &mut encoder,
-                        &scene,
-                        frame.width,
-                        frame.height,
-                        effect_pass_groups,
-                    )?;
-                }
-            }
-        }
+        )?;
 
         context.encode_texture_blit_to_view(
             &mut encoder,
@@ -402,6 +348,73 @@ impl Compositor {
         context.queue().submit([encoder.finish()]);
         surface_texture.present();
         Ok(())
+    }
+
+    fn render_items_to_texture(
+        &mut self,
+        context: &GpuContext,
+        encoder: &mut wgpu::CommandEncoder,
+        frame: &FrameDescriptor,
+        items: &[FrameItemDescriptor],
+        clear_color: [f32; 4],
+    ) -> Result<wgpu::Texture, CompositorError> {
+        let mut scene =
+            self.create_cleared_texture(context, encoder, frame.width, frame.height, clear_color);
+        for item in items {
+            match item {
+                FrameItemDescriptor::Layer(layer) => {
+                    let layer_texture = self.render_layer(context, encoder, frame, layer)?;
+                    scene = self.blend_texture(
+                        context,
+                        encoder,
+                        &scene,
+                        &layer_texture,
+                        layer.blend_mode,
+                        frame.width,
+                        frame.height,
+                    )?;
+                }
+                FrameItemDescriptor::Group(group) => {
+                    let source = self.render_items_to_texture(
+                        context,
+                        encoder,
+                        frame,
+                        &group.items,
+                        [0.0, 0.0, 0.0, 0.0],
+                    )?;
+                    let layer = LayerDescriptor {
+                        texture_id: String::new(),
+                        transform: group.transform.clone(),
+                        opacity: group.opacity,
+                        blend_mode: group.blend_mode,
+                        effect_pass_groups: group.effect_pass_groups.clone(),
+                        mask: None,
+                    };
+                    let layer_texture =
+                        self.render_layer_source(context, encoder, frame, &layer, &source)?;
+                    scene = self.blend_texture(
+                        context,
+                        encoder,
+                        &scene,
+                        &layer_texture,
+                        layer.blend_mode,
+                        frame.width,
+                        frame.height,
+                    )?;
+                }
+                FrameItemDescriptor::SceneEffect { effect_pass_groups } => {
+                    scene = self.apply_effect_groups(
+                        context,
+                        encoder,
+                        &scene,
+                        frame.width,
+                        frame.height,
+                        effect_pass_groups,
+                    )?;
+                }
+            }
+        }
+        Ok(scene)
     }
 
     fn render_layer(
@@ -417,13 +430,25 @@ impl Compositor {
             }
         })?;
 
+        let source_texture = source.texture().clone();
+        self.render_layer_source(context, encoder, frame, layer, &source_texture)
+    }
+
+    fn render_layer_source(
+        &mut self,
+        context: &GpuContext,
+        encoder: &mut wgpu::CommandEncoder,
+        frame: &FrameDescriptor,
+        layer: &LayerDescriptor,
+        source: &wgpu::Texture,
+    ) -> Result<wgpu::Texture, CompositorError> {
         let mut current =
             self.texture_pool
                 .acquire(context, frame.width, frame.height, "compositor-layer");
         self.render_source_to_texture(
             context,
             encoder,
-            source.texture(),
+            source,
             &current,
             frame.width,
             frame.height,

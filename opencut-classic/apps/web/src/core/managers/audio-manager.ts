@@ -461,6 +461,14 @@ export class AudioManager {
 					this.playbackStartContextTime +
 					this.playbackLatencyCompensationSeconds +
 					(timelineTime - this.playbackStartTime);
+				const cutoffTimestamp = startTimestamp + (clipEnd - timelineTime);
+				if (cutoffTimestamp <= audioContext.currentTime) {
+					node.disconnect();
+					clipGain.disconnect();
+					continue;
+				}
+				let actualStartTimestamp = startTimestamp;
+				let actualClipOffset = timelineTime - clipStart;
 
 				if (startTimestamp >= audioContext.currentTime) {
 					node.start(startTimestamp);
@@ -469,6 +477,8 @@ export class AudioManager {
 					const offset = audioContext.currentTime - startTimestamp;
 					if (offset < buffer.duration) {
 						node.start(audioContext.currentTime, offset);
+						actualStartTimestamp = audioContext.currentTime;
+						actualClipOffset += offset;
 						consecutiveDroppedBufferCount = 0;
 					} else {
 						node.disconnect();
@@ -498,6 +508,16 @@ export class AudioManager {
 						continue;
 					}
 				}
+				node.stop(cutoffTimestamp);
+				scheduleClipFadeRamps({
+					clipGain,
+					clipVolume: clip.volume,
+					startTimestamp: actualStartTimestamp,
+					clipOffset: actualClipOffset + (clip.localOffset ?? 0),
+					duration: clip.timelineElement.duration / TICKS_PER_SECOND,
+					fadeIn: clip.fadeIn,
+					fadeOut: clip.fadeOut,
+				});
 
 				activeNodes++;
 				this.queuedSources.add(node);
@@ -582,8 +602,8 @@ export class AudioManager {
 			clipGain,
 			clipVolume: clip.volume,
 			startTimestamp: actualStartTimestamp,
-			clipOffset: actualClipOffset,
-			duration: clip.duration,
+			clipOffset: actualClipOffset + (clip.localOffset ?? 0),
+			duration: clip.timelineElement.duration / TICKS_PER_SECOND,
 			fadeIn: clip.fadeIn,
 			fadeOut: clip.fadeOut,
 		});
@@ -593,7 +613,7 @@ export class AudioManager {
 			clip,
 			clipGain,
 			startTimestamp: actualStartTimestamp,
-			startLocalTime: actualClipOffset,
+			startLocalTime: actualClipOffset + (clip.localOffset ?? 0),
 		});
 
 		this.queuedSources.add(node);
@@ -691,7 +711,7 @@ export class AudioManager {
 		const points = buildAudioGainAutomation({
 			element: clip.timelineElement,
 			fromLocalTime: startLocalTime,
-			toLocalTime: clip.duration,
+			toLocalTime: (clip.localOffset ?? 0) + clip.duration,
 		});
 
 		if (points.length === 0) {
