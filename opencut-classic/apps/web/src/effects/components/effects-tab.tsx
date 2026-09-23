@@ -15,7 +15,7 @@ import {
 	SectionFields,
 } from "@/components/section";
 import { PropertyParamField } from "@/components/editor/panels/properties/components/property-param-field";
-import { getEffectControl } from "./effect-controls";
+import { EffectCustomControl, hasEffectControl } from "./effect-controls";
 import { Button } from "@/components/ui/button";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
@@ -247,7 +247,7 @@ function EffectSection({
 	onRemove?: () => void;
 }) {
 	const definition = effectsRegistry.get(effect.type);
-	const CustomControl = getEffectControl({ effectType: effect.type });
+	const hasCustomControl = hasEffectControl(effect.type);
 
 	return (
 		<Section
@@ -290,12 +290,14 @@ function EffectSection({
 			<SectionContent
 				className={cn("p-0", onToggle && !effect.enabled && "opacity-50")}
 			>
-				{CustomControl ? (
-					CustomControl({
-						values: renderParams,
-						previewParam,
-						onCommit,
-					})
+				{hasCustomControl ? (
+					<EffectCustomControl
+						key={effect.id}
+						effectType={effect.type}
+						values={renderParams}
+						previewParam={previewParam}
+						onCommit={onCommit}
+					/>
 				) : (
 					<SectionFields>
 						{definition.params.map((param) => (

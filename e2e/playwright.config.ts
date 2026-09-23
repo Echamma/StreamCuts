@@ -32,7 +32,7 @@ export default defineConfig({
 	webServer: {
 		command: "bun run dev",
 		cwd: "../opencut-classic/apps/web",
-		url: "http://localhost:3000",
+		url: process.env.STREAMCUTS_URL ?? "http://localhost:3000",
 		// Reuse the dev server if one is already up, so a local run doesn't
 		// fight the editor you already have open.
 		reuseExistingServer: !process.env.CI,

@@ -10,6 +10,7 @@
 const COLOR_WHEELS_WGSL: &str =
     include_str!("../../effects/src/shaders/color_wheels.wgsl");
 const LUT_3D_WGSL: &str = include_str!("../../effects/src/shaders/lut_3d.wgsl");
+const TONE_CURVES_WGSL: &str = include_str!("../../effects/src/shaders/tone_curves.wgsl");
 
 fn parse_and_validate(source: &str, label: &str) {
     let module = naga::front::wgsl::parse_str(source).unwrap_or_else(|error| {
@@ -33,6 +34,11 @@ fn color_wheels_wgsl_parses_and_validates() {
 #[test]
 fn lut_3d_wgsl_parses_and_validates() {
     parse_and_validate(LUT_3D_WGSL, "lut_3d");
+}
+
+#[test]
+fn tone_curves_wgsl_parses_and_validates() {
+    parse_and_validate(TONE_CURVES_WGSL, "tone_curves");
 }
 
 /// The LUT shader samples texel *centres*: `(c * (size - 1) + 0.5) / size`.
