@@ -5,8 +5,7 @@ import type { MediaAsset } from "@/media/types";
 import { generateUUID } from "@/utils/id";
 import { storageService } from "@/services/storage/service";
 import type { FrameRate } from "opencut-wasm";
-import { hasMediaId } from "@/timeline/element-utils";
-import { getOrderedTimelineTracks } from "@/timeline/scene-tracks-view";
+import { removeMediaReferences } from "@/timeline/compound-media";
 import { frameRatesEqual, getHighestImportedVideoFps } from "@/fps/utils";
 import { UpdateProjectSettingsCommand } from "@/commands/project";
 
@@ -64,23 +63,9 @@ export class AddMediaAssetCommand extends Command {
 				});
 
 				const currentTracks = editor.scenes.getActiveScene().tracks;
-				const orphanedElements: Array<{ trackId: string; elementId: string }> =
-					[];
-
-				for (const track of getOrderedTimelineTracks({ tracks: currentTracks })) {
-					for (const element of track.elements) {
-						if (hasMediaId(element) && element.mediaId === this.assetId) {
-							orphanedElements.push({
-								trackId: track.id,
-								elementId: element.id,
-							});
-						}
-					}
-				}
-
-				if (orphanedElements.length > 0) {
-					editor.timeline.deleteElements({ elements: orphanedElements });
-				}
+				editor.timeline.updateTracks(
+					removeMediaReferences({ tracks: currentTracks, mediaId: this.assetId }),
+				);
 
 				this.restoreProjectFpsAfterFailedSave({ editor });
 

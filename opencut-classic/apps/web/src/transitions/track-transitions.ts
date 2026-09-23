@@ -17,7 +17,9 @@ function getSortedVideoTrackElements({
 }: {
 	track: VideoTrack;
 }): VideoTrackElement[] {
-	return [...track.elements].sort((left, right) => {
+	return track.elements.filter((element): element is VideoTrackElement =>
+		element.type === "video" || element.type === "image",
+	).sort((left, right) => {
 		if (left.startTime !== right.startTime) {
 			return left.startTime - right.startTime;
 		}

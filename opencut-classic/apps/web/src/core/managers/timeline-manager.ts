@@ -28,7 +28,12 @@ import {
 } from "@/timeline/clip-markers";
 import { TimelineDragSource } from "@/timeline/drag-source";
 import { getOrderedTimelineTracks } from "@/timeline/scene-tracks-view";
-import { filterUnlockedRefs } from "@/timeline/track-lock";
+import { filterUnlockedRefs, isTrackLockedById } from "@/timeline/track-lock";
+import {
+	decomposeCompoundInTracks,
+	makeCompoundInTracks,
+} from "@/timeline/compound-clips";
+import { generateUUID } from "@/utils/id";
 import {
 	expandRefsWithGroups,
 	propagateGroupMoves,
@@ -660,6 +665,64 @@ export class TimelineManager {
 	ungroupElements({ elements }: { elements: ElementRef[] }): void {
 		const command = new UngroupElementsCommand({ elements });
 		this.editor.command.execute({ command });
+	}
+
+	/** Fold a selection into one editable video layer. One undo restores it. */
+	makeCompound({
+		elements,
+		name = "Compound Clip",
+	}: {
+		elements: ElementRef[];
+		name?: string;
+	}): ElementRef | null {
+		const before = this.editor.scenes.getActiveScene().tracks;
+		const refs = expandRefsWithGroups({ tracks: before, refs: elements });
+		if (
+			refs.length < 2 ||
+			refs.some(({ trackId, elementId }) => {
+				const track = getOrderedTimelineTracks({ tracks: before }).find(
+					(item) => item.id === trackId,
+				);
+				return !track ||
+					isTrackLockedById({ tracks: before, trackId }) ||
+					!track.elements.some((element) => element.id === elementId);
+			})
+		) return null;
+		const result = makeCompoundInTracks({
+			tracks: before,
+			refs,
+			id: generateUUID(),
+			trackId: generateUUID(),
+			name,
+		});
+		if (!result) return null;
+		this.editor.command.execute({
+			command: new TracksSnapshotCommand({ before, after: result.tracks }),
+			suppressRipple: true,
+		});
+		return { trackId: result.trackId, elementId: result.compound.id };
+	}
+
+	/** Unfold the visible contents of a compound into its original track bands. */
+	decomposeCompound({ trackId, elementId }: ElementRef): boolean {
+		const before = this.editor.scenes.getActiveScene().tracks;
+		if (isTrackLockedById({ tracks: before, trackId })) return false;
+		const compound = before.video
+			.find((track) => track.id === trackId)
+			?.elements.find((element) => element.id === elementId);
+		if (compound?.type !== "compound") return false;
+		if (
+			getOrderedTimelineTracks({ tracks: compound.tracks }).some((track) =>
+				isTrackLockedById({ tracks: before, trackId: track.id }),
+			)
+		) return false;
+		const after = decomposeCompoundInTracks({ tracks: before, trackId, elementId });
+		if (!after) return false;
+		this.editor.command.execute({
+			command: new TracksSnapshotCommand({ before, after }),
+			suppressRipple: true,
+		});
+		return true;
 	}
 
 	unlinkElements({ elements }: { elements: ElementRef[] }): void {
