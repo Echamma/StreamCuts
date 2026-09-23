@@ -180,6 +180,59 @@ export function processEqChain({
 	return current;
 }
 
+/** Keep each channel's filter history across export windows. */
+export function createEqStreamProcessor({
+	bands,
+	sampleRate,
+	channels,
+}: {
+	bands: EqBand[];
+	sampleRate: number;
+	channels: number;
+}): {
+	processSample: ({
+		channel,
+		sample,
+	}: {
+		channel: number;
+		sample: number;
+	}) => number;
+} {
+	const coefficients = bands
+		.filter((band) => Math.abs(band.gainDb) >= EQ_FLAT_EPSILON_DB)
+		.map((band) => {
+			const c = biquadCoefficients({ ...band, sampleRate });
+			return {
+				b0: c.b0 / c.a0,
+				b1: c.b1 / c.a0,
+				b2: c.b2 / c.a0,
+				a1: c.a1 / c.a0,
+				a2: c.a2 / c.a0,
+			};
+		});
+	const state = Array.from({ length: channels }, () =>
+		coefficients.map(() => ({ x1: 0, x2: 0, y1: 0, y2: 0 })),
+	);
+
+	return {
+		processSample({ channel, sample }) {
+			let value = sample;
+			for (let index = 0; index < coefficients.length; index++) {
+				const c = coefficients[index];
+				const s = state[channel][index];
+				const output =
+					c.b0 * value + c.b1 * s.x1 + c.b2 * s.x2 - c.a1 * s.y1 - c.a2 * s.y2;
+				s.x2 = s.x1;
+				s.x1 = value;
+				s.y2 = s.y1;
+				s.y1 = output;
+				value = output;
+			}
+			return value;
+		},
+	};
+}
+
 /**
  * Magnitude response of a biquad at `frequency`, in dB. Pure analysis helper —
  * used by tests to assert a band does what it should, independent of Web Audio.
@@ -200,9 +253,11 @@ export function biquadFrequencyResponseDb({
 	const sin2W = Math.sin(2 * w);
 
 	// H(e^jw) = (b0 + b1 e^-jw + b2 e^-2jw) / (a0 + a1 e^-jw + a2 e^-2jw)
-	const numRe = coefficients.b0 + coefficients.b1 * cosW + coefficients.b2 * cos2W;
+	const numRe =
+		coefficients.b0 + coefficients.b1 * cosW + coefficients.b2 * cos2W;
 	const numIm = -(coefficients.b1 * sinW + coefficients.b2 * sin2W);
-	const denRe = coefficients.a0 + coefficients.a1 * cosW + coefficients.a2 * cos2W;
+	const denRe =
+		coefficients.a0 + coefficients.a1 * cosW + coefficients.a2 * cos2W;
 	const denIm = -(coefficients.a1 * sinW + coefficients.a2 * sin2W);
 
 	const numMagSq = numRe * numRe + numIm * numIm;

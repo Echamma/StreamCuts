@@ -3,6 +3,7 @@ import type { AudioCapableElement } from "@/timeline/audio-state";
 import {
 	biquadCoefficients,
 	biquadFrequencyResponseDb,
+	createEqStreamProcessor,
 	EQ_DEFAULT_MID_FREQUENCY,
 	EQ_DEFAULT_Q,
 	isEqFlat,
@@ -22,6 +23,37 @@ function elementWith(
 }
 
 const SAMPLE_RATE = 48000;
+
+test("streamed EQ matches a whole-buffer render across export windows", () => {
+	const bands: EqBand[] = [
+		{ type: "lowshelf", frequency: 120, gainDb: 3, q: 1 },
+		{ type: "peaking", frequency: 1000, gainDb: -12, q: 2 },
+		{ type: "highshelf", frequency: 12000, gainDb: 2, q: 1 },
+	];
+	const samples = Float32Array.from({ length: 4096 }, (_, index) =>
+		Math.sin((2 * Math.PI * 1000 * index) / SAMPLE_RATE),
+	);
+	const expected = processEqChain({ bands, sampleRate: SAMPLE_RATE, samples });
+	const processor = createEqStreamProcessor({
+		bands,
+		sampleRate: SAMPLE_RATE,
+		channels: 2,
+	});
+	const actual = new Float32Array(samples.length);
+	for (let index = 0; index < samples.length; index++) {
+		actual[index] = processor.processSample({
+			channel: 0,
+			sample: samples[index],
+		});
+	}
+	for (let index = 0; index < samples.length; index++) {
+		expect(Math.abs(actual[index] - expected[index])).toBeLessThan(1e-6);
+	}
+	// A second channel starts with its own filter history.
+	expect(
+		processor.processSample({ channel: 1, sample: samples[0] }),
+	).toBeCloseTo(actual[0], 6);
+});
 
 function responseAt({
 	type,
@@ -60,7 +92,13 @@ describe("biquadCoefficients / frequency response", () => {
 
 	test("peaking hits exactly its gain at the centre frequency", () => {
 		expect(
-			responseAt({ type: "peaking", frequency: 1000, gainDb: 6, q: 1, at: 1000 }),
+			responseAt({
+				type: "peaking",
+				frequency: 1000,
+				gainDb: 6,
+				q: 1,
+				at: 1000,
+			}),
 		).toBeCloseTo(6, 4);
 	});
 
@@ -105,13 +143,25 @@ describe("biquadCoefficients / frequency response", () => {
 			}),
 		).toBeCloseTo(6, 1);
 		expect(
-			responseAt({ type: "highshelf", frequency: 12000, gainDb: 6, q: 1, at: 40 }),
+			responseAt({
+				type: "highshelf",
+				frequency: 12000,
+				gainDb: 6,
+				q: 1,
+				at: 40,
+			}),
 		).toBeCloseTo(0, 1);
 	});
 
 	test("negative gain cuts (low shelf at DC)", () => {
 		expect(
-			responseAt({ type: "lowshelf", frequency: 120, gainDb: -6, q: 1, at: 10 }),
+			responseAt({
+				type: "lowshelf",
+				frequency: 120,
+				gainDb: -6,
+				q: 1,
+				at: 10,
+			}),
 		).toBeCloseTo(-6, 1);
 	});
 });
@@ -163,7 +213,9 @@ describe("processEqChain", () => {
 	});
 
 	test("a boosted band changes the signal", () => {
-		const samples = new Float32Array(256).fill(0).map((_, i) => Math.sin(i / 4));
+		const samples = new Float32Array(256)
+			.fill(0)
+			.map((_, i) => Math.sin(i / 4));
 		const bands: EqBand[] = [
 			{ type: "peaking", frequency: 1000, gainDb: 9, q: 1 },
 		];

@@ -2,7 +2,11 @@ import type { EditorCore } from "@/core";
 import { TICKS_PER_SECOND } from "@/wasm";
 import { clampRetimeRate, shouldMaintainPitch } from "@/retime/rate";
 import type { AudioClipSource } from "@/media/audio";
-import { createAudioContext, collectAudioClips, collectAudibleCandidates } from "@/media/audio";
+import {
+	createAudioContext,
+	collectAudioClips,
+	collectAudibleCandidates,
+} from "@/media/audio";
 import type { SceneTracks } from "@/timeline";
 import type { MediaAsset } from "@/media/types";
 import {
@@ -12,6 +16,8 @@ import {
 import { panToChannelGains } from "@/timeline/audio-pan";
 import { createAudioMasteringChain } from "@/media/audio-mastering";
 import { computeLevelsFromSamples } from "@/media/audio-metering";
+import { buildEqChain } from "@/media/audio-eq-chain";
+import { resolveElementEqBands } from "@/timeline/audio-eq";
 import {
 	getClipTimeAtSourceTime,
 	getSourceTimeAtClipTime,
@@ -45,6 +51,7 @@ export class AudioManager {
 		AsyncGenerator<WrappedAudioBuffer, void, unknown>
 	>();
 	private queuedSources = new Set<AudioBufferSourceNode>();
+	private activeClipOutputs = new Set<() => void>();
 	private preparedClipBuffers = new Map<string, Promise<AudioBuffer | null>>();
 	private decodedBuffers = new Map<string, Promise<AudioBuffer | null>>();
 	private playbackSessionId = 0;
@@ -313,66 +320,74 @@ export class AudioManager {
 		for (const source of this.queuedSources) {
 			try {
 				source.stop();
-			} catch {}
+			} catch {
+				// The source may already have ended.
+			}
 			source.disconnect();
 		}
 		this.queuedSources.clear();
+		for (const disconnect of this.activeClipOutputs) disconnect();
 	}
 
 	/**
-	 * Route a clip's (post-volume) gain node to the output, applying stereo pan.
+	 * A clip-wide output chain keeps biquad history between decoded buffers.
 	 *
-	 * At centre (`pan === 0`) the node connects straight to the destination —
-	 * an exact no-op that leaves the common case byte-identical and node-free.
-	 * Off-centre, a splitter → per-channel gain → merger applies the same
-	 * unity-at-centre law the export mixer uses (deliberately not a
-	 * `StereoPannerNode`, whose equal-power law would diverge from export). The
-	 * gain node is forced to a stereo layout first so a mono source pans instead
-	 * of collapsing to the left channel. Returns a teardown that disconnects
-	 * every node it created, to be called from the source's `ended` handler.
+	 * Post-volume EQ precedes pan, matching the export mixer. A flat EQ creates
+	 * no filter nodes and follows the original route.
 	 */
-	private connectClipToOutput({
+	private createClipOutput({
 		audioContext,
-		clipGain,
-		pan,
+		clip,
 	}: {
 		audioContext: AudioContext;
-		clipGain: GainNode;
-		pan: number;
-	}): () => void {
+		clip: AudioClipSource;
+	}): { input: GainNode; disconnect: () => void } {
 		const destination = this.masterGain ?? audioContext.destination;
+		const input = audioContext.createGain();
+		const eqNodes = buildEqChain({
+			context: audioContext,
+			bands: resolveElementEqBands({ element: clip.timelineElement }),
+		});
+		let tail: AudioNode = input;
+		for (const filter of eqNodes) {
+			tail.connect(filter);
+			tail = filter;
+		}
+		const pan = clip.pan;
+		const panNodes: AudioNode[] = [];
 
 		if (pan === 0) {
-			clipGain.connect(destination);
-			return () => clipGain.disconnect();
+			tail.connect(destination);
+		} else {
+			input.channelCountMode = "explicit";
+			input.channelCount = 2;
+			input.channelInterpretation = "speakers";
+			const splitter = audioContext.createChannelSplitter(2);
+			const leftGain = audioContext.createGain();
+			const rightGain = audioContext.createGain();
+			const merger = audioContext.createChannelMerger(2);
+			const gains = panToChannelGains({ pan });
+			leftGain.gain.value = gains.left;
+			rightGain.gain.value = gains.right;
+			tail.connect(splitter);
+			splitter.connect(leftGain, 0);
+			splitter.connect(rightGain, 1);
+			leftGain.connect(merger, 0, 0);
+			rightGain.connect(merger, 0, 1);
+			merger.connect(destination);
+			panNodes.push(splitter, leftGain, rightGain, merger);
 		}
 
-		clipGain.channelCountMode = "explicit";
-		clipGain.channelCount = 2;
-		clipGain.channelInterpretation = "speakers";
-
-		const splitter = audioContext.createChannelSplitter(2);
-		const leftGain = audioContext.createGain();
-		const rightGain = audioContext.createGain();
-		const merger = audioContext.createChannelMerger(2);
-		const gains = panToChannelGains({ pan });
-		leftGain.gain.value = gains.left;
-		rightGain.gain.value = gains.right;
-
-		clipGain.connect(splitter);
-		splitter.connect(leftGain, 0);
-		splitter.connect(rightGain, 1);
-		leftGain.connect(merger, 0, 0);
-		rightGain.connect(merger, 0, 1);
-		merger.connect(destination);
-
-		return () => {
-			clipGain.disconnect();
-			splitter.disconnect();
-			leftGain.disconnect();
-			rightGain.disconnect();
-			merger.disconnect();
+		let disconnected = false;
+		const disconnect = () => {
+			if (disconnected) return;
+			disconnected = true;
+			input.disconnect();
+			for (const node of [...eqNodes, ...panNodes]) node.disconnect();
+			this.activeClipOutputs.delete(disconnect);
 		};
+		this.activeClipOutputs.add(disconnect);
+		return { input, disconnect };
 	}
 
 	private async runClipIterator({
@@ -412,87 +427,101 @@ export class AudioManager {
 		const iterator = sink.buffers(sourceStartTime);
 		this.clipIterators.set(clip.id, iterator);
 		let consecutiveDroppedBufferCount = 0;
+		const output = this.createClipOutput({ audioContext, clip });
+		let activeNodes = 0;
+		let iteratorFinished = false;
+		const releaseIfDone = () => {
+			if (iteratorFinished && activeNodes === 0) output.disconnect();
+		};
 
-		for await (const { buffer, timestamp } of iterator) {
-			if (!this.editor.playback.getIsPlaying()) return;
-			if (sessionId !== this.playbackSessionId) return;
+		try {
+			for await (const { buffer, timestamp } of iterator) {
+				if (!this.editor.playback.getIsPlaying()) return;
+				if (sessionId !== this.playbackSessionId) return;
 
-			const timelineTime =
-				clip.startTime +
-				getClipTimeAtSourceTime({
-					sourceTime: timestamp - clip.trimStart,
-					retime: clip.retime,
-				});
-			if (timelineTime >= clipEnd) break;
+				const timelineTime =
+					clip.startTime +
+					getClipTimeAtSourceTime({
+						sourceTime: timestamp - clip.trimStart,
+						retime: clip.retime,
+					});
+				if (timelineTime >= clipEnd) break;
 
-			const node = audioContext.createBufferSource();
-			node.buffer = buffer;
-			if (clip.retime) {
-				node.playbackRate.value = clampRetimeRate({ rate: clip.retime.rate });
-			}
-			const clipGain = audioContext.createGain();
-			clipGain.gain.value = clip.volume;
-			node.connect(clipGain);
-			const disconnectClip = this.connectClipToOutput({
-				audioContext,
-				clipGain,
-				pan: clip.pan,
-			});
+				const node = audioContext.createBufferSource();
+				node.buffer = buffer;
+				if (clip.retime) {
+					node.playbackRate.value = clampRetimeRate({ rate: clip.retime.rate });
+				}
+				const clipGain = audioContext.createGain();
+				clipGain.gain.value = clip.volume;
+				node.connect(clipGain);
+				clipGain.connect(output.input);
 
-			const startTimestamp =
-				this.playbackStartContextTime +
-				this.playbackLatencyCompensationSeconds +
-				(timelineTime - this.playbackStartTime);
+				const startTimestamp =
+					this.playbackStartContextTime +
+					this.playbackLatencyCompensationSeconds +
+					(timelineTime - this.playbackStartTime);
 
-			if (startTimestamp >= audioContext.currentTime) {
-				node.start(startTimestamp);
-				consecutiveDroppedBufferCount = 0;
-			} else {
-				const offset = audioContext.currentTime - startTimestamp;
-				if (offset < buffer.duration) {
-					node.start(audioContext.currentTime, offset);
+				if (startTimestamp >= audioContext.currentTime) {
+					node.start(startTimestamp);
 					consecutiveDroppedBufferCount = 0;
 				} else {
-					consecutiveDroppedBufferCount += 1;
-					if (consecutiveDroppedBufferCount >= 5) {
-						const nextCompensationSeconds = Math.max(
-							this.playbackLatencyCompensationSeconds,
-							Math.min(0.25, offset + 0.01),
-						);
-						if (
-							nextCompensationSeconds >
-							this.playbackLatencyCompensationSeconds + 0.001
-						) {
-							this.playbackLatencyCompensationSeconds = nextCompensationSeconds;
+					const offset = audioContext.currentTime - startTimestamp;
+					if (offset < buffer.duration) {
+						node.start(audioContext.currentTime, offset);
+						consecutiveDroppedBufferCount = 0;
+					} else {
+						node.disconnect();
+						clipGain.disconnect();
+						consecutiveDroppedBufferCount += 1;
+						if (consecutiveDroppedBufferCount >= 5) {
+							const nextCompensationSeconds = Math.max(
+								this.playbackLatencyCompensationSeconds,
+								Math.min(0.25, offset + 0.01),
+							);
+							if (
+								nextCompensationSeconds >
+								this.playbackLatencyCompensationSeconds + 0.001
+							) {
+								this.playbackLatencyCompensationSeconds =
+									nextCompensationSeconds;
+							}
+							const resyncStartTime = this.getPlaybackTime();
+							this.clipIterators.delete(clip.id);
+							void this.runClipIterator({
+								clip,
+								startTime: resyncStartTime,
+								sessionId,
+							});
+							return;
 						}
-						const resyncStartTime = this.getPlaybackTime();
-						this.clipIterators.delete(clip.id);
-						void this.runClipIterator({
-							clip,
-							startTime: resyncStartTime,
-							sessionId,
-						});
-						return;
+						continue;
 					}
-					continue;
+				}
+
+				activeNodes++;
+				this.queuedSources.add(node);
+				node.addEventListener("ended", () => {
+					node.disconnect();
+					clipGain.disconnect();
+					activeNodes--;
+					releaseIfDone();
+					this.queuedSources.delete(node);
+				});
+
+				const aheadTime = timelineTime - this.getPlaybackTime();
+				if (aheadTime >= 1) {
+					await this.waitUntilCaughtUp({ timelineTime, targetAhead: 1 });
+					if (sessionId !== this.playbackSessionId) return;
 				}
 			}
-
-			this.queuedSources.add(node);
-			node.addEventListener("ended", () => {
-				node.disconnect();
-				disconnectClip();
-				this.queuedSources.delete(node);
-			});
-
-			const aheadTime = timelineTime - this.getPlaybackTime();
-			if (aheadTime >= 1) {
-				await this.waitUntilCaughtUp({ timelineTime, targetAhead: 1 });
-				if (sessionId !== this.playbackSessionId) return;
+		} finally {
+			iteratorFinished = true;
+			releaseIfDone();
+			if (this.clipIterators.get(clip.id) === iterator) {
+				this.clipIterators.delete(clip.id);
 			}
 		}
-
-		this.clipIterators.delete(clip.id);
 		// don't remove from activeClipIds - prevents scheduler from restarting this clip
 		// the set is cleared on stopPlayback anyway
 	}
@@ -529,11 +558,8 @@ export class AudioManager {
 		node.buffer = buffer;
 		const clipGain = audioContext.createGain();
 		node.connect(clipGain);
-		const disconnectClip = this.connectClipToOutput({
-			audioContext,
-			clipGain,
-			pan: clip.pan,
-		});
+		const output = this.createClipOutput({ audioContext, clip });
+		clipGain.connect(output.input);
 
 		const startTimestamp =
 			this.playbackStartContextTime +
@@ -573,7 +599,8 @@ export class AudioManager {
 		this.queuedSources.add(node);
 		node.addEventListener("ended", () => {
 			node.disconnect();
-			disconnectClip();
+			clipGain.disconnect();
+			output.disconnect();
 			this.queuedSources.delete(node);
 		});
 	}
@@ -632,8 +659,13 @@ export class AudioManager {
 	}
 
 	private hasCurveRetime({ clip }: { clip: AudioClipSource }): boolean {
-		const mode = (clip.retime as { mode?: unknown } | undefined)?.mode;
-		return mode === "curve";
+		const retime: unknown = clip.retime;
+		return (
+			typeof retime === "object" &&
+			retime !== null &&
+			"mode" in retime &&
+			retime.mode === "curve"
+		);
 	}
 
 	private scheduleClipGainAutomation({

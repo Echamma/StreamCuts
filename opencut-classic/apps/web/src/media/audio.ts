@@ -24,6 +24,11 @@ import { canElementHaveAudio, hasMediaId } from "@/timeline/element-utils";
 import { anyTrackSoloed, isTrackAudioSilenced } from "@/timeline/audio-solo";
 import { getElementPan, panToChannelGains } from "@/timeline/audio-pan";
 import {
+	createEqStreamProcessor,
+	isEqFlat,
+	resolveElementEqBands,
+} from "@/timeline/audio-eq";
+import {
 	computeFadeGain,
 	getElementFadeIn,
 	getElementFadeOut,
@@ -38,15 +43,27 @@ import {
 	AudioBufferSource,
 } from "mediabunny";
 import { TICKS_PER_SECOND } from "@/wasm";
-import {
-	computeRmsBuckets,
-	type SampleBucket,
-} from "@/media/waveform-summary";
+import { computeRmsBuckets, type SampleBucket } from "@/media/waveform-summary";
 
 const MAX_AUDIO_CHANNELS = 2;
 const EXPORT_SAMPLE_RATE = 44100;
 const DEFAULT_AUDIO_RENDER_WINDOW_SECONDS = 15;
 const STREAMING_AUDIO_HEADROOM = 0.98;
+
+type EqStreamProcessor = ReturnType<typeof createEqStreamProcessor>;
+
+function createElementEqProcessor({
+	element,
+	sampleRate,
+}: {
+	element: AudioCapableElement;
+	sampleRate: number;
+}): EqStreamProcessor | null {
+	const bands = resolveElementEqBands({ element });
+	return isEqFlat({ bands })
+		? null
+		: createEqStreamProcessor({ bands, sampleRate, channels: 2 });
+}
 
 export interface CollectedAudioElement {
 	timelineElement: AudioCapableElement;
@@ -451,8 +468,8 @@ async function fetchLibraryAudioSource({
 			trimEnd: element.trimEnd / TICKS_PER_SECOND,
 			volume,
 			pan: getElementPan({ element }),
-						fadeIn: getElementFadeIn({ element }),
-						fadeOut: getElementFadeOut({ element }),
+			fadeIn: getElementFadeIn({ element }),
+			fadeOut: getElementFadeOut({ element }),
 			retime: element.retime,
 		};
 	} catch (error) {
@@ -492,8 +509,8 @@ async function fetchLibraryAudioClip({
 			trimEnd: element.trimEnd,
 			volume,
 			pan: getElementPan({ element }),
-						fadeIn: getElementFadeIn({ element }),
-						fadeOut: getElementFadeOut({ element }),
+			fadeIn: getElementFadeIn({ element }),
+			fadeOut: getElementFadeOut({ element }),
 			muted,
 			retime: element.retime,
 		};
@@ -523,8 +540,8 @@ function collectMediaAudioSource({
 		trimEnd: element.trimEnd / TICKS_PER_SECOND,
 		volume,
 		pan: getElementPan({ element }),
-						fadeIn: getElementFadeIn({ element }),
-						fadeOut: getElementFadeOut({ element }),
+		fadeIn: getElementFadeIn({ element }),
+		fadeOut: getElementFadeOut({ element }),
 		retime: element.retime,
 	};
 }
@@ -553,8 +570,8 @@ function collectMediaAudioClip({
 		trimEnd: element.trimEnd / TICKS_PER_SECOND,
 		volume,
 		pan: getElementPan({ element }),
-						fadeIn: getElementFadeIn({ element }),
-						fadeOut: getElementFadeOut({ element }),
+		fadeIn: getElementFadeIn({ element }),
+		fadeOut: getElementFadeOut({ element }),
 		muted,
 		retime: element.retime,
 	};
@@ -798,9 +815,7 @@ async function decodeClipSourceFile({
 		for (const chunk of chunks) {
 			for (let channel = 0; channel < numChannels; channel++) {
 				nativeChannels[channel].set(
-					chunk.getChannelData(
-						Math.min(channel, chunk.numberOfChannels - 1),
-					),
+					chunk.getChannelData(Math.min(channel, chunk.numberOfChannels - 1)),
 					offset,
 				);
 			}
@@ -876,6 +891,7 @@ async function mixClipIntoTimelineChunk({
 	sourceBuffer,
 	outputBuffer,
 	audioContext,
+	eqProcessor,
 	windowStart,
 	windowEnd,
 	sampleRate,
@@ -884,6 +900,7 @@ async function mixClipIntoTimelineChunk({
 	sourceBuffer: AudioBuffer;
 	outputBuffer: AudioBuffer;
 	audioContext: BaseAudioContext;
+	eqProcessor: EqStreamProcessor | null;
 	windowStart: number;
 	windowEnd: number;
 	sampleRate: number;
@@ -926,6 +943,7 @@ async function mixClipIntoTimelineChunk({
 	return mixSourceIntoChunk({
 		clip,
 		buffer: pitchPreservedBuffer ?? sourceBuffer,
+		eqProcessor,
 		outputBuffer,
 		sampleRate,
 		outputOffsetSamples,
@@ -940,6 +958,7 @@ async function mixClipIntoTimelineChunk({
 function mixSourceIntoChunk({
 	clip,
 	buffer,
+	eqProcessor,
 	outputBuffer,
 	sampleRate,
 	outputOffsetSamples,
@@ -951,6 +970,7 @@ function mixSourceIntoChunk({
 }: {
 	clip: AudioClipSource;
 	buffer: AudioBuffer;
+	eqProcessor: EqStreamProcessor | null;
 	outputBuffer: AudioBuffer;
 	sampleRate: number;
 	outputOffsetSamples: number;
@@ -1007,12 +1027,15 @@ function mixSourceIntoChunk({
 						})
 					: 1;
 
-			outputData[outputIndex] +=
+			const postGain =
 				(sourceData[lowerIndex] * (1 - fraction) +
 					sourceData[upperIndex] * fraction) *
 				fadeGain *
-				gain *
-				channelPanGain;
+				gain;
+			outputData[outputIndex] +=
+				(eqProcessor
+					? eqProcessor.processSample({ channel, sample: postGain })
+					: postGain) * channelPanGain;
 			wroteSamples = true;
 		}
 	}
@@ -1060,6 +1083,7 @@ export async function* renderTimelineAudioChunks({
 		Math.ceil(durationSeconds / safeWindowDurationSeconds),
 	);
 	const activeClips: AudioClipSource[] = [];
+	const eqProcessors = new Map<string, EqStreamProcessor | null>();
 	let nextClipIndex = 0;
 
 	try {
@@ -1084,6 +1108,7 @@ export async function* renderTimelineAudioChunks({
 				const clip = activeClips[index];
 				if (clip.startTime + clip.duration <= windowStart) {
 					activeClips.splice(index, 1);
+					eqProcessors.delete(clip.id);
 				}
 			}
 
@@ -1100,6 +1125,15 @@ export async function* renderTimelineAudioChunks({
 					file: clip.file,
 				});
 				if (!sourceBuffer) continue;
+				if (!eqProcessors.has(clip.id)) {
+					eqProcessors.set(
+						clip.id,
+						createElementEqProcessor({
+							element: clip.timelineElement,
+							sampleRate,
+						}),
+					);
+				}
 
 				hasAudio =
 					(await mixClipIntoTimelineChunk({
@@ -1107,6 +1141,7 @@ export async function* renderTimelineAudioChunks({
 						sourceBuffer,
 						outputBuffer,
 						audioContext: context,
+						eqProcessor: eqProcessors.get(clip.id) ?? null,
 						windowStart,
 						windowEnd,
 						sampleRate,
@@ -1198,7 +1233,7 @@ export async function createTimelineAudioBuffer({
 		mediaAssets,
 		audioContext: context,
 		onProgress: (completed, total) => {
-			if (total > 0) onProgress?.(completed / total * 0.85);
+			if (total > 0) onProgress?.((completed / total) * 0.85);
 		},
 	});
 
@@ -1242,7 +1277,9 @@ export async function createTimelineAudioBuffer({
 	}
 
 	onProgress?.(0.92);
-	const result = await applyAudioMasteringToBuffer({ audioBuffer: outputBuffer });
+	const result = await applyAudioMasteringToBuffer({
+		audioBuffer: outputBuffer,
+	});
 	onProgress?.(1.0);
 	return result;
 }
@@ -1396,6 +1433,10 @@ function mixAudioChannels({
 	const outputStartSample = Math.floor(startTime * sampleRate);
 	const renderedLength = Math.ceil(elementDuration * sampleRate);
 	const panGains = panToChannelGains({ pan: element.pan });
+	const eqProcessor = createElementEqProcessor({
+		element: element.timelineElement,
+		sampleRate,
+	});
 
 	for (let channel = 0; channel < outputChannels; channel++) {
 		const outputData = outputBuffer.getChannelData(channel);
@@ -1431,12 +1472,15 @@ function mixAudioChannels({
 							localTime: clipTime,
 						})
 					: 1;
-			outputData[outputIndex] +=
+			const postGain =
 				(sourceData[lowerIndex] * (1 - fraction) +
 					sourceData[upperIndex] * fraction) *
 				fadeGain *
-				gain *
-				channelPanGain;
+				gain;
+			outputData[outputIndex] +=
+				(eqProcessor
+					? eqProcessor.processSample({ channel, sample: postGain })
+					: postGain) * channelPanGain;
 		}
 	}
 }
