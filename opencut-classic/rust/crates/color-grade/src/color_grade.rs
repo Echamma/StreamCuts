@@ -17,6 +17,8 @@
 //! Every stage is identity at its neutral value, so the default params are a
 //! byte-exact no-op.
 
+pub mod lut;
+
 /// Rec.709 luma weights (also used by the saturation stage).
 pub const LUMA: [f32; 3] = [0.2126, 0.7152, 0.0722];
 

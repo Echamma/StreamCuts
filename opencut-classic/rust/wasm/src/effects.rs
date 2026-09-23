@@ -11,6 +11,94 @@ use crate::gpu::{
     render_texture_to_canvas, with_gpu_runtime,
 };
 
+/// A prepared table crosses the WASM boundary only when the UI changes it.
+#[wasm_bindgen]
+pub struct PreparedColorLut {
+    inner: effects::lut::ColorLut,
+}
+
+#[wasm_bindgen]
+impl PreparedColorLut {
+    #[wasm_bindgen(getter)]
+    pub fn identity(&self) -> bool {
+        self.inner.is_identity()
+    }
+    #[wasm_bindgen(getter)]
+    pub fn size(&self) -> u32 {
+        self.inner.size
+    }
+    #[wasm_bindgen(getter, js_name = domainMin)]
+    pub fn domain_min(&self) -> Vec<f32> {
+        self.inner.domain_min.to_vec()
+    }
+    #[wasm_bindgen(getter, js_name = domainMax)]
+    pub fn domain_max(&self) -> Vec<f32> {
+        self.inner.domain_max.to_vec()
+    }
+    #[wasm_bindgen(getter)]
+    pub fn table(&self) -> Vec<f32> {
+        self.inner.table.clone()
+    }
+}
+
+#[wasm_bindgen(js_name = prepareCubeLut)]
+pub fn prepare_cube_lut(text: &str) -> Result<PreparedColorLut, JsValue> {
+    effects::lut::parse_cube(text)
+        .map(|inner| PreparedColorLut { inner })
+        .map_err(|e| JsValue::from_str(&e))
+}
+
+#[wasm_bindgen(js_name = prepareToneCurves)]
+pub fn prepare_tone_curves(points: JsValue) -> Result<PreparedColorLut, JsValue> {
+    let points: Vec<Vec<[f32; 2]>> =
+        serde_wasm_bindgen::from_value(points).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    effects::lut::bake_curves(&points)
+        .map(|inner| PreparedColorLut { inner })
+        .map_err(|e| JsValue::from_str(&e))
+}
+
+/// Compact analytic curve data for the GPU's tone-curves pass. A sampled 3D
+/// table cannot represent steep or closely spaced control points accurately.
+#[wasm_bindgen]
+pub struct PreparedToneCurves {
+    inner: effects::lut::PreparedCurves,
+}
+
+#[wasm_bindgen]
+impl PreparedToneCurves {
+    #[wasm_bindgen(getter)]
+    pub fn identity(&self) -> bool {
+        self.inner.is_identity
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn counts(&self) -> Vec<f32> {
+        self.inner.counts.to_vec()
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn nodes(&self) -> Vec<f32> {
+        self.inner.nodes.clone()
+    }
+}
+
+#[wasm_bindgen(js_name = prepareToneCurvesExact)]
+pub fn prepare_tone_curves_exact(points: JsValue) -> Result<PreparedToneCurves, JsValue> {
+    let points: Vec<Vec<[f32; 2]>> =
+        serde_wasm_bindgen::from_value(points).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    effects::lut::prepare_curves(&points)
+        .map(|inner| PreparedToneCurves { inner })
+        .map_err(|e| JsValue::from_str(&e))
+}
+
+#[wasm_bindgen(js_name = sampleToneCurve)]
+pub fn sample_tone_curve(points: JsValue) -> Result<Vec<f32>, JsValue> {
+    let points: Vec<[f32; 2]> =
+        serde_wasm_bindgen::from_value(points).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let curve = effects::lut::ToneCurve::new(&points).map_err(|e| JsValue::from_str(&e))?;
+    Ok((0..=128).map(|i| curve.evaluate(i as f32 / 128.)).collect())
+}
+
 struct ApplyEffectPassesOptions {
     source: wgpu::web_sys::OffscreenCanvas,
     width: u32,

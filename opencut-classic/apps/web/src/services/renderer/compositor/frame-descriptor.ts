@@ -132,7 +132,7 @@ async function collectNode({
 		}
 		items.push({
 			type: "sceneEffect",
-			effectPassGroups: [node.resolved.passes],
+			effect_pass_groups: [node.resolved.passes],
 		});
 		return;
 	}
@@ -359,13 +359,11 @@ function collectTextNode({
 
 	const textureId = `${path}:text`;
 	const { width, height } = renderer;
-	// Text output is fully determined by node.params + node.resolved. Both are
-	// plain data we can stringify cheaply; the resolved measured layout is the
-	// expensive part of text setup, so stringifying it here is orders of
-	// magnitude cheaper than re-rasterizing when nothing changed.
+	// Effects run on the GPU after text rasterization. Exclude their source
+	// strings and baked LUT arrays from the raster cache key.
 	const contentHash = `text:${width}x${height}:${JSON.stringify({
-		params: node.params,
-		resolved: node.resolved,
+		params: { ...node.params, effects: undefined },
+		resolved: { ...node.resolved, effectPasses: undefined },
 	})}`;
 	textures.set(textureId, {
 		kind: "rendered",
@@ -506,10 +504,8 @@ function computeVisualTransform({
 	const reframePanY = (0.5 - reframe.y) * sourceHeight * fitScale;
 
 	return {
-		centerX:
-			renderer.width / 2 + reframePanX + resolved.transform.position.x,
-		centerY:
-			renderer.height / 2 + reframePanY + resolved.transform.position.y,
+		centerX: renderer.width / 2 + reframePanX + resolved.transform.position.x,
+		centerY: renderer.height / 2 + reframePanY + resolved.transform.position.y,
 		width: absWidth,
 		height: absHeight,
 		rotationDegrees: resolved.transform.rotate,

@@ -1,8 +1,11 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::collections::{hash_map::DefaultHasher, VecDeque};
+use std::hash::{Hash, Hasher};
 
 use bytemuck::{Pod, Zeroable};
 use color_grade::{ColorGradeParams, Wheel};
-use gpu::{FULLSCREEN_SHADER_SOURCE, GpuContext};
+use gpu::{GpuContext, FULLSCREEN_SHADER_SOURCE};
 use thiserror::Error;
 use wgpu::util::DeviceExt;
 
@@ -14,6 +17,8 @@ const COLOR_WHEELS_SHADER_ID: &str = "color-wheels";
 const COLOR_WHEELS_SHADER_SOURCE: &str = include_str!("shaders/color_wheels.wgsl");
 const LUT_3D_SHADER_ID: &str = "lut-3d";
 const LUT_3D_SHADER_SOURCE: &str = include_str!("shaders/lut_3d.wgsl");
+const TONE_CURVES_SHADER_ID: &str = "tone-curves";
+const TONE_CURVES_SHADER_SOURCE: &str = include_str!("shaders/tone_curves.wgsl");
 
 /// Uniform names carrying the LUT table for {@link LUT_3D_SHADER_ID}: the
 /// per-axis node count, and the flat RGB triples the `.cube` parser produced
@@ -34,6 +39,43 @@ pub struct EffectPipeline {
     /// its filtering sampler. Only `lut-3d` binds it.
     lut_bind_group_layout: wgpu::BindGroupLayout,
     pipelines: HashMap<String, wgpu::RenderPipeline>,
+    // Shared by playback/export passes; bounded to eight 3D textures.
+    lut_cache: RefCell<VecDeque<CachedLut>>,
+}
+
+struct CachedLut {
+    key: u64,
+    bind_group: wgpu::BindGroup,
+    output_range: LutOutputRange,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct LutOutputRange {
+    min: [f32; 3],
+    max: [f32; 3],
+}
+
+impl Default for LutOutputRange {
+    fn default() -> Self {
+        // Keep the usual [0, 1] LUT at full 8-bit precision, while expanding
+        // only channels with nodes outside that range.
+        Self {
+            min: [0.; 3],
+            max: [1.; 3],
+        }
+    }
+}
+
+impl LutOutputRange {
+    fn include(&mut self, channel: usize, value: f32) {
+        self.min[channel] = self.min[channel].min(value);
+        self.max[channel] = self.max[channel].max(value);
+    }
+
+    fn encode(&self, channel: usize, value: f32) -> u8 {
+        let normalized = (value - self.min[channel]) / (self.max[channel] - self.min[channel]);
+        (normalized.clamp(0., 1.) * 255.).round() as u8
+    }
 }
 
 #[derive(Debug, Error)]
@@ -146,52 +188,51 @@ impl EffectPipeline {
         // Every effect shares the fullscreen vertex shader and differs only in
         // its fragment module (and, for the LUT, its layout), so build them from
         // one helper.
-        let build_pipeline_with = |label: &str,
-                                   fragment_source: &str,
-                                   layout: &wgpu::PipelineLayout| {
-            let fragment_module =
+        let build_pipeline_with =
+            |label: &str, fragment_source: &str, layout: &wgpu::PipelineLayout| {
+                let fragment_module =
+                    context
+                        .device()
+                        .create_shader_module(wgpu::ShaderModuleDescriptor {
+                            label: Some(label),
+                            source: wgpu::ShaderSource::Wgsl(fragment_source.into()),
+                        });
                 context
                     .device()
-                    .create_shader_module(wgpu::ShaderModuleDescriptor {
+                    .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                         label: Some(label),
-                        source: wgpu::ShaderSource::Wgsl(fragment_source.into()),
-                    });
-            context
-                .device()
-                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some(label),
-                    layout: Some(layout),
-                    vertex: wgpu::VertexState {
-                        module: &vertex_shader_module,
-                        entry_point: Some("vertex_main"),
-                        buffers: &[wgpu::VertexBufferLayout {
-                            array_stride: std::mem::size_of::<[f32; 2]>() as u64,
-                            step_mode: wgpu::VertexStepMode::Vertex,
-                            attributes: &[wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Float32x2,
-                                offset: 0,
-                                shader_location: 0,
+                        layout: Some(layout),
+                        vertex: wgpu::VertexState {
+                            module: &vertex_shader_module,
+                            entry_point: Some("vertex_main"),
+                            buffers: &[wgpu::VertexBufferLayout {
+                                array_stride: std::mem::size_of::<[f32; 2]>() as u64,
+                                step_mode: wgpu::VertexStepMode::Vertex,
+                                attributes: &[wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x2,
+                                    offset: 0,
+                                    shader_location: 0,
+                                }],
                             }],
-                        }],
-                        compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    },
-                    fragment: Some(wgpu::FragmentState {
-                        module: &fragment_module,
-                        entry_point: Some("fragment_main"),
-                        targets: &[Some(wgpu::ColorTargetState {
-                            format: context.texture_format(),
-                            blend: None,
-                            write_mask: wgpu::ColorWrites::ALL,
-                        })],
-                        compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    }),
-                    primitive: wgpu::PrimitiveState::default(),
-                    depth_stencil: None,
-                    multisample: wgpu::MultisampleState::default(),
-                    multiview_mask: None,
-                    cache: None,
-                })
-        };
+                            compilation_options: wgpu::PipelineCompilationOptions::default(),
+                        },
+                        fragment: Some(wgpu::FragmentState {
+                            module: &fragment_module,
+                            entry_point: Some("fragment_main"),
+                            targets: &[Some(wgpu::ColorTargetState {
+                                format: context.texture_format(),
+                                blend: None,
+                                write_mask: wgpu::ColorWrites::ALL,
+                            })],
+                            compilation_options: wgpu::PipelineCompilationOptions::default(),
+                        }),
+                        primitive: wgpu::PrimitiveState::default(),
+                        depth_stencil: None,
+                        multisample: wgpu::MultisampleState::default(),
+                        multiview_mask: None,
+                        cache: None,
+                    })
+            };
 
         let pipelines = HashMap::from([
             (
@@ -218,12 +259,21 @@ impl EffectPipeline {
                     &lut_pipeline_layout,
                 ),
             ),
+            (
+                TONE_CURVES_SHADER_ID.to_string(),
+                build_pipeline_with(
+                    "effects-tone-curves-pipeline",
+                    TONE_CURVES_SHADER_SOURCE,
+                    &pipeline_layout,
+                ),
+            ),
         ]);
 
         Self {
             uniform_bind_group_layout,
             lut_bind_group_layout,
             pipelines,
+            lut_cache: RefCell::new(VecDeque::new()),
         }
     }
 
@@ -293,7 +343,15 @@ impl EffectPipeline {
                             },
                         ],
                     });
-            let uniform_bytes = pack_effect_uniforms(pass, width, height)?;
+            // The LUT texture carries values normalized to a per-channel output
+            // range. Bind it first so the same range can be sent to the shader.
+            let lut = if pass.shader == LUT_3D_SHADER_ID {
+                Some(self.create_lut_bind_group(context, pass)?)
+            } else {
+                None
+            };
+            let uniform_bytes =
+                pack_effect_uniforms(pass, width, height, lut.as_ref().map(|(_, range)| *range))?;
             let uniform_buffer =
                 context
                     .device()
@@ -319,14 +377,6 @@ impl EffectPipeline {
                 }
             })?;
 
-            // The LUT pass binds its table as a third group; every other effect
-            // leaves this `None` and binds only groups 0 and 1.
-            let lut_bind_group = if pass.shader == LUT_3D_SHADER_ID {
-                Some(self.create_lut_bind_group(context, pass)?)
-            } else {
-                None
-            };
-
             {
                 let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("effects-render-pass"),
@@ -348,7 +398,7 @@ impl EffectPipeline {
                 render_pass.set_vertex_buffer(0, context.fullscreen_quad().slice(..));
                 render_pass.set_bind_group(0, &texture_bind_group, &[]);
                 render_pass.set_bind_group(1, &uniform_bind_group, &[]);
-                if let Some(lut_bind_group) = lut_bind_group.as_ref() {
+                if let Some((lut_bind_group, _)) = lut.as_ref() {
                     render_pass.set_bind_group(2, lut_bind_group, &[]);
                 }
                 render_pass.draw(0..6, 0..1);
@@ -372,15 +422,16 @@ impl EffectPipeline {
         &self,
         context: &GpuContext,
         pass: &EffectPass,
-    ) -> Result<wgpu::BindGroup, EffectsError> {
-        let size = read_number_uniform(pass, LUT_SIZE_UNIFORM)? as u32;
+    ) -> Result<(wgpu::BindGroup, LutOutputRange), EffectsError> {
+        let raw_size = read_number_uniform(pass, LUT_SIZE_UNIFORM)?;
+        let size = raw_size as u32;
         let table = read_vector_uniform(pass, LUT_TABLE_UNIFORM)?;
 
         let expected_len = (size as usize)
             .checked_pow(3)
             .and_then(|nodes| nodes.checked_mul(3))
             .unwrap_or(0);
-        if size < 2 || table.len() != expected_len {
+        if !(2..=65).contains(&size) || raw_size != size as f32 || table.len() != expected_len {
             return Err(EffectsError::InvalidVectorUniform {
                 shader: pass.shader.clone(),
                 uniform: LUT_TABLE_UNIFORM.to_string(),
@@ -388,11 +439,46 @@ impl EffectPipeline {
             });
         }
 
+        let mut hasher = DefaultHasher::new();
+        size.hash(&mut hasher);
+        let mut output_range = LutOutputRange::default();
+        for triple in table.chunks_exact(3) {
+            for (channel, &value) in triple.iter().enumerate() {
+                if !value.is_finite() {
+                    return Err(EffectsError::InvalidVectorUniform {
+                        shader: pass.shader.clone(),
+                        uniform: LUT_TABLE_UNIFORM.to_string(),
+                        expected_length: expected_len,
+                    });
+                }
+                value.to_bits().hash(&mut hasher);
+                output_range.include(channel, value);
+            }
+        }
+        if (0..3)
+            .any(|channel| !(output_range.max[channel] - output_range.min[channel]).is_finite())
+        {
+            return Err(EffectsError::InvalidVectorUniform {
+                shader: pass.shader.clone(),
+                uniform: LUT_TABLE_UNIFORM.to_string(),
+                expected_length: expected_len,
+            });
+        }
+        let key = hasher.finish();
+        let mut cache = self.lut_cache.borrow_mut();
+        if let Some(index) = cache.iter().position(|entry| entry.key == key) {
+            let entry = cache.remove(index).unwrap();
+            let group = entry.bind_group.clone();
+            let output_range = entry.output_range;
+            cache.push_back(entry);
+            return Ok((group, output_range));
+        }
+
         // RGB triples -> RGBA8, alpha opaque.
         let mut texels = Vec::with_capacity(table.len() / 3 * 4);
         for triple in table.chunks_exact(3) {
-            for channel in triple {
-                texels.push((channel.clamp(0.0, 1.0) * 255.0).round() as u8);
+            for (channel, &value) in triple.iter().enumerate() {
+                texels.push(output_range.encode(channel, value));
             }
             texels.push(u8::MAX);
         }
@@ -432,7 +518,7 @@ impl EffectPipeline {
             dimension: Some(wgpu::TextureViewDimension::D3),
             ..Default::default()
         });
-        Ok(context
+        let group = context
             .device()
             .create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("effects-lut-bind-group"),
@@ -447,7 +533,16 @@ impl EffectPipeline {
                         resource: wgpu::BindingResource::Sampler(context.linear_sampler()),
                     },
                 ],
-            }))
+            });
+        if cache.len() >= 8 {
+            cache.pop_front();
+        }
+        cache.push_back(CachedLut {
+            key,
+            bind_group: group.clone(),
+            output_range,
+        });
+        Ok((group, output_range))
     }
 }
 
@@ -456,12 +551,23 @@ impl EffectPipeline {
 struct Lut3dUniformBuffer {
     // intensity, size, _, _
     scalars: [f32; 4],
+    domain_min: [f32; 4],
+    domain_max: [f32; 4],
+    output_min: [f32; 4],
+    output_max: [f32; 4],
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct ColorWheelsUniformBuffer {
     lanes: [[f32; 4]; 6],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct ToneCurvesUniformBuffer {
+    counts: [f32; 4],
+    nodes: [[f32; 4]; 128],
 }
 
 /// Pack the uniform bytes for a pass, dispatching on its shader. Different
@@ -471,6 +577,7 @@ fn pack_effect_uniforms(
     pass: &EffectPass,
     width: u32,
     height: u32,
+    lut_output_range: Option<LutOutputRange>,
 ) -> Result<Vec<u8>, EffectsError> {
     match pass.shader.as_str() {
         GAUSSIAN_BLUR_SHADER_ID => {
@@ -479,7 +586,12 @@ fn pack_effect_uniforms(
         COLOR_WHEELS_SHADER_ID => {
             Ok(bytemuck::bytes_of(&pack_color_wheels_uniforms(pass)?).to_vec())
         }
-        LUT_3D_SHADER_ID => Ok(bytemuck::bytes_of(&pack_lut_3d_uniforms(pass)?).to_vec()),
+        LUT_3D_SHADER_ID => Ok(bytemuck::bytes_of(&pack_lut_3d_uniforms(
+            pass,
+            lut_output_range.expect("LUT output range must accompany the LUT texture"),
+        )?)
+        .to_vec()),
+        TONE_CURVES_SHADER_ID => Ok(bytemuck::bytes_of(&pack_tone_curves_uniforms(pass)?).to_vec()),
         other => Err(EffectsError::UnknownEffectShader {
             shader: other.to_string(),
         }),
@@ -513,9 +625,7 @@ fn pack_blur_uniforms(
     })
 }
 
-fn pack_color_wheels_uniforms(
-    pass: &EffectPass,
-) -> Result<ColorWheelsUniformBuffer, EffectsError> {
+fn pack_color_wheels_uniforms(pass: &EffectPass) -> Result<ColorWheelsUniformBuffer, EffectsError> {
     let wheel = |prefix: &str| -> Result<Wheel, EffectsError> {
         Ok(Wheel {
             rgb: read_vec3_uniform(pass, &format!("u_{prefix}"))?,
@@ -541,10 +651,42 @@ fn pack_color_wheels_uniforms(
     })
 }
 
-/// The LUT table is bound as a texture, so the uniform block only carries the
-/// blend intensity and the node count the shader needs for its coordinate
-/// mapping. `intensity` defaults to fully applied when the pass omits it.
-fn pack_lut_3d_uniforms(pass: &EffectPass) -> Result<Lut3dUniformBuffer, EffectsError> {
+fn pack_tone_curves_uniforms(pass: &EffectPass) -> Result<ToneCurvesUniformBuffer, EffectsError> {
+    let raw_counts = read_vector_uniform(pass, "curveCounts")?;
+    if raw_counts.len() != 4
+        || raw_counts
+            .iter()
+            .any(|&n| !n.is_finite() || !(2.0..=32.0).contains(&n) || n.fract() != 0.0)
+    {
+        return Err(EffectsError::InvalidVectorUniform {
+            shader: pass.shader.clone(),
+            uniform: "curveCounts".into(),
+            expected_length: 4,
+        });
+    }
+    let raw_nodes = read_vector_uniform(pass, "curveNodes")?;
+    if raw_nodes.len() != 512 || raw_nodes.iter().any(|n| !n.is_finite()) {
+        return Err(EffectsError::InvalidVectorUniform {
+            shader: pass.shader.clone(),
+            uniform: "curveNodes".into(),
+            expected_length: 512,
+        });
+    }
+    let mut nodes = [[0.; 4]; 128];
+    for (node, values) in nodes.iter_mut().zip(raw_nodes.chunks_exact(4)) {
+        node.copy_from_slice(values);
+    }
+    let mut counts = [0.; 4];
+    counts.copy_from_slice(raw_counts);
+    Ok(ToneCurvesUniformBuffer { counts, nodes })
+}
+
+/// The LUT table is bound as a texture. Its output range restores values outside
+/// [0, 1] after filtering and before intensity is blended with the source.
+fn pack_lut_3d_uniforms(
+    pass: &EffectPass,
+    output_range: LutOutputRange,
+) -> Result<Lut3dUniformBuffer, EffectsError> {
     let intensity = match pass.uniforms.get("intensity") {
         Some(UniformValue::Number(value)) => *value,
         Some(UniformValue::Vector(_)) => {
@@ -556,18 +698,39 @@ fn pack_lut_3d_uniforms(pass: &EffectPass) -> Result<Lut3dUniformBuffer, Effects
         None => 1.0,
     };
     let size = read_number_uniform(pass, LUT_SIZE_UNIFORM)?;
+    let min = if pass.uniforms.contains_key("domainMin") {
+        read_vec3_uniform(pass, "domainMin")?
+    } else {
+        [0.; 3]
+    };
+    let max = if pass.uniforms.contains_key("domainMax") {
+        read_vec3_uniform(pass, "domainMax")?
+    } else {
+        [1.; 3]
+    };
     Ok(Lut3dUniformBuffer {
         scalars: [intensity, size, 0.0, 0.0],
+        domain_min: [min[0], min[1], min[2], 0.],
+        domain_max: [max[0], max[1], max[2], 0.],
+        output_min: [
+            output_range.min[0],
+            output_range.min[1],
+            output_range.min[2],
+            0.,
+        ],
+        output_max: [
+            output_range.max[0],
+            output_range.max[1],
+            output_range.max[2],
+            0.,
+        ],
     })
 }
 
 /// Borrow a vector uniform's values without asserting a length — callers that
 /// know the expected length check it themselves (the LUT table's length depends
 /// on its node count).
-fn read_vector_uniform<'a>(
-    pass: &'a EffectPass,
-    uniform: &str,
-) -> Result<&'a [f32], EffectsError> {
+fn read_vector_uniform<'a>(pass: &'a EffectPass, uniform: &str) -> Result<&'a [f32], EffectsError> {
     let Some(value) = pass.uniforms.get(uniform) else {
         return Err(EffectsError::MissingUniform {
             shader: pass.shader.clone(),
@@ -646,4 +809,36 @@ fn read_vec3_uniform(pass: &EffectPass, uniform: &str) -> Result<[f32; 3], Effec
         });
     }
     Ok([values[0], values[1], values[2]])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lut_output_range_survives_partial_intensity_blending() {
+        let mut range = LutOutputRange::default();
+        range.include(0, 1.5);
+        range.include(1, -0.5);
+        let pass = EffectPass {
+            shader: LUT_3D_SHADER_ID.to_string(),
+            uniforms: HashMap::from([
+                ("lutSize".to_string(), UniformValue::Number(2.)),
+                ("intensity".to_string(), UniformValue::Number(0.5)),
+            ]),
+        };
+        let uniform = pack_lut_3d_uniforms(&pass, range).unwrap();
+        assert_eq!(&uniform.output_min[..3], &[0., -0.5, 0.]);
+        assert_eq!(&uniform.output_max[..3], &[1.5, 1., 1.]);
+
+        // A 1.5 LUT node used to be clipped to 1.0 during upload, so a 50%
+        // blend with a 0.5 source incorrectly became 0.75 instead of 1.0.
+        let encoded = range.encode(0, 1.5);
+        let decoded = uniform.output_min[0]
+            + encoded as f32 / 255. * (uniform.output_max[0] - uniform.output_min[0]);
+        let blended = 0.5 + (decoded - 0.5) * uniform.scalars[0];
+        assert!((blended - 1.).abs() < 1e-6);
+        assert_eq!(range.encode(1, -0.5), 0);
+        assert_eq!(LutOutputRange::default().encode(0, 0.5), 128);
+    }
 }

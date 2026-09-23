@@ -22,7 +22,8 @@ export type FrameItemDescriptor =
 	  }
 	| {
 			type: "sceneEffect";
-			effectPassGroups: EffectPass[][];
+			// The Rust enum variant uses this exact field name in its WASM input.
+			effect_pass_groups: EffectPass[][];
 	  };
 
 export type QuadTransformDescriptor = {
