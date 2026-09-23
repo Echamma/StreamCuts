@@ -405,11 +405,7 @@ export function TimelineElement({
 		}
 	};
 
-	const handleAutoReframe = async ({
-		event,
-	}: {
-		event: React.MouseEvent;
-	}) => {
+	const handleAutoReframe = async ({ event }: { event: React.MouseEvent }) => {
 		event.stopPropagation();
 		if (element.type !== "video") {
 			return;
@@ -430,9 +426,12 @@ export function TimelineElement({
 					id: toastId,
 				});
 			} else if (result.status === "no-media") {
-				toast.warning("Auto-reframe needs a video clip with a decodable source.", {
-					id: toastId,
-				});
+				toast.warning(
+					"Auto-reframe needs a video clip with a decodable source.",
+					{
+						id: toastId,
+					},
+				);
 			} else {
 				toast.dismiss(toastId);
 			}
@@ -445,11 +444,7 @@ export function TimelineElement({
 		}
 	};
 
-	const handleDetectScenes = async ({
-		event,
-	}: {
-		event: React.MouseEvent;
-	}) => {
+	const handleDetectScenes = async ({ event }: { event: React.MouseEvent }) => {
 		event.stopPropagation();
 		if (element.type !== "video") {
 			return;
@@ -627,6 +622,11 @@ export function TimelineElement({
 						data-selected={isSelected ? "true" : "false"}
 						data-grouped={element.groupId === undefined ? "false" : "true"}
 						data-linked={element.linkId === undefined ? "false" : "true"}
+						data-proxy={
+							element.type === "video" && mediaAsset?.hasProxy
+								? "true"
+								: "false"
+						}
 						className="absolute top-0 select-none"
 						style={{
 							left: `${elementLeft}px`,
@@ -655,6 +655,14 @@ export function TimelineElement({
 							onResizeStart={onResizeStart}
 							isDropTarget={isDropTarget}
 						/>
+						{element.type === "video" && mediaAsset?.hasProxy && (
+							<span
+								data-testid="proxy-badge"
+								className="pointer-events-none absolute top-0 right-1 z-10 rounded bg-black/70 px-1 text-[10px] font-medium text-white"
+							>
+								Proxy
+							</span>
+						)}
 						{isSelected && (
 							<div
 								className="pointer-events-none absolute inset-x-0 top-0 overflow-hidden"
