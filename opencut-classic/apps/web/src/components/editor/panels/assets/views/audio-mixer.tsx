@@ -1,12 +1,10 @@
 "use client";
 
 import { useEditor, useScenes } from "@/editor/use-editor";
-import {
-	getElementVolume,
-	isElementMuted,
-} from "@/timeline/audio-state";
+import { getElementVolume, isElementMuted } from "@/timeline/audio-state";
 import { anyTrackSoloed, isTrackAudioSilenced } from "@/timeline/audio-solo";
 import { getElementPan, PAN_MAX, PAN_MIN } from "@/timeline/audio-pan";
+import { resolveElementEqBands } from "@/timeline/audio-eq";
 import {
 	FADE_MAX_SECONDS,
 	getElementFadeIn,
@@ -304,6 +302,7 @@ function ElementMixerRow({
 	const pan = getElementPan({ element });
 	const fadeIn = getElementFadeIn({ element });
 	const fadeOut = getElementFadeOut({ element });
+	const eqBands = resolveElementEqBands({ element });
 	const muted = isElementMuted({ element });
 	const effectiveMuted = trackMuted || muted;
 	// Fade sliders cap at the smaller of the practical UI max and half the clip
@@ -393,6 +392,34 @@ function ElementMixerRow({
 					elementId: element.id,
 					patch: {
 						params: { ...element.params, [key]: seconds },
+					},
+				},
+			],
+			pushHistory,
+		});
+	};
+
+	const writeEq = ({
+		key,
+		value,
+		pushHistory,
+	}: {
+		key:
+			| "eqLowGainDb"
+			| "eqMidGainDb"
+			| "eqMidFrequency"
+			| "eqMidQ"
+			| "eqHighGainDb";
+		value: number;
+		pushHistory: boolean;
+	}) => {
+		editor.timeline.updateElements({
+			updates: [
+				{
+					trackId,
+					elementId: element.id,
+					patch: {
+						params: { ...element.params, [key]: value },
 					},
 				},
 			],
@@ -490,7 +517,11 @@ function ElementMixerRow({
 				<Slider
 					value={[Math.min(fadeOut, fadeCap)]}
 					onValueChange={(values) =>
-						writeFade({ key: "fadeOut", seconds: values[0], pushHistory: false })
+						writeFade({
+							key: "fadeOut",
+							seconds: values[0],
+							pushHistory: false,
+						})
 					}
 					onValueCommit={(values) =>
 						writeFade({ key: "fadeOut", seconds: values[0], pushHistory: true })
@@ -509,6 +540,136 @@ function ElementMixerRow({
 					{formatFade(fadeOut)}
 				</span>
 			</div>
+			<details
+				data-testid="eq-controls"
+				className="border-border/60 border-t pt-2"
+			>
+				<summary className="cursor-pointer text-xs font-semibold">EQ</summary>
+				<div className="mt-2 flex flex-col gap-2">
+					<EqParameter
+						label="Low EQ"
+						testId="eq-low-gain"
+						value={eqBands[0].gainDb}
+						min={-18}
+						max={18}
+						step={0.5}
+						display={`${eqBands[0].gainDb.toFixed(1)} dB`}
+						onChange={({ value, pushHistory }) =>
+							writeEq({ key: "eqLowGainDb", value, pushHistory })
+						}
+					/>
+					<EqParameter
+						label="Mid EQ"
+						testId="eq-mid-gain"
+						value={eqBands[1].gainDb}
+						min={-18}
+						max={18}
+						step={0.5}
+						display={`${eqBands[1].gainDb.toFixed(1)} dB`}
+						onChange={({ value, pushHistory }) =>
+							writeEq({ key: "eqMidGainDb", value, pushHistory })
+						}
+					/>
+					<EqParameter
+						label="Mid frequency"
+						testId="eq-mid-frequency"
+						value={eqBands[1].frequency}
+						min={200}
+						max={6000}
+						step={25}
+						display={`${Math.round(eqBands[1].frequency)} Hz`}
+						onChange={({ value, pushHistory }) =>
+							writeEq({ key: "eqMidFrequency", value, pushHistory })
+						}
+					/>
+					<EqParameter
+						label="Mid Q"
+						testId="eq-mid-q"
+						value={eqBands[1].q}
+						min={0.3}
+						max={8}
+						step={0.1}
+						display={eqBands[1].q.toFixed(1)}
+						onChange={({ value, pushHistory }) =>
+							writeEq({ key: "eqMidQ", value, pushHistory })
+						}
+					/>
+					<EqParameter
+						label="High EQ"
+						testId="eq-high-gain"
+						value={eqBands[2].gainDb}
+						min={-18}
+						max={18}
+						step={0.5}
+						display={`${eqBands[2].gainDb.toFixed(1)} dB`}
+						onChange={({ value, pushHistory }) =>
+							writeEq({ key: "eqHighGainDb", value, pushHistory })
+						}
+					/>
+				</div>
+			</details>
 		</div>
+	);
+}
+
+function EqParameter({
+	label,
+	testId,
+	value,
+	min,
+	max,
+	step,
+	display,
+	onChange,
+}: {
+	label: string;
+	testId: string;
+	value: number;
+	min: number;
+	max: number;
+	step: number;
+	display: string;
+	onChange: ({
+		value,
+		pushHistory,
+	}: {
+		value: number;
+		pushHistory: boolean;
+	}) => void;
+}) {
+	return (
+		<label className="flex items-center gap-2 text-xs">
+			<span className="text-muted-foreground w-20 shrink-0">{label}</span>
+			<input
+				data-testid={testId}
+				type="range"
+				className="min-w-0 flex-1 accent-primary"
+				value={value}
+				min={min}
+				max={max}
+				step={step}
+				onChange={(event) =>
+					onChange({
+						value: Number(event.currentTarget.value),
+						pushHistory: false,
+					})
+				}
+				onPointerUp={(event) =>
+					onChange({
+						value: Number(event.currentTarget.value),
+						pushHistory: true,
+					})
+				}
+				onKeyUp={(event) =>
+					onChange({
+						value: Number(event.currentTarget.value),
+						pushHistory: true,
+					})
+				}
+			/>
+			<span className="w-16 shrink-0 text-right font-mono tabular-nums">
+				{display}
+			</span>
+		</label>
 	);
 }
