@@ -21,6 +21,14 @@ export type FrameItemDescriptor =
 			mask: LayerMaskDescriptor | null;
 	  }
 	| {
+			type: "group";
+			items: FrameItemDescriptor[];
+			transform: QuadTransformDescriptor;
+			opacity: number;
+			blendMode: BlendMode;
+			effectPassGroups: EffectPass[][];
+	  }
+	| {
 			type: "sceneEffect";
 			// The Rust enum variant uses this exact field name in its WASM input.
 			effect_pass_groups: EffectPass[][];

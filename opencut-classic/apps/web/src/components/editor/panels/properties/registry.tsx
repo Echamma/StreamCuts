@@ -350,5 +350,14 @@ export function getPropertiesConfig({
 			return getAudioConfig({ element });
 		case "effect":
 			return getEffectConfig({ element });
+		case "compound":
+			return {
+				defaultTab: "transform",
+				tabs: [
+					buildTransformTab({ element }),
+					buildBlendingTab({ element }),
+					buildClipEffectsTab({ element }),
+				],
+			};
 	}
 }

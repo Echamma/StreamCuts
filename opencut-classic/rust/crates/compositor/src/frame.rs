@@ -23,9 +23,21 @@ pub struct CanvasClearDescriptor {
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum FrameItemDescriptor {
     Layer(LayerDescriptor),
+    Group(GroupDescriptor),
     SceneEffect {
         effect_pass_groups: Vec<Vec<EffectPassDescriptor>>,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupDescriptor {
+    pub items: Vec<FrameItemDescriptor>,
+    pub transform: QuadTransformDescriptor,
+    pub opacity: f32,
+    pub blend_mode: BlendMode,
+    #[serde(default)]
+    pub effect_pass_groups: Vec<Vec<EffectPassDescriptor>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

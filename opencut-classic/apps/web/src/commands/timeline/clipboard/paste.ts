@@ -13,6 +13,7 @@ import {
 	enforceMainTrackStart,
 } from "@/timeline/placement";
 import { cloneAnimations } from "@/animation";
+import { cloneCompoundTracks } from "@/timeline/compound-clips";
 import {
 	getMainVideoTrack,
 	getOrderedTimelineTracks,
@@ -201,6 +202,12 @@ function buildPastedElements({
 			...item.element,
 			id: newElementId,
 			startTime,
+			...(item.element.type === "compound" && {
+				tracks: cloneCompoundTracks({
+					tracks: item.element.tracks,
+					generateId: generateUUID,
+				}),
+			}),
 			animations: cloneAnimations({
 				animations: item.element.animations,
 				shouldRegenerateKeyframeIds: true,

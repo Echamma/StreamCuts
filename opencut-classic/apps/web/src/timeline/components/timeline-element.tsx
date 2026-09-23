@@ -1678,6 +1678,12 @@ function ElementContent({ element, track }: ElementContentProps) {
 			return <GraphicElementContent element={element} />;
 		case "audio":
 			return <AudioElementContent element={element} trackId={track.id} />;
+		case "compound":
+			return (
+				<div className="flex h-full items-center truncate px-2 text-xs font-medium">
+					{element.name}
+				</div>
+			);
 		case "video":
 		case "image":
 			return <TiledMediaContent element={element} track={track} />;

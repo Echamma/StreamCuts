@@ -134,9 +134,10 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4f {
 
     let blend_rgb_value = blend_rgb(base.rgb, layer.rgb, uniforms.blend_mode);
     let out_alpha = layer.a + base.a * (1.0 - layer.a);
-    let out_rgb =
-        ((1.0 - layer.a) * base.rgb) +
+    let premultiplied_rgb =
+        ((1.0 - layer.a) * base.a * base.rgb) +
         (layer.a * ((1.0 - base.a) * layer.rgb + base.a * blend_rgb_value));
+    let out_rgb = select(vec3f(0.0), premultiplied_rgb / max(out_alpha, 0.000001), out_alpha > 0.0);
 
     return vec4f(clamp01(out_rgb), out_alpha);
 }

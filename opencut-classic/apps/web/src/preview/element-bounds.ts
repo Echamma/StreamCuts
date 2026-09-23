@@ -122,14 +122,18 @@ function getElementBounds({
 
 	const { width: canvasWidth, height: canvasHeight } = canvasSize;
 
-	if (element.type === "video" || element.type === "image") {
+	if (
+		element.type === "video" ||
+		element.type === "image" ||
+		element.type === "compound"
+	) {
 		const transform = resolveTransformAtTime({
 			baseTransform: buildTransformFromParams({ params: element.params }),
 			animations: element.animations,
 			localTime,
 		});
-		const sourceWidth = mediaAsset?.width ?? canvasWidth;
-		const sourceHeight = mediaAsset?.height ?? canvasHeight;
+		const sourceWidth = element.type === "compound" ? canvasWidth : mediaAsset?.width ?? canvasWidth;
+		const sourceHeight = element.type === "compound" ? canvasHeight : mediaAsset?.height ?? canvasHeight;
 		return getVisualElementBounds({
 			canvasWidth,
 			canvasHeight,

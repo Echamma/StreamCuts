@@ -165,7 +165,7 @@ export class RendererManager {
 		const { format, quality, fps, includeAudio, canvasSizeOverride } = options;
 
 		try {
-			const tracks = tracksOverride ?? this.editor.scenes.getActiveScene().tracks;
+			const tracks = tracksOverride ?? this.editor.scenes.getRootActiveScene().tracks;
 			const mediaAssets = this.editor.media.getAssets();
 			const activeProject = this.editor.project.getActive();
 
@@ -173,9 +173,7 @@ export class RendererManager {
 				return { success: false, error: "No active project" };
 			}
 
-			const duration = tracksOverride
-				? calculateTotalDuration({ tracks })
-				: this.editor.timeline.getTotalDuration();
+			const duration = calculateTotalDuration({ tracks });
 			if (duration === 0) {
 				return { success: false, error: "Project is empty" };
 			}
