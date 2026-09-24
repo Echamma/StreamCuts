@@ -15,6 +15,7 @@ import {
 } from "@/timeline/audio-state";
 import { panToChannelGains } from "@/timeline/audio-pan";
 import { createAudioMasteringChain } from "@/media/audio-mastering";
+import { createTrackCompressor } from "@/media/audio-dynamics";
 import { computeLevelsFromSamples } from "@/media/audio-metering";
 import { buildEqChain } from "@/media/audio-eq-chain";
 import { resolveElementEqBands } from "@/timeline/audio-eq";
@@ -34,6 +35,7 @@ import {
 export class AudioManager {
 	private audioContext: AudioContext | null = null;
 	private masterGain: GainNode | null = null;
+	private trackCompressors = new Map<string, DynamicsCompressorNode>();
 	/** Passive tap off the post-limiter master output for FAIR-007 metering. */
 	private masterAnalyser: AnalyserNode | null = null;
 	private meterSampleBuffer: Float32Array<ArrayBuffer> | null = null;
@@ -327,6 +329,30 @@ export class AudioManager {
 		}
 		this.queuedSources.clear();
 		for (const disconnect of this.activeClipOutputs) disconnect();
+		for (const compressor of this.trackCompressors.values())
+			compressor.disconnect();
+		this.trackCompressors.clear();
+	}
+
+	private getTrackDestination({
+		audioContext,
+		clip,
+	}: {
+		audioContext: AudioContext;
+		clip: AudioClipSource;
+	}): AudioNode {
+		const master = this.masterGain ?? audioContext.destination;
+		if (!clip.compressor?.enabled) return master;
+		const existing = this.trackCompressors.get(clip.trackId);
+		if (existing) return existing;
+		const compressor = createTrackCompressor({
+			audioContext,
+			settings: clip.compressor,
+		});
+		if (!compressor) return master;
+		compressor.connect(master);
+		this.trackCompressors.set(clip.trackId, compressor);
+		return compressor;
 	}
 
 	/**
@@ -342,7 +368,7 @@ export class AudioManager {
 		audioContext: AudioContext;
 		clip: AudioClipSource;
 	}): { input: GainNode; disconnect: () => void } {
-		const destination = this.masterGain ?? audioContext.destination;
+		const destination = this.getTrackDestination({ audioContext, clip });
 		const input = audioContext.createGain();
 		const eqNodes = buildEqChain({
 			context: audioContext,

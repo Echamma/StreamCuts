@@ -3,7 +3,7 @@ const MASTER_LIMITER_KNEE_DB = 0;
 const MASTER_LIMITER_RATIO = 20;
 const MASTER_LIMITER_ATTACK_SECONDS = 0.001;
 const MASTER_LIMITER_RELEASE_SECONDS = 0.12;
-const MASTER_OUTPUT_HEADROOM = 0.98;
+export const MASTER_OUTPUT_HEADROOM = 0.98;
 
 export function getAudioBufferPeak({
 	audioBuffer,
@@ -33,11 +33,22 @@ export function createAudioMasteringChain({
 	destination: AudioNode;
 }): {
 	input: GainNode;
-	output: GainNode;
+	output: WaveShaperNode;
 } {
 	const input = audioContext.createGain();
 	const limiter = audioContext.createDynamicsCompressor();
 	const outputGain = audioContext.createGain();
+	const peakCeiling = audioContext.createWaveShaper();
+	const curve = new Float32Array(2049);
+	for (let index = 0; index < curve.length; index++) {
+		const sample = (index / (curve.length - 1)) * 2 - 1;
+		curve[index] = Math.max(
+			-MASTER_OUTPUT_HEADROOM,
+			Math.min(MASTER_OUTPUT_HEADROOM, sample),
+		);
+	}
+	peakCeiling.curve = curve;
+	peakCeiling.oversample = "none";
 
 	limiter.threshold.value = MASTER_LIMITER_THRESHOLD_DB;
 	limiter.knee.value = MASTER_LIMITER_KNEE_DB;
@@ -48,10 +59,11 @@ export function createAudioMasteringChain({
 
 	input.connect(limiter);
 	limiter.connect(outputGain);
-	outputGain.connect(destination);
+	outputGain.connect(peakCeiling);
+	peakCeiling.connect(destination);
 
 	// `output` is the post-limiter node the meter taps (what you actually hear).
-	return { input, output: outputGain };
+	return { input, output: peakCeiling };
 }
 
 export async function applyAudioMasteringToBuffer({
@@ -59,10 +71,6 @@ export async function applyAudioMasteringToBuffer({
 }: {
 	audioBuffer: AudioBuffer;
 }): Promise<AudioBuffer> {
-	if (getAudioBufferPeak({ audioBuffer }) <= MASTER_OUTPUT_HEADROOM) {
-		return audioBuffer;
-	}
-
 	const offlineContext = new OfflineAudioContext(
 		audioBuffer.numberOfChannels,
 		Math.max(1, audioBuffer.length),
