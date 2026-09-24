@@ -1,7 +1,7 @@
 import type { ParamValue, ParamValues } from "@/params";
 import { ColorWheelsControl } from "./color-wheels-control";
 import { LutControl } from "./lut-control";
-import { CurvesControl } from "./curves-control";
+import { CurvesControl, HslCurvesControl } from "./curves-control";
 
 /** Props every custom effect control receives (mirrors the generic param path). */
 export interface EffectControlProps {
@@ -18,7 +18,8 @@ export function hasEffectControl(effectType: string): boolean {
 	return (
 		effectType === "color-wheels" ||
 		effectType === "lut" ||
-		effectType === "curves"
+		effectType === "curves" ||
+		effectType === "hsl-curves"
 	);
 }
 
@@ -33,6 +34,8 @@ export function EffectCustomControl({
 			return <LutControl {...props} />;
 		case "curves":
 			return <CurvesControl {...props} />;
+		case "hsl-curves":
+			return <HslCurvesControl {...props} />;
 		default:
 			return null;
 	}

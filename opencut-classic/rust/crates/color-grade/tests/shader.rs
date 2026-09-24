@@ -7,14 +7,17 @@
 //! `effects` depends on wgpu, which cannot build for the host on this
 //! toolchain, whereas this crate is pure math and always builds.
 
-const COLOR_WHEELS_WGSL: &str =
-    include_str!("../../effects/src/shaders/color_wheels.wgsl");
+const COLOR_WHEELS_WGSL: &str = include_str!("../../effects/src/shaders/color_wheels.wgsl");
 const LUT_3D_WGSL: &str = include_str!("../../effects/src/shaders/lut_3d.wgsl");
 const TONE_CURVES_WGSL: &str = include_str!("../../effects/src/shaders/tone_curves.wgsl");
+const HSL_CURVES_WGSL: &str = include_str!("../../effects/src/shaders/hsl_curves.wgsl");
 
 fn parse_and_validate(source: &str, label: &str) {
     let module = naga::front::wgsl::parse_str(source).unwrap_or_else(|error| {
-        panic!("{label} WGSL parse error:\n{}", error.emit_to_string(source))
+        panic!(
+            "{label} WGSL parse error:\n{}",
+            error.emit_to_string(source)
+        )
     });
 
     let mut validator = naga::valid::Validator::new(
@@ -39,6 +42,11 @@ fn lut_3d_wgsl_parses_and_validates() {
 #[test]
 fn tone_curves_wgsl_parses_and_validates() {
     parse_and_validate(TONE_CURVES_WGSL, "tone_curves");
+}
+
+#[test]
+fn hsl_curves_wgsl_parses_and_validates() {
+    parse_and_validate(HSL_CURVES_WGSL, "hsl_curves");
 }
 
 /// The LUT shader samples texel *centres*: `(c * (size - 1) + 0.5) / size`.

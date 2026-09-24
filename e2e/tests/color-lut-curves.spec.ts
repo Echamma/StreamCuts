@@ -51,7 +51,11 @@ async function addCard(page: Page, name: string): Promise<string> {
   return id;
 }
 
-async function setup(page: Page, info: TestInfo): Promise<number[]> {
+async function setup(
+  page: Page,
+  info: TestInfo,
+  color = "0x4080c0",
+): Promise<number[]> {
   page.setDefaultTimeout(30_000);
   await page.addInitScript(() => {
     // @ts-expect-error choose downloadable output rather than a native picker
@@ -65,7 +69,7 @@ async function setup(page: Page, info: TestInfo): Promise<number[]> {
     "-f",
     "lavfi",
     "-i",
-    "color=c=0x4080c0:s=320x180",
+    `color=c=${color}:s=320x180`,
     "-frames:v",
     "1",
     source,
@@ -150,6 +154,35 @@ test("LUT import, domain, intensity, invalid file and persistence match exported
   const neutral = await exportPixel(page);
   neutral.forEach((value, c) =>
     expect(Math.abs(value - source[c])).toBeLessThanOrEqual(5),
+  );
+});
+
+test("HSL hue curve wraps its endpoints and exports a known red pixel as green", async ({
+  page,
+}, info) => {
+  test.setTimeout(300_000);
+  await setup(page, info, "0xff0000");
+  const id = await addCard(page, "HSL Curves");
+  await expect(page.getByLabel("HSL curve graph")).toBeVisible();
+  await page.getByLabel("Curve output", { exact: true }).fill("0.833333");
+  await page.getByLabel("Curve output", { exact: true }).press("Tab");
+  await page.getByRole("button", { name: "Curve point 2" }).focus();
+  await expect(page.getByLabel("Curve output", { exact: true })).toHaveValue(
+    "0.833",
+  );
+
+  const graded = await exportPixel(page);
+  expect(graded[0]).toBeLessThanOrEqual(8);
+  expect(graded[1]).toBeGreaterThanOrEqual(247);
+  expect(graded[2]).toBeLessThanOrEqual(8);
+
+  await page.keyboard.press("Escape");
+  await page.reload();
+  await clipById(page, id).click();
+  await expect(page.getByLabel("HSL curve graph")).toBeVisible();
+  await page.getByRole("button", { name: "Curve point 2" }).focus();
+  await expect(page.getByLabel("Curve output", { exact: true })).toHaveValue(
+    "0.833",
   );
 });
 
