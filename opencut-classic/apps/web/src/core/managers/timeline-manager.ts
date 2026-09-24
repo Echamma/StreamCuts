@@ -331,7 +331,10 @@ export class TimelineManager {
 		}
 
 		const leftId = findLeftAdjacentId({ elements: track.elements, elementId });
-		const rightId = findRightAdjacentId({ elements: track.elements, elementId });
+		const rightId = findRightAdjacentId({
+			elements: track.elements,
+			elementId,
+		});
 		const leftElement = leftId
 			? track.elements.find((el) => el.id === leftId)
 			: undefined;
@@ -1371,7 +1374,9 @@ export class TimelineManager {
 	}): void {
 		const shouldMute = elements.some(({ trackId, elementId }) => {
 			const element = this.getElementByRef({ trackId, elementId });
-			return element && canElementHaveAudio(element) && !isElementMuted({ element });
+			return (
+				element && canElementHaveAudio(element) && !isElementMuted({ element })
+			);
 		});
 
 		const nextUpdates = elements.flatMap(({ trackId, elementId }) => {
