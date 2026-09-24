@@ -4,6 +4,8 @@ import { useCallback } from "react";
 import { useScopeSampler } from "@/scopes/use-scope-sampler";
 import { WaveformWidget } from "./waveform-widget";
 import { HistogramWidget } from "./histogram-widget";
+import { RgbParadeWidget } from "./rgb-parade-widget";
+import { VectorscopeWidget } from "./vectorscope-widget";
 
 /**
  * Always-on scopes dock for the Color page. Unlike the preview's toggleable
@@ -18,10 +20,15 @@ export function ScopesDock() {
 		);
 	}, []);
 
-	const sample = useScopeSampler({ enabled: true, getSourceCanvas });
+	const sample = useScopeSampler({
+		enabled: true,
+		getSourceCanvas,
+		minIntervalMs: 100,
+	});
 
 	return (
 		<div
+			data-testid="scopes-dock"
 			className="flex h-full flex-col gap-3 overflow-auto p-3"
 			style={{ background: "var(--scope-bg)" }}
 		>
@@ -30,6 +37,8 @@ export function ScopesDock() {
 			</span>
 			<WaveformWidget sample={sample} />
 			<HistogramWidget sample={sample} />
+			<RgbParadeWidget sample={sample} />
+			<VectorscopeWidget sample={sample} />
 		</div>
 	);
 }
