@@ -40,6 +40,16 @@ export interface TScene {
 
 export type TrackType = "video" | "text" | "audio" | "graphic" | "effect";
 
+/** Optional track dynamics. Missing settings preserve existing projects' sound. */
+export interface TrackCompressorSettings {
+	enabled: boolean;
+	thresholdDb: number;
+	ratio: number;
+	attackSeconds: number;
+	releaseSeconds: number;
+	kneeDb: number;
+}
+
 interface BaseTrack {
 	id: string;
 	name: string;
@@ -56,6 +66,7 @@ export interface VideoTrack extends BaseTrack {
 	/** When any audio-capable track is soloed, non-soloed tracks are silenced
 	 * (FAIR-001 mixer solo). Optional/additive — absent means not soloed. */
 	soloed?: boolean;
+	compressor?: TrackCompressorSettings;
 	hidden: boolean;
 }
 
@@ -71,6 +82,7 @@ export interface AudioTrack extends BaseTrack {
 	muted: boolean;
 	/** See VideoTrack.soloed (FAIR-001 mixer solo). */
 	soloed?: boolean;
+	compressor?: TrackCompressorSettings;
 }
 
 export interface GraphicTrack extends BaseTrack {

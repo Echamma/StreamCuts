@@ -4,6 +4,7 @@ import type {
 	LibraryAudioElement,
 	RetimeConfig,
 	SceneTracks,
+	TrackCompressorSettings,
 } from "@/timeline";
 import { shouldMaintainPitch } from "@/retime/rate";
 import type { MediaAsset } from "@/media/types";
@@ -11,7 +12,7 @@ import {
 	getAssetSourceStartTime,
 	getWaveformSourceKeyForAsset,
 } from "@/media/asset-source";
-import { applyAudioMasteringToBuffer } from "@/media/audio-mastering";
+import { renderDynamicsWindow } from "@/media/audio-dynamics";
 import { getOrderedTimelineTracks } from "@/timeline/scene-tracks-view";
 import type { AudioCapableElement } from "@/timeline/audio-state";
 import {
@@ -67,6 +68,8 @@ function createElementEqProcessor({
 
 export interface CollectedAudioElement {
 	timelineElement: AudioCapableElement;
+	trackId: string;
+	compressor?: TrackCompressorSettings;
 	buffer: AudioBuffer;
 	startTime: number;
 	duration: number;
@@ -131,6 +134,8 @@ export async function decodeAudioToFloat32({
 export interface AudibleElementCandidate {
 	element: AudioElement | VideoElement;
 	mediaAsset: MediaAsset | null;
+	trackId: string;
+	compressor?: TrackCompressorSettings;
 }
 
 export function collectAudibleCandidates({
@@ -157,7 +162,15 @@ export function collectAudibleCandidates({
 				: null;
 			if (!doesElementHaveEnabledAudio({ element, mediaAsset })) continue;
 
-			candidates.push({ element, mediaAsset });
+			candidates.push({
+				element,
+				mediaAsset,
+				trackId: track.id,
+				compressor:
+					track.type === "audio" || track.type === "video"
+						? track.compressor
+						: undefined,
+			});
 		}
 	}
 
@@ -193,7 +206,7 @@ export async function collectAudioElements({
 	);
 	const pendingElements: Array<Promise<CollectedAudioElement | null>> = [];
 
-	for (const { element, mediaAsset } of candidates) {
+	for (const { element, mediaAsset, trackId, compressor } of candidates) {
 		if (element.type === "audio") {
 			pendingElements.push(
 				resolveAudioBufferForElement({
@@ -207,6 +220,8 @@ export async function collectAudioElements({
 						: 0;
 					return {
 						timelineElement: element,
+						trackId,
+						compressor,
 						buffer: audioBuffer,
 						startTime: element.startTime / TICKS_PER_SECOND,
 						duration: element.duration / TICKS_PER_SECOND,
@@ -239,6 +254,8 @@ export async function collectAudioElements({
 					if (!audioBuffer) return null;
 					return {
 						timelineElement: element,
+						trackId,
+						compressor,
 						buffer: audioBuffer,
 						startTime: element.startTime / TICKS_PER_SECOND,
 						duration: element.duration / TICKS_PER_SECOND,
@@ -423,6 +440,8 @@ interface AudioMixSource {
 
 export interface AudioClipSource {
 	timelineElement: AudioCapableElement;
+	trackId: string;
+	compressor?: TrackCompressorSettings;
 	id: string;
 	sourceKey: string;
 	file: File;
@@ -480,10 +499,14 @@ async function fetchLibraryAudioSource({
 
 async function fetchLibraryAudioClip({
 	element,
+	trackId,
+	compressor,
 	muted,
 	volume,
 }: {
 	element: LibraryAudioElement;
+	trackId: string;
+	compressor?: TrackCompressorSettings;
 	muted: boolean;
 	volume: number;
 }): Promise<AudioClipSource | null> {
@@ -500,6 +523,8 @@ async function fetchLibraryAudioClip({
 
 		return {
 			timelineElement: element,
+			trackId,
+			compressor,
 			id: element.id,
 			sourceKey: element.sourceUrl,
 			file,
@@ -549,16 +574,22 @@ function collectMediaAudioSource({
 function collectMediaAudioClip({
 	element,
 	mediaAsset,
+	trackId,
+	compressor,
 	muted,
 	volume,
 }: {
 	element: AudioCapableElement;
 	mediaAsset: MediaAsset;
+	trackId: string;
+	compressor?: TrackCompressorSettings;
 	muted: boolean;
 	volume: number;
 }): AudioClipSource {
 	return {
 		timelineElement: element,
+		trackId,
+		compressor,
 		id: element.id,
 		sourceKey: getWaveformSourceKeyForAsset({ asset: mediaAsset }),
 		file: mediaAsset.file,
@@ -661,6 +692,10 @@ export async function collectAudioClips({
 
 		for (const element of track.elements) {
 			if (!canElementHaveAudio(element)) continue;
+			const compressor =
+				track.type === "audio" || track.type === "video"
+					? track.compressor
+					: undefined;
 
 			const mediaAsset = hasMediaId(element)
 				? (mediaMap.get(element.mediaId) ?? null)
@@ -683,13 +718,21 @@ export async function collectAudioClips({
 						collectMediaAudioClip({
 							element,
 							mediaAsset,
+							trackId: track.id,
+							compressor,
 							muted,
 							volume,
 						}),
 					);
 				} else {
 					pendingLibraryClips.push(
-						fetchLibraryAudioClip({ element, muted, volume }),
+						fetchLibraryAudioClip({
+							element,
+							trackId: track.id,
+							compressor,
+							muted,
+							volume,
+						}),
 					);
 				}
 				continue;
@@ -701,6 +744,8 @@ export async function collectAudioClips({
 						collectMediaAudioClip({
 							element,
 							mediaAsset,
+							trackId: track.id,
+							compressor,
 							muted,
 							volume,
 						}),
@@ -1084,6 +1129,11 @@ export async function* renderTimelineAudioChunks({
 	);
 	const activeClips: AudioClipSource[] = [];
 	const eqProcessors = new Map<string, EqStreamProcessor | null>();
+	const trackCompressors = new Map<
+		string,
+		TrackCompressorSettings | undefined
+	>();
+	let previousTails = new Map<string, AudioBuffer>();
 	let nextClipIndex = 0;
 
 	try {
@@ -1112,11 +1162,8 @@ export async function* renderTimelineAudioChunks({
 				}
 			}
 
-			const outputBuffer = context.createBuffer(
-				2,
-				Math.max(1, Math.ceil(chunkDuration * sampleRate)),
-				sampleRate,
-			);
+			const windowLength = Math.max(1, Math.ceil(chunkDuration * sampleRate));
+			const trackBuffers = new Map<string, AudioBuffer>();
 			let hasAudio = false;
 
 			for (const clip of activeClips) {
@@ -1125,6 +1172,13 @@ export async function* renderTimelineAudioChunks({
 					file: clip.file,
 				});
 				if (!sourceBuffer) continue;
+				const trackId = clip.trackId;
+				trackCompressors.set(trackId, clip.compressor);
+				let outputBuffer = trackBuffers.get(trackId);
+				if (!outputBuffer) {
+					outputBuffer = context.createBuffer(2, windowLength, sampleRate);
+					trackBuffers.set(trackId, outputBuffer);
+				}
 				if (!eqProcessors.has(clip.id)) {
 					eqProcessors.set(
 						clip.id,
@@ -1148,13 +1202,20 @@ export async function* renderTimelineAudioChunks({
 					})) || hasAudio;
 			}
 
-			if (normalizePeak) {
-				normalizeAudioBufferPeak({ audioBuffer: outputBuffer });
-			}
+			const rendered = await renderDynamicsWindow({
+				trackBuffers,
+				trackCompressors,
+				previousTails,
+				sampleRate,
+				windowLength,
+			});
+			previousTails = rendered.tails;
+			if (normalizePeak)
+				normalizeAudioBufferPeak({ audioBuffer: rendered.buffer });
 
 			onProgress?.((windowIndex + 1) / totalWindows);
 			yield {
-				buffer: outputBuffer,
+				buffer: rendered.buffer,
 				startTime: windowStart,
 				duration: chunkDuration,
 				hasAudio,
@@ -1239,17 +1300,22 @@ export async function createTimelineAudioBuffer({
 
 	if (audioElements.length === 0) return null;
 
-	const outputChannels = 2;
 	const durationSeconds = duration / TICKS_PER_SECOND;
-	const outputLength = Math.ceil(durationSeconds * sampleRate);
-	const outputBuffer = context.createBuffer(
-		outputChannels,
-		outputLength,
-		sampleRate,
-	);
+	const outputLength = Math.max(1, Math.ceil(durationSeconds * sampleRate));
+	const trackBuffers = new Map<string, AudioBuffer>();
+	const trackCompressors = new Map<
+		string,
+		TrackCompressorSettings | undefined
+	>();
 
 	for (const element of audioElements) {
 		if (element.muted) continue;
+		let outputBuffer = trackBuffers.get(element.trackId);
+		if (!outputBuffer) {
+			outputBuffer = context.createBuffer(2, outputLength, sampleRate);
+			trackBuffers.set(element.trackId, outputBuffer);
+		}
+		trackCompressors.set(element.trackId, element.compressor);
 
 		const renderedBuffer = shouldMaintainPitch({
 			rate: element.retime?.rate ?? 1,
@@ -1277,11 +1343,14 @@ export async function createTimelineAudioBuffer({
 	}
 
 	onProgress?.(0.92);
-	const result = await applyAudioMasteringToBuffer({
-		audioBuffer: outputBuffer,
+	const result = await renderDynamicsWindow({
+		trackBuffers,
+		trackCompressors,
+		windowLength: outputLength,
+		sampleRate,
 	});
 	onProgress?.(1.0);
-	return result;
+	return result.buffer;
 }
 
 function collectPeakRange({
