@@ -3,12 +3,14 @@ import { blurEffectDefinition } from "./blur";
 import { colorWheelsEffectDefinition } from "./color-wheels";
 import { lutEffectDefinition } from "./lut";
 import { curvesEffectDefinition } from "./curves";
+import { hslCurvesEffectDefinition } from "./hsl-curves";
 
 const defaultEffects = [
 	blurEffectDefinition,
 	colorWheelsEffectDefinition,
 	lutEffectDefinition,
 	curvesEffectDefinition,
+	hslCurvesEffectDefinition,
 ];
 
 export function registerDefaultEffects(): void {

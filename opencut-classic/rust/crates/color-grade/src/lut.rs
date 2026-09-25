@@ -128,6 +128,124 @@ pub struct ToneCurve {
     tangents: Vec<f32>,
 }
 
+/// Four HSL adjustments packed as 256 RGBA lanes for one GPU pass. The first
+/// three lanes are periodic in hue; the last is sampled over linear lightness.
+pub struct PreparedHslCurves {
+    pub table: Vec<f32>,
+    pub is_identity: bool,
+}
+
+/// A hue curve shares its endpoint value and tangent across the red seam.
+/// This avoids a visible jump when a hue passes through 0/360 degrees.
+pub struct PeriodicCurve(ToneCurve);
+
+impl PeriodicCurve {
+    pub fn new(points: &[[f32; 2]]) -> Result<Self, String> {
+        let mut curve = ToneCurve::new(points)?;
+        let first = curve.points.first().unwrap();
+        let last = curve.points.last().unwrap();
+        if first[0] != 0. || last[0] != 1. || (first[1] - last[1]).abs() > 1e-6 {
+            return Err("Hue curves need matching values at 0 and 1".into());
+        }
+        let n = curve.points.len();
+        let left = (curve.points[n - 1][1] - curve.points[n - 2][1])
+            / (curve.points[n - 1][0] - curve.points[n - 2][0]);
+        let right =
+            (curve.points[1][1] - curve.points[0][1]) / (curve.points[1][0] - curve.points[0][0]);
+        let seam_tangent = if left * right > 0. {
+            ((left + right) * 0.5).clamp(
+                -3. * left.abs().min(right.abs()),
+                3. * left.abs().min(right.abs()),
+            )
+        } else {
+            0.
+        };
+        curve.tangents[0] = seam_tangent;
+        curve.tangents[n - 1] = seam_tangent;
+        Ok(Self(curve))
+    }
+
+    pub fn evaluate(&self, hue: f32) -> f32 {
+        self.0.evaluate(hue.rem_euclid(1.))
+    }
+}
+
+pub fn prepare_hsl_curves(points: &[Vec<[f32; 2]>]) -> Result<PreparedHslCurves, String> {
+    if points.len() != 4 {
+        return Err("Expected hue-vs-hue, hue-vs-sat, hue-vs-lum and lum-vs-sat curves".into());
+    }
+    let hue_curves: Vec<_> = points[..3]
+        .iter()
+        .map(|curve| PeriodicCurve::new(curve))
+        .collect::<Result<_, _>>()?;
+    let lum_curve = ToneCurve::new(&points[3])?;
+    if lum_curve.points[0][0] != 0. || lum_curve.points.last().unwrap()[0] != 1. {
+        return Err("The lightness curve must cover 0 to 1".into());
+    }
+    let mut table = Vec::with_capacity(256 * 4);
+    for i in 0..256 {
+        let hue = i as f32 / 256.;
+        for curve in &hue_curves {
+            table.push(curve.evaluate(hue));
+        }
+        table.push(lum_curve.evaluate(i as f32 / 255.));
+    }
+    Ok(PreparedHslCurves {
+        table,
+        is_identity: points.iter().flatten().all(|point| point[1] == 0.5),
+    })
+}
+
+/// CPU pixel reference for the HSL shader, using the same 256-row table and
+/// encoded sRGB/HSL conversion. Useful for fixture parity assertions.
+pub fn apply_hsl_curves(rgb: [f32; 3], prepared: &PreparedHslCurves) -> [f32; 3] {
+    let [r, g, b] = rgb.map(|value| value.clamp(0., 1.));
+    let greatest = r.max(g).max(b);
+    let least = r.min(g).min(b);
+    let chroma = greatest - least;
+    let lightness = (greatest + least) * 0.5;
+    let (hue, saturation) = if chroma < 0.000001 {
+        (0., 0.)
+    } else {
+        let hue = if greatest == r {
+            (g - b) / chroma
+        } else if greatest == g {
+            (b - r) / chroma + 2.
+        } else {
+            (r - g) / chroma + 4.
+        };
+        (
+            (hue / 6. + 1.).fract(),
+            chroma / (1. - (2. * lightness - 1.).abs()).max(0.000001),
+        )
+    };
+    let sample = |channel: usize, position: f32| -> f32 {
+        let p = if channel == 3 {
+            position.clamp(0., 1.) * 255.
+        } else {
+            position.fract() * 256.
+        };
+        let low = p.floor() as usize;
+        let high = if channel == 3 {
+            (low + 1).min(255)
+        } else {
+            (low + 1) % 256
+        };
+        let a = prepared.table[low * 4 + channel];
+        let b = prepared.table[high * 4 + channel];
+        a + (b - a) * p.fract()
+    };
+    let saturation = (saturation * 2. * sample(1, hue) * 2. * sample(3, lightness)).clamp(0., 1.);
+    let lightness = (lightness + sample(2, hue) - 0.5).clamp(0., 1.);
+    let hue = (hue + sample(0, hue) - 0.5 + 1.).fract();
+    let hue_channel = |offset: f32| {
+        let k = ((offset + hue * 12.) / 12.).fract() * 12.;
+        let a = saturation * lightness.min(1. - lightness);
+        lightness - a * (-1_f32).max((k - 3.).min((9. - k).min(1.)))
+    };
+    [hue_channel(0.), hue_channel(8.), hue_channel(4.)]
+}
+
 /// Four separable cubic curves prepared for the GPU's analytic `tone-curves`
 /// shader. Every curve owns 32 vec4 lanes (`x`, `y`, tangent, padding). Keeping
 /// the control points preserves narrow transitions that a sampled 3D LUT loses.
@@ -339,5 +457,48 @@ mod tests {
             + (t.powi(3) - t.powi(2)) * h * hi[2];
         assert!((packed - expected).abs() < 1e-6);
         assert!((packed - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn periodic_hue_curve_wraps_with_a_continuous_slope() {
+        let curve = PeriodicCurve::new(&[[0., 0.5], [0.2, 0.9], [0.8, 0.1], [1., 0.5]]).unwrap();
+        assert!((curve.evaluate(0.9999) - curve.evaluate(-0.0001)).abs() < 1e-6);
+        assert!((curve.evaluate(0.) - curve.evaluate(1.)).abs() < 1e-6);
+        let left = (curve.evaluate(0.) - curve.evaluate(-0.001)) / 0.001;
+        let right = (curve.evaluate(0.001) - curve.evaluate(0.)) / 0.001;
+        assert!(
+            (left - right).abs() < 0.05,
+            "seam slopes differ: {left} and {right}"
+        );
+        assert!(PeriodicCurve::new(&[[0., 0.2], [1., 0.8]]).is_err());
+    }
+
+    #[test]
+    fn hsl_table_has_four_lanes_and_a_neutral_default() {
+        let neutral = vec![[0., 0.5], [1., 0.5]];
+        let mut points = vec![neutral; 4];
+        let prepared = prepare_hsl_curves(&points).unwrap();
+        assert!(prepared.is_identity);
+        assert_eq!(prepared.table.len(), 1024);
+        assert!(prepared.table.iter().all(|value| *value == 0.5));
+
+        points[1] = vec![[0., 0.5], [0.5, 1.], [1., 0.5]];
+        let prepared = prepare_hsl_curves(&points).unwrap();
+        assert!(!prepared.is_identity);
+        assert!((prepared.table[128 * 4 + 1] - 1.).abs() < 1e-6);
+        assert_eq!(prepared.table[0], 0.5);
+        assert_eq!(prepared.table[255 * 4 + 3], 0.5);
+    }
+
+    #[test]
+    fn hsl_reference_rotates_a_known_red_pixel_to_green() {
+        let neutral = vec![[0., 0.5], [1., 0.5]];
+        let mut points = vec![neutral; 4];
+        points[0] = vec![[0., 0.5 + 1. / 3.], [1., 0.5 + 1. / 3.]];
+        let prepared = prepare_hsl_curves(&points).unwrap();
+        let result = apply_hsl_curves([1., 0., 0.], &prepared);
+        assert!(result[0] < 1e-5 && (result[1] - 1.).abs() < 1e-5 && result[2] < 1e-5);
+        let grey = apply_hsl_curves([0.4; 3], &prepared);
+        assert!(grey.iter().all(|channel| (*channel - 0.4).abs() < 1e-5));
     }
 }
