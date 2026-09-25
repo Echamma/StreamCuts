@@ -10,6 +10,7 @@ import type {
 	VideoTrack,
 	ClipMarker,
 	ElementRef,
+	TrackCompressorSettings,
 } from "@/timeline";
 import { calculateTotalDuration, isRetimableElement } from "@/timeline";
 import {
@@ -49,6 +50,7 @@ import {
 	reframeKeyCount,
 } from "@/saliency/apply-reframe";
 import { isElementMuted } from "@/timeline/audio-state";
+import { DEFAULT_TRACK_COMPRESSOR } from "@/media/audio-dynamics";
 import type {
 	AnimationPath,
 	AnimationInterpolation,
@@ -329,7 +331,10 @@ export class TimelineManager {
 		}
 
 		const leftId = findLeftAdjacentId({ elements: track.elements, elementId });
-		const rightId = findRightAdjacentId({ elements: track.elements, elementId });
+		const rightId = findRightAdjacentId({
+			elements: track.elements,
+			elementId,
+		});
 		const leftElement = leftId
 			? track.elements.find((el) => el.id === leftId)
 			: undefined;
@@ -552,6 +557,36 @@ export class TimelineManager {
 	toggleTrackSolo({ trackId }: { trackId: string }): void {
 		const command = new ToggleTrackSoloCommand(trackId);
 		this.editor.command.execute({ command });
+	}
+
+	setTrackCompressor({
+		trackId,
+		patch,
+	}: {
+		trackId: string;
+		patch: Partial<TrackCompressorSettings>;
+	}): void {
+		const before = this.editor.scenes.getActiveScene().tracks;
+		const target = findTrackInSceneTracks({ tracks: before, trackId });
+		if (!target || (target.type !== "audio" && target.type !== "video")) return;
+		const after = updateTrackInSceneTracks({
+			tracks: before,
+			trackId,
+			update: (track) =>
+				track.type === "audio" || track.type === "video"
+					? {
+							...track,
+							compressor: {
+								...DEFAULT_TRACK_COMPRESSOR,
+								...track.compressor,
+								...patch,
+							},
+						}
+					: track,
+		});
+		this.editor.command.execute({
+			command: new TracksSnapshotCommand({ before, after }),
+		});
 	}
 
 	toggleTrackVisibility({ trackId }: { trackId: string }): void {
@@ -1339,7 +1374,9 @@ export class TimelineManager {
 	}): void {
 		const shouldMute = elements.some(({ trackId, elementId }) => {
 			const element = this.getElementByRef({ trackId, elementId });
-			return element && canElementHaveAudio(element) && !isElementMuted({ element });
+			return (
+				element && canElementHaveAudio(element) && !isElementMuted({ element })
+			);
 		});
 
 		const nextUpdates = elements.flatMap(({ trackId, elementId }) => {

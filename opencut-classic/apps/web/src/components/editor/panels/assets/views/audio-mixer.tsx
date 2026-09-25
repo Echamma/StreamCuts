@@ -5,6 +5,7 @@ import { getElementVolume, isElementMuted } from "@/timeline/audio-state";
 import { anyTrackSoloed, isTrackAudioSilenced } from "@/timeline/audio-solo";
 import { getElementPan, PAN_MAX, PAN_MIN } from "@/timeline/audio-pan";
 import { resolveElementEqBands } from "@/timeline/audio-eq";
+import { resolveTrackCompressor } from "@/media/audio-dynamics";
 import {
 	FADE_MAX_SECONDS,
 	getElementFadeIn,
@@ -23,7 +24,11 @@ import { Separator } from "@/components/ui/separator";
 import { VolumeHighIcon, VolumeOffIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { cn } from "@/utils/ui";
-import type { AudioElement, VideoElement } from "@/timeline";
+import type {
+	AudioElement,
+	VideoElement,
+	TrackCompressorSettings,
+} from "@/timeline";
 import { TICKS_PER_SECOND } from "@/wasm";
 
 function dbToSlider(db: number): number {
@@ -126,6 +131,7 @@ export function AudioMixerView() {
 						<TrackSection
 							label="Video"
 							trackId={mainTrack.id}
+							compressor={mainTrack.compressor}
 							trackMuted={mainTrack.muted}
 							trackSoloed={mainTrack.soloed ?? false}
 							onToggleTrackMute={() =>
@@ -158,6 +164,7 @@ export function AudioMixerView() {
 									key={overlayTrack.id}
 									label={overlayTrack.name}
 									trackId={overlayTrack.id}
+									compressor={overlayTrack.compressor}
 									trackMuted={overlayTrack.muted}
 									trackSoloed={overlayTrack.soloed ?? false}
 									onToggleTrackMute={() =>
@@ -195,6 +202,7 @@ export function AudioMixerView() {
 						key={audioTrack.id}
 						label={audioTrack.name}
 						trackId={audioTrack.id}
+						compressor={audioTrack.compressor}
 						trackMuted={audioTrack.muted}
 						trackSoloed={audioTrack.soloed ?? false}
 						onToggleTrackMute={() =>
@@ -235,6 +243,8 @@ function MasterSection() {
 
 function TrackSection({
 	label,
+	trackId,
+	compressor,
 	trackMuted,
 	trackSoloed,
 	onToggleTrackMute,
@@ -243,12 +253,17 @@ function TrackSection({
 }: {
 	label: string;
 	trackId: string;
+	compressor?: TrackCompressorSettings;
 	trackMuted: boolean;
 	trackSoloed: boolean;
 	onToggleTrackMute: () => void;
 	onToggleTrackSolo: () => void;
 	children: React.ReactNode;
 }) {
+	const editor = useEditor();
+	const settings = resolveTrackCompressor(compressor);
+	const write = (patch: Partial<TrackCompressorSettings>) =>
+		editor.timeline.setTrackCompressor({ trackId, patch });
 	return (
 		<div className="flex flex-col gap-1">
 			<div className="flex items-center justify-between px-1 pt-3 pb-1">
@@ -283,8 +298,104 @@ function TrackSection({
 					</Button>
 				</div>
 			</div>
+			<details data-testid={`compressor-${trackId}`} className="px-1">
+				<summary className="cursor-pointer text-xs font-semibold">
+					Compressor
+				</summary>
+				<div className="mt-2 flex flex-col gap-2">
+					<label className="flex items-center gap-2 text-xs">
+						<input
+							type="checkbox"
+							checked={settings.enabled}
+							data-testid={`compressor-enable-${trackId}`}
+							onChange={(event) =>
+								write({ enabled: event.currentTarget.checked })
+							}
+						/>
+						<span>Enable track compression</span>
+					</label>
+					{settings.enabled && (
+						<>
+							<CompressorParameter
+								label="Threshold"
+								value={settings.thresholdDb}
+								min={-60}
+								max={0}
+								step={1}
+								unit="dB"
+								onChange={(thresholdDb) => write({ thresholdDb })}
+							/>
+							<CompressorParameter
+								label="Ratio"
+								value={settings.ratio}
+								min={1}
+								max={20}
+								step={0.5}
+								unit=":1"
+								onChange={(ratio) => write({ ratio })}
+							/>
+							<CompressorParameter
+								label="Attack"
+								value={settings.attackSeconds * 1000}
+								min={0}
+								max={1000}
+								step={1}
+								unit="ms"
+								onChange={(value) => write({ attackSeconds: value / 1000 })}
+							/>
+							<CompressorParameter
+								label="Release"
+								value={settings.releaseSeconds * 1000}
+								min={0}
+								max={1000}
+								step={10}
+								unit="ms"
+								onChange={(value) => write({ releaseSeconds: value / 1000 })}
+							/>
+						</>
+					)}
+				</div>
+			</details>
 			<div className="flex flex-col gap-1.5">{children}</div>
 		</div>
+	);
+}
+
+function CompressorParameter({
+	label,
+	value,
+	min,
+	max,
+	step,
+	unit,
+	onChange,
+}: {
+	label: string;
+	value: number;
+	min: number;
+	max: number;
+	step: number;
+	unit: string;
+	onChange: (value: number) => void;
+}) {
+	return (
+		<label className="flex items-center gap-2 text-xs">
+			<span className="text-muted-foreground w-20 shrink-0">{label}</span>
+			<input
+				type="range"
+				aria-label={`${label} compressor`}
+				className="min-w-0 flex-1 accent-primary"
+				value={value}
+				min={min}
+				max={max}
+				step={step}
+				onChange={(event) => onChange(Number(event.currentTarget.value))}
+			/>
+			<span className="w-14 shrink-0 text-right font-mono tabular-nums">
+				{Math.round(value * 10) / 10}
+				{unit}
+			</span>
+		</label>
 	);
 }
 
