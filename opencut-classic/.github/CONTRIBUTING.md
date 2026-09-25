@@ -45,9 +45,9 @@ Thank you for your interest in contributing to OpenCut! This document provides g
 5. Install dependencies: `bun install`
 6. Start the development server: `bun run dev`
 
-> **Note:** Web development uses the published `opencut-wasm` package by default, so a fresh clone does not need a local WASM build.
+> **Note:** Web development uses the checked-in `rust/wasm/pkg` package, so a fresh clone does not need a local WASM build.
 >
-> If you are editing `rust/wasm`, run `bun run build:wasm`, then `cd rust/wasm/pkg && bun link`, then `cd ../../../apps/web && bun link opencut-wasm`.
+> If you edit `rust/wasm` or its Rust dependencies, run `bun run build:wasm` and commit the updated generated package with your source change.
 
 ### Desktop setup
 

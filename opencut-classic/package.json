@@ -7,11 +7,11 @@
   ],
   "scripts": {
     "build:tools": "turbo run build --filter=@opencut/tools",
-    "build:wasm": "wasm-pack build rust/wasm --target bundler --out-dir pkg",
+    "build:wasm": "wasm-pack build rust/wasm --target bundler --out-dir pkg --no-opt",
     "build:web": "turbo run build --filter=@opencut/web",
     "deploy:web": "turbo run deploy --filter=@opencut/web",
     "dev:tools": "turbo run dev --filter=@opencut/tools",
-    "dev:wasm": "cargo watch -w rust/crates -w rust/wasm/src -s 'wasm-pack build rust/wasm --target bundler --out-dir pkg'",
+    "dev:wasm": "cargo watch -w rust/crates -w rust/wasm/src -s 'wasm-pack build rust/wasm --target bundler --out-dir pkg --no-opt'",
     "dev:web": "turbo run dev --filter=@opencut/web",
     "format:web": "prettier apps/web/src/services/renderer --write",
     "generate:fonts": "npx tsx apps/web/scripts/generate-font-sprites.ts",
@@ -30,7 +30,7 @@
     "onnxruntime-common": "^1.22.0-dev.20250409-89f8206ba4",
     "onnxruntime-web": "^1.22.0-dev.20250409-89f8206ba4",
     "opencut": ".",
-    "opencut-wasm": "^0.2.10"
+    "opencut-wasm": "file:./rust/wasm/pkg"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
