@@ -10,6 +10,8 @@ mod masks;
 mod perf;
 #[cfg(target_arch = "wasm32")]
 mod saliency;
+#[cfg(target_arch = "wasm32")]
+mod scope_bridge;
 
 #[cfg(target_arch = "wasm32")]
 pub use compositor::*;
@@ -23,4 +25,6 @@ pub use masks::*;
 pub use perf::*;
 #[cfg(target_arch = "wasm32")]
 pub use saliency::*;
+#[cfg(target_arch = "wasm32")]
+pub use scope_bridge::*;
 pub use time::*;
