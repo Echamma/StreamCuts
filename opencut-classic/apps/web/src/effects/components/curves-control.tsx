@@ -1,7 +1,7 @@
 "use client";
 
 import { useId, useMemo, useRef, useState, type PointerEvent } from "react";
-import { sampleToneCurve } from "opencut-wasm";
+import { sampleHslCurve, sampleToneCurve } from "opencut-wasm";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -10,45 +10,73 @@ import {
 	type CurvePoints,
 } from "../luts/prepared-lut";
 import type { EffectControlProps } from "./effect-controls";
+import { IDENTITY_HSL_CURVES } from "../curves/prepared-hsl-curves";
 
 const CHANNELS = ["Master", "Red", "Green", "Blue"];
 const COLORS = ["currentColor", "#f87171", "#4ade80", "#60a5fa"];
+const HSL_CHANNELS = [
+	"Hue vs Hue",
+	"Hue vs Saturation",
+	"Hue vs Lightness",
+	"Lightness vs Saturation",
+];
+const HSL_COLORS = ["#f87171", "#4ade80", "#60a5fa", "#facc15"];
 
-export function CurvesControl({
+export function CurvesControl(props: EffectControlProps) {
+	return <CurveGraphControl {...props} kind="tone" />;
+}
+
+export function HslCurvesControl(props: EffectControlProps) {
+	return <CurveGraphControl {...props} kind="hsl" />;
+}
+
+function CurveGraphControl({
 	values,
 	previewParam,
 	onCommit,
-}: EffectControlProps) {
+	kind,
+}: EffectControlProps & { kind: "tone" | "hsl" }) {
+	const isHsl = kind === "hsl";
+	const paramKey = isHsl ? "hslCurves" : "curves";
+	const identity = isHsl ? IDENTITY_HSL_CURVES : IDENTITY_CURVES;
+	const channels = isHsl ? HSL_CHANNELS : CHANNELS;
+	const colors = isHsl ? HSL_COLORS : COLORS;
 	const [channel, setChannel] = useState(0);
 	const [selected, setSelected] = useState(0);
 	const [focusedPoint, setFocusedPoint] = useState<number | null>(null);
 	const pointInstructionsId = useId();
+	const gradientId = useId();
 	const drag = useRef<number | null>(null);
 	const svg = useRef<SVGSVGElement>(null);
 	const source =
-		typeof values.curves === "string" ? values.curves : IDENTITY_CURVES;
+		typeof values[paramKey] === "string" ? values[paramKey] : identity;
 	const parsed = useMemo(() => {
 		try {
 			return { curves: readCurvePoints(source), error: "" };
 		} catch {
 			return {
-				curves: readCurvePoints(IDENTITY_CURVES),
+				curves: readCurvePoints(identity),
 				error: "Invalid saved curve. Reset the curve to recover.",
 			};
 		}
-	}, [source]);
+	}, [source, identity]);
 	const points = parsed.curves[channel];
 	const pointIndex = Math.min(selected, points.length - 1);
 	const drawing = useMemo(() => {
 		try {
-			return { samples: Array.from(sampleToneCurve(points)), error: "" };
+			return {
+				samples: Array.from(
+					isHsl ? sampleHslCurve(points, channel < 3) : sampleToneCurve(points),
+				),
+				error: "",
+			};
 		} catch (error) {
 			return { samples: [], error: String(error) };
 		}
-	}, [points]);
+	}, [points, channel, isHsl]);
 	const error = parsed.error || drawing.error;
 	function preview(next: CurvePoints) {
-		previewParam("curves")(
+		previewParam(paramKey)(
 			JSON.stringify(
 				parsed.curves.map((curve, index) => (index === channel ? next : curve)),
 			),
@@ -63,10 +91,20 @@ export function CurvesControl({
 				: index === points.length - 1
 					? 1
 					: Math.max(low, Math.min(high, x));
+		const nextY = Math.max(0, Math.min(1, y));
 		preview(
-			points.map((point, i) =>
-				i === index ? [nextX, Math.max(0, Math.min(1, y))] : point,
-			),
+			points.map((point, i) => {
+				if (i === index) return [nextX, nextY];
+				if (
+					isHsl &&
+					channel < 3 &&
+					((index === 0 && i === points.length - 1) ||
+						(index === points.length - 1 && i === 0))
+				) {
+					return [point[0], nextY];
+				}
+				return point;
+			}),
 		);
 	}
 	function pointerMove(event: PointerEvent<SVGSVGElement>) {
@@ -87,12 +125,12 @@ export function CurvesControl({
 	return (
 		<div
 			className="flex flex-col gap-3 px-4 pb-4"
-			data-testid="curves-controls"
+			data-testid={isHsl ? "hsl-curves-controls" : "curves-controls"}
 		>
 			<label className="flex justify-between gap-3 text-xs">
 				Channel
 				<select
-					aria-label="Curve channel"
+					aria-label={isHsl ? "HSL curve channel" : "Curve channel"}
 					className="bg-background border rounded px-2 py-1"
 					value={channel}
 					onChange={(event) => {
@@ -100,7 +138,7 @@ export function CurvesControl({
 						setSelected(0);
 					}}
 				>
-					{CHANNELS.map((label, i) => (
+					{channels.map((label, i) => (
 						<option key={label} value={i}>
 							{label}
 						</option>
@@ -115,19 +153,53 @@ export function CurvesControl({
 				ref={svg}
 				viewBox="0 0 240 160"
 				role="group"
-				aria-label="Tone curve graph"
+				aria-label={isHsl ? "HSL curve graph" : "Tone curve graph"}
 				className="w-full border rounded bg-background touch-none"
 				onPointerMove={pointerMove}
 				onPointerUp={finishDrag}
 				onPointerCancel={finishDrag}
 			>
+				{isHsl && (
+					<>
+						<defs>
+							<linearGradient id={gradientId}>
+								{(channel < 3
+									? [
+											"#ff0000",
+											"#ffff00",
+											"#00ff00",
+											"#00ffff",
+											"#0000ff",
+											"#ff00ff",
+											"#ff0000",
+										]
+									: ["#000000", "#ffffff"]
+								).map((color, i, stops) => (
+									<stop
+										key={i}
+										offset={`${(i / (stops.length - 1)) * 100}%`}
+										stopColor={color}
+									/>
+								))}
+							</linearGradient>
+						</defs>
+						<rect
+							x="16"
+							y="16"
+							width="208"
+							height="128"
+							fill={`url(#${gradientId})`}
+							opacity="0.2"
+						/>
+					</>
+				)}
 				{[0, 0.25, 0.5, 0.75, 1].map((v) => (
 					<g key={v} className="text-border" stroke="currentColor">
 						<path d={`M${16 + v * 208},16V144 M16,${16 + v * 128}H224`} />
 					</g>
 				))}
 				<path
-					d="M16,144L224,16"
+					d={isHsl ? "M16,80H224" : "M16,144L224,16"}
 					stroke="currentColor"
 					opacity="0.25"
 					strokeDasharray="3 3"
@@ -140,7 +212,7 @@ export function CurvesControl({
 						)
 						.join(" ")}
 					fill="none"
-					stroke={COLORS[channel]}
+					stroke={colors[channel]}
 					strokeWidth="2"
 				/>
 				{points.map(([x, y], i) => (
@@ -149,7 +221,7 @@ export function CurvesControl({
 						cx={16 + x * 208}
 						cy={144 - y * 128}
 						r={i === pointIndex ? 5 : 4}
-						fill={COLORS[channel]}
+						fill={colors[channel]}
 						stroke={focusedPoint === i ? "var(--ring)" : "var(--background)"}
 						strokeWidth={focusedPoint === i ? 3 : 1}
 						role="button"
@@ -282,8 +354,8 @@ export function CurvesControl({
 					variant="ghost"
 					onClick={() => {
 						preview([
-							[0, 0],
-							[1, 1],
+							[0, isHsl ? 0.5 : 0],
+							[1, isHsl ? 0.5 : 1],
 						]);
 						setSelected(0);
 						onCommit();

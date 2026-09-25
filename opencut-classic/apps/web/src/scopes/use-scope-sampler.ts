@@ -23,11 +23,13 @@ export function useScopeSampler({
 	getSourceCanvas,
 	sampleWidth = DEFAULT_SAMPLE_WIDTH,
 	sampleHeight = DEFAULT_SAMPLE_HEIGHT,
+	minIntervalMs = 0,
 }: {
 	enabled: boolean;
 	getSourceCanvas: () => HTMLCanvasElement | null;
 	sampleWidth?: number;
 	sampleHeight?: number;
+	minIntervalMs?: number;
 }): ScopeSample | null {
 	const [sample, setSample] = useState<ScopeSample | null>(null);
 	const scratchRef = useRef<HTMLCanvasElement | null>(null);
@@ -49,11 +51,17 @@ export function useScopeSampler({
 
 		let rafId = 0;
 		let disposed = false;
+		let lastSampleAt = -Infinity;
 
 		const tick = () => {
 			if (disposed) return;
 			const source = getSourceCanvas();
-			if (source && source.width > 0 && source.height > 0) {
+			if (
+				source &&
+				source.width > 0 &&
+				source.height > 0 &&
+				performance.now() - lastSampleAt >= minIntervalMs
+			) {
 				try {
 					ctx.drawImage(source, 0, 0, sampleWidth, sampleHeight);
 					const data = ctx.getImageData(0, 0, sampleWidth, sampleHeight);
@@ -62,6 +70,7 @@ export function useScopeSampler({
 						width: sampleWidth,
 						height: sampleHeight,
 					});
+					lastSampleAt = performance.now();
 				} catch {
 					// Cross-origin taint or a mid-resize race: skip this frame.
 				}
@@ -74,7 +83,7 @@ export function useScopeSampler({
 			disposed = true;
 			cancelAnimationFrame(rafId);
 		};
-	}, [enabled, getSourceCanvas, sampleWidth, sampleHeight]);
+	}, [enabled, getSourceCanvas, sampleWidth, sampleHeight, minIntervalMs]);
 
 	return enabled ? sample : null;
 }

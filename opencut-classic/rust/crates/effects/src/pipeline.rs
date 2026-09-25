@@ -1,11 +1,11 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::collections::{hash_map::DefaultHasher, VecDeque};
+use std::collections::{VecDeque, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 
 use bytemuck::{Pod, Zeroable};
 use color_grade::{ColorGradeParams, Wheel};
-use gpu::{GpuContext, FULLSCREEN_SHADER_SOURCE};
+use gpu::{FULLSCREEN_SHADER_SOURCE, GpuContext};
 use thiserror::Error;
 use wgpu::util::DeviceExt;
 
@@ -19,6 +19,8 @@ const LUT_3D_SHADER_ID: &str = "lut-3d";
 const LUT_3D_SHADER_SOURCE: &str = include_str!("shaders/lut_3d.wgsl");
 const TONE_CURVES_SHADER_ID: &str = "tone-curves";
 const TONE_CURVES_SHADER_SOURCE: &str = include_str!("shaders/tone_curves.wgsl");
+const HSL_CURVES_SHADER_ID: &str = "hsl-curves";
+const HSL_CURVES_SHADER_SOURCE: &str = include_str!("shaders/hsl_curves.wgsl");
 
 /// Uniform names carrying the LUT table for {@link LUT_3D_SHADER_ID}: the
 /// per-axis node count, and the flat RGB triples the `.cube` parser produced
@@ -264,6 +266,14 @@ impl EffectPipeline {
                 build_pipeline_with(
                     "effects-tone-curves-pipeline",
                     TONE_CURVES_SHADER_SOURCE,
+                    &pipeline_layout,
+                ),
+            ),
+            (
+                HSL_CURVES_SHADER_ID.to_string(),
+                build_pipeline_with(
+                    "effects-hsl-curves-pipeline",
+                    HSL_CURVES_SHADER_SOURCE,
                     &pipeline_layout,
                 ),
             ),
@@ -570,6 +580,12 @@ struct ToneCurvesUniformBuffer {
     nodes: [[f32; 4]; 128],
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct HslCurvesUniformBuffer {
+    table: [[f32; 4]; 256],
+}
+
 /// Pack the uniform bytes for a pass, dispatching on its shader. Different
 /// shaders declare different uniform structs; the shared uniform binding accepts
 /// any buffer size, so each shader gets exactly the bytes its struct expects.
@@ -592,6 +608,7 @@ fn pack_effect_uniforms(
         )?)
         .to_vec()),
         TONE_CURVES_SHADER_ID => Ok(bytemuck::bytes_of(&pack_tone_curves_uniforms(pass)?).to_vec()),
+        HSL_CURVES_SHADER_ID => Ok(bytemuck::bytes_of(&pack_hsl_curves_uniforms(pass)?).to_vec()),
         other => Err(EffectsError::UnknownEffectShader {
             shader: other.to_string(),
         }),
@@ -679,6 +696,34 @@ fn pack_tone_curves_uniforms(pass: &EffectPass) -> Result<ToneCurvesUniformBuffe
     let mut counts = [0.; 4];
     counts.copy_from_slice(raw_counts);
     Ok(ToneCurvesUniformBuffer { counts, nodes })
+}
+
+fn pack_hsl_curves_uniforms(pass: &EffectPass) -> Result<HslCurvesUniformBuffer, EffectsError> {
+    let values = read_vector_uniform(pass, "curveTable")?;
+    if values.len() != 1024
+        || values
+            .iter()
+            .any(|value| !value.is_finite() || !(0.0..=1.0).contains(value))
+    {
+        return Err(EffectsError::InvalidVectorUniform {
+            shader: pass.shader.clone(),
+            uniform: "curveTable".into(),
+            expected_length: 1024,
+        });
+    }
+    for uniform in pass.uniforms.keys() {
+        if uniform != "curveTable" {
+            return Err(EffectsError::UnsupportedUniform {
+                shader: pass.shader.clone(),
+                uniform: uniform.clone(),
+            });
+        }
+    }
+    let mut table = [[0.; 4]; 256];
+    for (lane, values) in table.iter_mut().zip(values.chunks_exact(4)) {
+        lane.copy_from_slice(values);
+    }
+    Ok(HslCurvesUniformBuffer { table })
 }
 
 /// The LUT table is bound as a texture. Its output range restores values outside

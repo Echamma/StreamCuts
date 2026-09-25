@@ -10,4 +10,5 @@ members = [
     "rust/wasm", "rust/crates/compositor",
     "rust/crates/saliency",
     "rust/crates/color-grade",
+    "rust/crates/scopes",
 ]

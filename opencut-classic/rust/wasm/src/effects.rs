@@ -99,6 +99,46 @@ pub fn sample_tone_curve(points: JsValue) -> Result<Vec<f32>, JsValue> {
     Ok((0..=128).map(|i| curve.evaluate(i as f32 / 128.)).collect())
 }
 
+#[wasm_bindgen]
+pub struct PreparedHslCurves {
+    inner: effects::lut::PreparedHslCurves,
+}
+
+#[wasm_bindgen]
+impl PreparedHslCurves {
+    #[wasm_bindgen(getter)]
+    pub fn identity(&self) -> bool {
+        self.inner.is_identity
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn table(&self) -> Vec<f32> {
+        self.inner.table.clone()
+    }
+}
+
+#[wasm_bindgen(js_name = prepareHslCurves)]
+pub fn prepare_hsl_curves(points: JsValue) -> Result<PreparedHslCurves, JsValue> {
+    let points: Vec<Vec<[f32; 2]>> =
+        serde_wasm_bindgen::from_value(points).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    effects::lut::prepare_hsl_curves(&points)
+        .map(|inner| PreparedHslCurves { inner })
+        .map_err(|e| JsValue::from_str(&e))
+}
+
+#[wasm_bindgen(js_name = sampleHslCurve)]
+pub fn sample_hsl_curve(points: JsValue, periodic: bool) -> Result<Vec<f32>, JsValue> {
+    let points: Vec<[f32; 2]> =
+        serde_wasm_bindgen::from_value(points).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    if periodic {
+        let curve = effects::lut::PeriodicCurve::new(&points).map_err(|e| JsValue::from_str(&e))?;
+        Ok((0..=128).map(|i| curve.evaluate(i as f32 / 128.)).collect())
+    } else {
+        let curve = effects::lut::ToneCurve::new(&points).map_err(|e| JsValue::from_str(&e))?;
+        Ok((0..=128).map(|i| curve.evaluate(i as f32 / 128.)).collect())
+    }
+}
+
 struct ApplyEffectPassesOptions {
     source: wgpu::web_sys::OffscreenCanvas,
     width: u32,
