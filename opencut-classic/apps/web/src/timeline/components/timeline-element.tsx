@@ -734,6 +734,60 @@ export function TimelineElement({
 							Group clips
 						</ContextMenuItem>
 					)}
+					{selectedElements.length >= 2 && isCurrentElementSelected && (
+						<ContextMenuItem
+							data-testid="make-compound-clip"
+							icon={<HugeiconsIcon icon={Link01Icon} />}
+							onClick={(event: React.MouseEvent) => {
+								event.stopPropagation();
+								const compound = editor.timeline.makeCompound({
+									elements: selectedElements,
+								});
+								if (compound) {
+									editor.selection.setSelectedElements({
+										elements: [compound],
+									});
+								} else {
+									toast.warning(
+										"Select at least two unlocked clips to make a compound.",
+									);
+								}
+							}}
+						>
+							Make compound clip
+						</ContextMenuItem>
+					)}
+					{element.type === "compound" && (
+						<>
+							<ContextMenuItem
+								data-testid="enter-compound-clip"
+								icon={<HugeiconsIcon icon={Link01Icon} />}
+								onClick={(event: React.MouseEvent) => {
+									event.stopPropagation();
+									editor.scenes.enterCompound({ elementId: element.id });
+								}}
+							>
+								Open compound clip
+							</ContextMenuItem>
+							<ContextMenuItem
+								data-testid="decompose-compound-clip"
+								icon={<HugeiconsIcon icon={Unlink01Icon} />}
+								onClick={(event: React.MouseEvent) => {
+									event.stopPropagation();
+									if (
+										editor.timeline.decomposeCompound({
+											trackId: track.id,
+											elementId: element.id,
+										})
+									) {
+										editor.selection.clearSelection();
+									}
+								}}
+							>
+								Decompose compound clip
+							</ContextMenuItem>
+						</>
+					)}
 					{element.groupId !== undefined && (
 						<ContextMenuItem
 							icon={<HugeiconsIcon icon={Unlink01Icon} />}
@@ -1565,16 +1619,13 @@ function TiledMediaContent({
 		mediaSupportsAudio({ media: mediaAsset }) &&
 		mediaAsset?.hasAudio !== false;
 
-	const gainSamples = useMemo(
-		() =>
-			hasVideoAudio && element.type === "video"
-				? buildWaveformGainSamples({
-						element,
-						count: WAVEFORM_GAIN_SAMPLE_COUNT,
-					})
-				: undefined,
-		[hasVideoAudio, element],
-	);
+	const gainSamples =
+		hasVideoAudio && element.type === "video"
+			? buildWaveformGainSamples({
+					element,
+					count: WAVEFORM_GAIN_SAMPLE_COUNT,
+				})
+			: undefined;
 
 	if (!imageUrl) {
 		return (

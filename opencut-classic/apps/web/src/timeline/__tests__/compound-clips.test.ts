@@ -50,8 +50,10 @@ const {
 	planCompound,
 } = await import("@/timeline/compound-clips");
 const { flattenAudioElements } = await import("@/timeline/compound-audio");
-const { getCompoundPath, replaceCompoundPath } = await import("@/timeline/compound-navigation");
-const { stripAudioBuffersFromTracks } = await import("@/timeline/compound-storage");
+const { getCompoundPath, replaceCompoundPath } =
+	await import("@/timeline/compound-navigation");
+const { stripAudioBuffersFromTracks } =
+	await import("@/timeline/compound-storage");
 
 type AudioElement = import("@/timeline/types").AudioElement;
 type SceneTracks = import("@/timeline/types").SceneTracks;
@@ -138,7 +140,13 @@ function tracksOf({
 	};
 }
 
-const refOf = ({ trackId, elementId }: { trackId: string; elementId: string }) => ({
+const refOf = ({
+	trackId,
+	elementId,
+}: {
+	trackId: string;
+	elementId: string;
+}) => ({
 	trackId,
 	elementId,
 });
@@ -196,8 +204,12 @@ describe("planCompound", () => {
 				refOf({ trackId: "a0", elementId: "a" }),
 			],
 		});
-		expect(plan?.content.tracks.video[0]?.elements.map((e) => e.id)).toEqual(["v"]);
-		expect(plan?.content.tracks.audio[0]?.elements.map((e) => e.id)).toEqual(["a"]);
+		expect(plan?.content.tracks.video[0]?.elements.map((e) => e.id)).toEqual([
+			"v",
+		]);
+		expect(plan?.content.tracks.audio[0]?.elements.map((e) => e.id)).toEqual([
+			"a",
+		]);
 	});
 
 	test("drops tracks that contributed nothing", () => {
@@ -237,7 +249,9 @@ describe("planCompound", () => {
 	});
 
 	test("refuses a selection of fewer than two elements", () => {
-		const tracks = tracksOf({ videoElements: [video({ id: "a", startTime: 0 })] });
+		const tracks = tracksOf({
+			videoElements: [video({ id: "a", startTime: 0 })],
+		});
 		expect(
 			planCompound({
 				tracks,
@@ -248,7 +262,9 @@ describe("planCompound", () => {
 	});
 
 	test("ignores refs that match no element", () => {
-		const tracks = tracksOf({ videoElements: [video({ id: "a", startTime: 0 })] });
+		const tracks = tracksOf({
+			videoElements: [video({ id: "a", startTime: 0 })],
+		});
 		expect(
 			planCompound({
 				tracks,
@@ -313,7 +329,10 @@ describe("decomposeCompound", () => {
 			content: plan.content,
 			startTime: t(1000),
 		});
-		expect(restored.map((r) => r.element.startTime)).toEqual([t(1000), t(1300)]);
+		expect(restored.map((r) => r.element.startTime)).toEqual([
+			t(1000),
+			t(1300),
+		]);
 	});
 
 	test("clamps a child that would land before zero", () => {
@@ -392,9 +411,7 @@ describe("measureCompoundDuration", () => {
 				video: plan.content.tracks.video.map((track) => ({
 					...track,
 					elements: track.elements.map((element) =>
-						element.id === "b"
-							? { ...element, duration: t(400) }
-							: element,
+						element.id === "b" ? { ...element, duration: t(400) } : element,
 					),
 				})),
 			},
@@ -411,17 +428,22 @@ describe("compound integration arithmetic", () => {
 				video({ id: "b", startTime: 100 }),
 			],
 		});
-		tracks.video[0].transitions = [{
-			id: "transition",
-			type: "fade",
-			fromElementId: "a",
-			toElementId: "b",
-			duration: t(20),
-			enabled: true,
-		}];
+		tracks.video[0].transitions = [
+			{
+				id: "transition",
+				type: "fade",
+				fromElementId: "a",
+				toElementId: "b",
+				duration: t(20),
+				enabled: true,
+			},
+		];
 		const folded = makeCompoundInTracks({
 			tracks,
-			refs: [refOf({ trackId: "v0", elementId: "a" }), refOf({ trackId: "v0", elementId: "b" })],
+			refs: [
+				refOf({ trackId: "v0", elementId: "a" }),
+				refOf({ trackId: "v0", elementId: "b" }),
+			],
 			id: "compound",
 			trackId: "compound-track",
 			name: "Compound",
@@ -456,13 +478,26 @@ describe("compound integration arithmetic", () => {
 
 	test("copying a compound remaps child and transition ids", () => {
 		const tracks = tracksOf({
-			videoElements: [video({ id: "a", startTime: 0 }), video({ id: "b", startTime: 100 })],
+			videoElements: [
+				video({ id: "a", startTime: 0 }),
+				video({ id: "b", startTime: 100 }),
+			],
 		});
-		tracks.video[0].transitions = [{
-			id: "tr", type: "fade", fromElementId: "a", toElementId: "b", duration: t(20), enabled: true,
-		}];
+		tracks.video[0].transitions = [
+			{
+				id: "tr",
+				type: "fade",
+				fromElementId: "a",
+				toElementId: "b",
+				duration: t(20),
+				enabled: true,
+			},
+		];
 		let next = 0;
-		const copied = cloneCompoundTracks({ tracks, generateId: () => `new-${++next}` });
+		const copied = cloneCompoundTracks({
+			tracks,
+			generateId: () => `new-${++next}`,
+		});
 		const [a, b] = copied.video[0].elements;
 		expect(a.id).not.toBe("a");
 		expect(b.id).not.toBe("b");
@@ -471,19 +506,40 @@ describe("compound integration arithmetic", () => {
 	});
 
 	test("nested audio uses compound-local time and the visible window", () => {
-		const content = tracksOf({ audioElements: [audio({ id: "sound", startTime: 0, duration: 3 * TPS })] });
+		const content = tracksOf({
+			audioElements: [audio({ id: "sound", startTime: 0, duration: 3 * TPS })],
+		});
+		content.audio[0].compressor = {
+			enabled: true,
+			thresholdDb: -18,
+			ratio: 3,
+			attackSeconds: 0.01,
+			releaseSeconds: 0.2,
+			kneeDb: 6,
+		};
 		const compound: CompoundElement = {
-			id: "compound", name: "Compound", type: "compound", tracks: content,
-			startTime: t(5 * TPS), duration: t(2 * TPS), trimStart: t(TPS),
-			trimEnd: t(0), params: {},
+			id: "compound",
+			name: "Compound",
+			type: "compound",
+			tracks: content,
+			startTime: t(5 * TPS),
+			duration: t(2 * TPS),
+			trimStart: t(TPS),
+			trimEnd: t(0),
+			params: {},
 		};
 		const scene = tracksOf({});
 		scene.video[0].elements.push(compound);
 		const entries = flattenAudioElements({ tracks: scene });
 		expect(entries).toHaveLength(1);
 		expect(entries[0]).toMatchObject({
-			startTime: t(5 * TPS), duration: t(2 * TPS),
-			trimStart: t(TPS), localOffset: t(TPS), trackMuted: false,
+			startTime: t(5 * TPS),
+			duration: t(2 * TPS),
+			trimStart: t(TPS),
+			localOffset: t(TPS),
+			trackMuted: false,
+			trackId: content.audio[0].id,
+			compressor: content.audio[0].compressor,
 		});
 		scene.video[0].muted = true;
 		expect(flattenAudioElements({ tracks: scene })[0].trackMuted).toBe(true);
@@ -492,13 +548,22 @@ describe("compound integration arithmetic", () => {
 	test("cycle guard stops recursive compounds", () => {
 		const scene = tracksOf({});
 		const compound: CompoundElement = {
-			id: "self", name: "Self", type: "compound", tracks: tracksOf({}),
-			startTime: t(0), duration: t(TPS), trimStart: t(0), trimEnd: t(0), params: {},
+			id: "self",
+			name: "Self",
+			type: "compound",
+			tracks: tracksOf({}),
+			startTime: t(0),
+			duration: t(TPS),
+			trimStart: t(0),
+			trimEnd: t(0),
+			params: {},
 		};
 		compound.tracks.video[0].elements.push(compound);
 		scene.video[0].elements.push(compound);
 		expect(flattenAudioElements({ tracks: scene })).toEqual([]);
-		expect(getCompoundPath({ tracks: scene, path: ["self", "self"] })).toBeNull();
+		expect(
+			getCompoundPath({ tracks: scene, path: ["self", "self"] }),
+		).toBeNull();
 	});
 
 	test("saving strips audio buffers at every compound depth", () => {
@@ -506,36 +571,70 @@ describe("compound integration arithmetic", () => {
 		Reflect.set(sound, "buffer", { length: 1 });
 		const child = tracksOf({ audioElements: [sound] });
 		const inner: CompoundElement = {
-			id: "inner", name: "Inner", type: "compound", tracks: child,
-			startTime: t(0), duration: t(100), trimStart: t(0), trimEnd: t(0), params: {},
+			id: "inner",
+			name: "Inner",
+			type: "compound",
+			tracks: child,
+			startTime: t(0),
+			duration: t(100),
+			trimStart: t(0),
+			trimEnd: t(0),
+			params: {},
 		};
 		const middle = tracksOf({});
 		middle.video[0].elements.push(inner);
 		const outer: CompoundElement = {
-			id: "outer", name: "Outer", type: "compound", tracks: middle,
-			startTime: t(0), duration: t(100), trimStart: t(0), trimEnd: t(0), params: {},
+			id: "outer",
+			name: "Outer",
+			type: "compound",
+			tracks: middle,
+			startTime: t(0),
+			duration: t(100),
+			trimStart: t(0),
+			trimEnd: t(0),
+			params: {},
 		};
 		const root = tracksOf({});
 		root.video[0].elements.push(outer);
 		const saved = stripAudioBuffersFromTracks({ tracks: root });
 		const nested = getCompoundPath({ tracks: saved, path: ["outer", "inner"] });
-		expect(Reflect.has(nested?.content.audio[0].elements[0] ?? {}, "buffer")).toBe(false);
+		expect(
+			Reflect.has(nested?.content.audio[0].elements[0] ?? {}, "buffer"),
+		).toBe(false);
 		expect(Reflect.has(sound, "buffer")).toBe(true);
 	});
 
 	test("nested edits write through the root and update the compound span", () => {
-		const child = tracksOf({ videoElements: [video({ id: "a", startTime: 0, duration: TPS })] });
+		const child = tracksOf({
+			videoElements: [video({ id: "a", startTime: 0, duration: TPS })],
+		});
 		const compound: CompoundElement = {
-			id: "nested", name: "Nested", type: "compound", tracks: child,
-			startTime: t(0), duration: t(TPS), trimStart: t(0), trimEnd: t(0), params: {},
+			id: "nested",
+			name: "Nested",
+			type: "compound",
+			tracks: child,
+			startTime: t(0),
+			duration: t(TPS),
+			trimStart: t(0),
+			trimEnd: t(0),
+			params: {},
 		};
 		const root = tracksOf({});
 		root.video[0].elements.push(compound);
 		const edited: SceneTracks = {
 			...child,
-			video: [{ ...child.video[0], elements: [video({ id: "a", startTime: 0, duration: 2 * TPS })] }],
+			video: [
+				{
+					...child.video[0],
+					elements: [video({ id: "a", startTime: 0, duration: 2 * TPS })],
+				},
+			],
 		};
-		const next = replaceCompoundPath({ tracks: root, path: ["nested"], content: edited });
+		const next = replaceCompoundPath({
+			tracks: root,
+			path: ["nested"],
+			content: edited,
+		});
 		expect(next?.video[0].elements[0].duration).toBe(t(2 * TPS));
 		expect(root.video[0].elements[0].duration).toBe(t(TPS));
 	});

@@ -73,9 +73,9 @@ export function flattenAudioElements({
 				if (visibleEnd <= visibleStart) continue;
 				const localOffset = visibleStart - start;
 				flattened.push({
-						element,
-						trackId: track.id,
-						compressor: track.compressor,
+					element,
+					trackId: track.id,
+					compressor: track.compressor,
 					startTime: visibleStart,
 					duration: visibleEnd - visibleStart,
 					trimStart:

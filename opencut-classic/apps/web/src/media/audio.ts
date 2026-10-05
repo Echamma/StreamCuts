@@ -256,8 +256,7 @@ export async function collectAudioElements({
 						duration: duration / TICKS_PER_SECOND,
 						localOffset: localOffset / TICKS_PER_SECOND,
 						trimStart:
-							(getAssetSourceStartTime({ asset: mediaAsset }) +
-								trimStart) /
+							(getAssetSourceStartTime({ asset: mediaAsset }) + trimStart) /
 							TICKS_PER_SECOND,
 						trimEnd: element.trimEnd / TICKS_PER_SECOND,
 						volume: resolveEffectiveAudioGain({
@@ -632,41 +631,41 @@ export async function collectAudioMixSources({
 	const pendingLibrarySources: Array<Promise<AudioMixSource | null>> = [];
 
 	for (const timing of flattenAudioElements({ tracks })) {
-			if (timing.trackMuted) continue;
-			const { element } = timing;
-			if (isElementMuted({ element })) continue;
-			const mediaAsset = hasMediaId(element)
-				? (mediaMap.get(element.mediaId) ?? null)
-				: null;
-			if (!doesElementHaveEnabledAudio({ element, mediaAsset })) continue;
-			const volume = resolveEffectiveAudioGain({
-				element,
-				localTime: timing.localOffset / TICKS_PER_SECOND,
-			});
+		if (timing.trackMuted) continue;
+		const { element } = timing;
+		if (isElementMuted({ element })) continue;
+		const mediaAsset = hasMediaId(element)
+			? (mediaMap.get(element.mediaId) ?? null)
+			: null;
+		if (!doesElementHaveEnabledAudio({ element, mediaAsset })) continue;
+		const volume = resolveEffectiveAudioGain({
+			element,
+			localTime: timing.localOffset / TICKS_PER_SECOND,
+		});
 
-			if (element.type === "audio") {
-				if (element.sourceType === "upload") {
-					const mediaAsset = mediaMap.get(element.mediaId);
-					if (!mediaAsset) continue;
+		if (element.type === "audio") {
+			if (element.sourceType === "upload") {
+				const mediaAsset = mediaMap.get(element.mediaId);
+				if (!mediaAsset) continue;
 
-					audioMixSources.push(
-						collectMediaAudioSource({ element, mediaAsset, volume, timing }),
-					);
-				} else {
-					pendingLibrarySources.push(
-						fetchLibraryAudioSource({ element, volume, timing }),
-					);
-				}
-				continue;
+				audioMixSources.push(
+					collectMediaAudioSource({ element, mediaAsset, volume, timing }),
+				);
+			} else {
+				pendingLibrarySources.push(
+					fetchLibraryAudioSource({ element, volume, timing }),
+				);
 			}
+			continue;
+		}
 
-			if (element.type === "video") {
-				if (mediaAsset && mediaSupportsAudio({ media: mediaAsset })) {
-					audioMixSources.push(
-						collectMediaAudioSource({ element, mediaAsset, volume, timing }),
-					);
-				}
+		if (element.type === "video") {
+			if (mediaAsset && mediaSupportsAudio({ media: mediaAsset })) {
+				audioMixSources.push(
+					collectMediaAudioSource({ element, mediaAsset, volume, timing }),
+				);
 			}
+		}
 	}
 
 	const resolvedLibrarySources = await Promise.all(pendingLibrarySources);
@@ -988,7 +987,7 @@ async function mixClipIntoTimelineChunk({
 		outputBuffer,
 		sampleRate,
 		outputOffsetSamples,
-			automationLocalStart: clipLocalStart + (clip.localOffset ?? 0),
+		automationLocalStart: clipLocalStart + (clip.localOffset ?? 0),
 		bufferLocalStart: pitchPreservedBuffer ? 0 : clipLocalStart,
 		overlapDuration,
 		trimStart: pitchPreservedBuffer ? 0 : clip.trimStart,
@@ -1063,8 +1062,7 @@ function mixSourceIntoChunk({
 					? computeFadeGain({
 							fadeIn: clip.fadeIn,
 							fadeOut: clip.fadeOut,
-							duration:
-								clip.timelineElement.duration / TICKS_PER_SECOND,
+							duration: clip.timelineElement.duration / TICKS_PER_SECOND,
 							localTime: automationLocalTime,
 						})
 					: 1;
@@ -1534,8 +1532,7 @@ function mixAudioChannels({
 					? computeFadeGain({
 							fadeIn: element.fadeIn,
 							fadeOut: element.fadeOut,
-							duration:
-								element.timelineElement.duration / TICKS_PER_SECOND,
+							duration: element.timelineElement.duration / TICKS_PER_SECOND,
 							localTime: clipTime + element.localOffset,
 						})
 					: 1;
