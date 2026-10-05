@@ -10,8 +10,7 @@ import { buildWaveformSourceKey } from "@/media/waveform-summary";
 import { storageService } from "@/services/storage/service";
 import { videoCache } from "@/services/video-cache/service";
 import { waveformCache } from "@/services/waveform-cache/service";
-import { hasMediaId } from "@/timeline/element-utils";
-import { getOrderedTimelineTracks } from "@/timeline/scene-tracks-view";
+import { removeMediaReferences } from "@/timeline/compound-media";
 import type { SceneTracks } from "@/timeline";
 
 export class RemoveMediaAssetCommand extends Command {
@@ -100,19 +99,9 @@ export class RemoveMediaAssetCommand extends Command {
 			assets: assets.filter((media) => media.id !== this.assetId),
 		});
 
-		const elementsToRemove: Array<{ trackId: string; elementId: string }> = [];
-
-		for (const track of getOrderedTimelineTracks({ tracks: this.savedTracks })) {
-			for (const element of track.elements) {
-				if (hasMediaId(element) && element.mediaId === this.assetId) {
-					elementsToRemove.push({ trackId: track.id, elementId: element.id });
-				}
-			}
-		}
-
-		if (elementsToRemove.length > 0) {
-			editor.timeline.deleteElements({ elements: elementsToRemove });
-		}
+		editor.timeline.updateTracks(
+			removeMediaReferences({ tracks: this.savedTracks, mediaId: this.assetId }),
+		);
 
 		storageService
 			.deleteMediaAsset({ projectId: this.projectId, id: this.assetId })

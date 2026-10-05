@@ -53,9 +53,9 @@ jobs:
       - name: Install locked web dependencies
         run: bun install --frozen-lockfile
 
-      - name: Test HSL curves and audio dynamics
+      - name: Test HSL curves, audio dynamics, and compound clips
         working-directory: opencut-classic/apps/web
-        run: bun test src/effects/__tests__/hsl-curves.test.ts src/media/__tests__/audio-dynamics.test.ts
+        run: bun test src/effects/__tests__/hsl-curves.test.ts src/media/__tests__/audio-dynamics.test.ts src/timeline/__tests__/compound-clips.test.ts
 
       # Each test binds a separate WASM instance to the generated glue module.
       - name: Test WASM scope exports

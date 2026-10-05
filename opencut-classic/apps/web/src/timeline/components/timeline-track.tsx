@@ -167,6 +167,8 @@ export function TimelineTrackContent({
 									onElementDoubleClick={({ element: el }) => {
 										if (el.type === "text") {
 											requestTextEdit({ trackId: track.id, elementId: el.id });
+										} else if (el.type === "compound") {
+											editor.scenes.enterCompound({ elementId: el.id });
 										}
 									}}
 									dragView={dragView}

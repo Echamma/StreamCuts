@@ -20,7 +20,11 @@ import {
 	type ResolvedTransitionNodeState,
 } from "../nodes/transition-node";
 import { VideoNode } from "../nodes/video-node";
-import type { ResolvedVisualSourceNodeState } from "../nodes/visual-node";
+import { CompoundNode } from "../nodes/compound-node";
+import type {
+	ResolvedVisualNodeState,
+	ResolvedVisualSourceNodeState,
+} from "../nodes/visual-node";
 import type {
 	FrameDescriptor,
 	FrameItemDescriptor,
@@ -189,6 +193,34 @@ async function collectNode({
 			path,
 			items,
 			textures,
+		});
+		return;
+	}
+
+	if (node instanceof CompoundNode) {
+		if (!node.resolved) return;
+		const childItems: FrameItemDescriptor[] = [];
+		for (let index = 0; index < node.children.length; index++) {
+			await collectNode({
+				node: node.children[index],
+				renderer,
+				path: `${path}:compound:${index}`,
+				items: childItems,
+				textures,
+			});
+		}
+		items.push({
+			type: "group",
+			items: childItems,
+			transform: computeVisualTransform({
+				renderer,
+				resolved: node.resolved,
+				sourceWidth: renderer.width,
+				sourceHeight: renderer.height,
+			}),
+			opacity: node.resolved.opacity,
+			blendMode: node.params.blendMode ?? "normal",
+			effectPassGroups: node.resolved.effectPasses,
 		});
 		return;
 	}
@@ -482,7 +514,7 @@ function computeVisualTransform({
 	sourceHeight,
 }: {
 	renderer: CanvasRenderer;
-	resolved: ResolvedVisualSourceNodeState | ResolvedGraphicNodeState;
+	resolved: ResolvedVisualNodeState | ResolvedGraphicNodeState;
 	sourceWidth: number;
 	sourceHeight: number;
 }): QuadTransformDescriptor {

@@ -22,10 +22,22 @@ import {
 	ToggleBookmarkCommand,
 	UpdateBookmarkCommand,
 } from "@/commands/scene";
-import type { MediaTime } from "@/wasm";
+import { mediaTime, type MediaTime } from "@/wasm";
+import {
+	findCompound,
+	getCompoundPath,
+	replaceCompoundPath,
+} from "@/timeline/compound-navigation";
+
+export interface TimelineEditScope {
+	sceneId: string | null;
+	compoundPath: string[];
+}
 
 export class ScenesManager {
 	private active: TScene | null = null;
+	private activeView: TScene | null = null;
+	private compoundPath: string[] = [];
 	private list: TScene[] = [];
 	private listeners = new Set<() => void>();
 
@@ -108,10 +120,12 @@ export class ScenesManager {
 		}
 
 		this.active = targetScene;
+		this.compoundPath = [];
 		this.notify();
 	}
 
 	async toggleBookmark({ time }: { time: MediaTime }): Promise<void> {
+		if (this.compoundPath.length > 0) return;
 		const command = new ToggleBookmarkCommand(time);
 		this.editor.command.execute({ command });
 	}
@@ -131,6 +145,7 @@ export class ScenesManager {
 	}
 
 	async removeBookmark({ time }: { time: MediaTime }): Promise<void> {
+		if (this.compoundPath.length > 0) return;
 		const command = new RemoveBookmarkCommand(time);
 		this.editor.command.execute({ command });
 	}
@@ -142,6 +157,7 @@ export class ScenesManager {
 		time: MediaTime;
 		updates: Partial<Omit<Bookmark, "time">>;
 	}): Promise<void> {
+		if (this.compoundPath.length > 0) return;
 		const command = new UpdateBookmarkCommand({ time, updates });
 		this.editor.command.execute({ command });
 	}
@@ -153,11 +169,13 @@ export class ScenesManager {
 		fromTime: MediaTime;
 		toTime: MediaTime;
 	}): Promise<void> {
+		if (this.compoundPath.length > 0) return;
 		const command = new MoveBookmarkCommand({ fromTime, toTime });
 		this.editor.command.execute({ command });
 	}
 
 	getBookmarkAtTime({ time }: { time: MediaTime }) {
+		if (this.compoundPath.length > 0) return null;
 		const activeScene = this.active;
 		const activeProject = this.editor.project.getActive();
 
@@ -186,12 +204,14 @@ export class ScenesManager {
 
 				this.list = ensuredScenes;
 				this.active = currentScene;
+				this.compoundPath = [];
 				this.notify();
 			}
 		} catch (error) {
 			console.error("Failed to load project scenes:", error);
 			this.list = [];
 			this.active = null;
+			this.compoundPath = [];
 			this.notify();
 		}
 	}
@@ -212,6 +232,7 @@ export class ScenesManager {
 
 		this.list = ensuredScenes;
 		this.active = currentScene || fallbackScene;
+		this.compoundPath = [];
 		this.notify();
 
 		const hasAddedMainScene = ensuredScenes.length > scenes.length;
@@ -237,18 +258,112 @@ export class ScenesManager {
 	clearScenes(): void {
 		this.list = [];
 		this.active = null;
+		this.compoundPath = [];
 		this.notify();
 	}
 
 	getActiveScene(): TScene {
-		if (!this.active) {
+		if (!this.activeView) {
 			throw new Error("No active scene.");
 		}
-		return this.active;
+		return this.activeView;
 	}
 
 	getActiveSceneOrNull(): TScene | null {
+		return this.activeView;
+	}
+
+	/** The persistent scene, even while the timeline is editing a compound. */
+	getRootActiveScene(): TScene {
+		if (!this.active) throw new Error("No active scene.");
 		return this.active;
+	}
+
+	getEditScope(): TimelineEditScope {
+		return {
+			sceneId: this.active?.id ?? null,
+			compoundPath: [...this.compoundPath],
+		};
+	}
+
+	/** Return to the scope where a command was recorded before undo/redo. */
+	restoreEditScope({ scope }: { scope: TimelineEditScope }): boolean {
+		if (scope.sceneId === null) return true;
+		const scene = this.list.find((item) => item.id === scope.sceneId);
+		// Scene/project commands may remove their own scene; let their undo
+		// recreate it before attempting to navigate back into that scene.
+		if (!scene) return scope.compoundPath.length === 0;
+		if (
+			scope.compoundPath.length > 0 &&
+			!getCompoundPath({ tracks: scene.tracks, path: scope.compoundPath })
+		) return false;
+		if (
+			this.active?.id === scene.id &&
+			this.compoundPath.join("\0") === scope.compoundPath.join("\0")
+		) return true;
+		this.editor.playback.pause();
+		this.active = scene;
+		this.compoundPath = [...scope.compoundPath];
+		this.notify();
+		this.editor.selection.clearSelection();
+		this.editor.playback.seek({ time: mediaTime({ ticks: 0 }) });
+		const project = this.editor.project.getActiveOrNull();
+		if (project && project.currentSceneId !== scene.id) {
+			this.editor.project.setActiveProject({
+				project: { ...project, currentSceneId: scene.id },
+			});
+		}
+		return true;
+	}
+
+	getCompoundBreadcrumbs(): Array<{ id: string; name: string }> {
+		if (!this.active) return [];
+		const path = getCompoundPath({
+			tracks: this.active.tracks,
+			path: this.compoundPath,
+		});
+		return path?.compounds.map(({ id, name }) => ({ id, name })) ?? [];
+	}
+
+	enterCompound({ elementId }: { elementId: string }): boolean {
+		if (!this.activeView) return false;
+		const compound = findCompound({
+			tracks: this.activeView.tracks,
+			elementId,
+		});
+		if (!compound || this.compoundPath.includes(elementId)) return false;
+		const parentTime = this.editor.playback.getCurrentTime();
+		this.editor.playback.pause();
+		this.compoundPath = [...this.compoundPath, elementId];
+		this.notify();
+		this.editor.selection.clearSelection();
+		this.editor.playback.seek({
+			time: mediaTime({
+				ticks: Math.max(0, parentTime - compound.startTime + compound.trimStart),
+			}),
+		});
+		return true;
+	}
+
+	exitCompound(): boolean {
+		if (this.compoundPath.length === 0) return false;
+		const path = this.active
+			? getCompoundPath({ tracks: this.active.tracks, path: this.compoundPath })
+			: null;
+		const compound = path?.compounds.at(-1);
+		const childTime = this.editor.playback.getCurrentTime();
+		this.editor.playback.pause();
+		this.compoundPath = this.compoundPath.slice(0, -1);
+		this.notify();
+		this.editor.selection.clearSelection();
+		if (compound) {
+			this.editor.playback.seek({
+				time: mediaTime({
+					ticks: Math.max(0, compound.startTime + childTime - compound.trimStart),
+				}),
+			});
+		}
+		return true;
 	}
 
 	getScenes(): TScene[] {
@@ -267,6 +382,7 @@ export class ScenesManager {
 		this.active = nextActiveSceneId
 			? (scenes.find((scene) => scene.id === nextActiveSceneId) ?? null)
 			: null;
+		this.compoundPath = [];
 		this.notify();
 
 		const activeProject = this.editor.project.getActive();
@@ -305,6 +421,22 @@ export class ScenesManager {
 	}
 
 	private notify(): void {
+		if (!this.active) {
+			this.activeView = null;
+		} else if (this.compoundPath.length === 0) {
+			this.activeView = this.active;
+		} else {
+			const path = getCompoundPath({
+				tracks: this.active.tracks,
+				path: this.compoundPath,
+			});
+			if (path) {
+				this.activeView = { ...this.active, tracks: path.content, bookmarks: [] };
+			} else {
+				this.compoundPath = [];
+				this.activeView = this.active;
+			}
+		}
 		this.listeners.forEach((fn) => {
 			fn();
 		});
@@ -312,10 +444,16 @@ export class ScenesManager {
 
 	updateSceneTracks({ tracks }: { tracks: SceneTracks }): void {
 		if (!this.active) return;
+		const rootTracks = replaceCompoundPath({
+			tracks: this.active.tracks,
+			path: this.compoundPath,
+			content: tracks,
+		});
+		if (!rootTracks) return;
 
 		const updatedScene: TScene = {
 			...this.active,
-			tracks,
+			tracks: rootTracks,
 			updatedAt: new Date(),
 		};
 

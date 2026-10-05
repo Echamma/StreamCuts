@@ -1,6 +1,7 @@
 /* tslint:disable */
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
+export const getLastFrameProfile: () => any;
 export const __wbg_preparedcolorlut_free: (a: number, b: number) => void;
 export const __wbg_preparedhslcurves_free: (a: number, b: number) => void;
 export const __wbg_preparedtonecurves_free: (a: number, b: number) => void;
@@ -21,7 +22,13 @@ export const preparedtonecurves_identity: (a: number) => number;
 export const preparedtonecurves_nodes: (a: number) => [number, number];
 export const sampleHslCurve: (a: any, b: number) => [number, number, number, number];
 export const sampleToneCurve: (a: any) => [number, number, number, number];
-export const getLastFrameProfile: () => any;
+export const getCompositorCanvas: () => [number, number, number];
+export const initCompositor: (a: number, b: number) => [number, number];
+export const releaseTexture: (a: number, b: number) => [number, number];
+export const renderFrame: (a: any) => [number, number];
+export const resizeCompositor: (a: number, b: number) => [number, number];
+export const uploadTexture: (a: any) => [number, number];
+export const applyMaskFeather: (a: any) => [number, number, number];
 export const __wbg_preparedrgbparade_free: (a: number, b: number) => void;
 export const __wbg_preparedvectorscope_free: (a: number, b: number) => void;
 export const computeRgbParade: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
@@ -39,13 +46,6 @@ export const saliencyanalyzer_analyze: (a: number, b: any) => [number, number, n
 export const saliencyanalyzer_lastAnchor: (a: number) => [number, number, number];
 export const saliencyanalyzer_new: (a: any) => [number, number, number];
 export const saliencyanalyzer_reset: (a: number) => void;
-export const applyMaskFeather: (a: any) => [number, number, number];
-export const getCompositorCanvas: () => [number, number, number];
-export const initCompositor: (a: number, b: number) => [number, number];
-export const releaseTexture: (a: number, b: number) => [number, number];
-export const renderFrame: (a: any) => [number, number];
-export const resizeCompositor: (a: number, b: number) => [number, number];
-export const uploadTexture: (a: any) => [number, number];
 export const formatTimecode: (a: any) => [number, number];
 export const guessTimecodeFormat: (a: any) => any;
 export const parseTimecode: (a: any) => any;

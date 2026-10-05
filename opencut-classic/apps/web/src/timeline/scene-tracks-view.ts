@@ -39,7 +39,10 @@ export function getOverlayVideoTracks({
  * every band. Post-R1 concretely: `[...text, ...graphic, ...effect, ...video,
  * ...audio]` with `video[0]` (the former `main`) at the index that
  * `getMainTrackRowIndex` returns, preserving the pre-R1 layout so consumers
- * that use the enumeration as a row-index space keep working.
+ * that use the enumeration as a row-index space keep working. This view is
+ * intentionally shallow: editing, ripple, selection, paste, and duplicate
+ * operate on the current scene/compound scope. Asset removal, serialization,
+ * rendering, and audio collection recurse into compounds explicitly.
  */
 export function getOrderedTimelineTracks({
 	tracks,

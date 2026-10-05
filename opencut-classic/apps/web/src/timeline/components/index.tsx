@@ -135,14 +135,53 @@ export function Timeline() {
 	const scene = useEditor((currentEditor) =>
 		currentEditor.scenes.getActiveSceneOrNull(),
 	);
+	const compoundPath = useScenes((currentEditor) =>
+		currentEditor.scenes.getEditScope().compoundPath.join("/"),
+	);
+	const compoundBreadcrumbs = compoundPath
+		? editor.scenes.getCompoundBreadcrumbs()
+		: [];
+	const exitToDepth = useCallback(
+		(depth: number) => {
+			const currentDepth = editor.scenes.getCompoundBreadcrumbs().length;
+			for (let index = currentDepth; index > depth; index--) {
+				editor.scenes.exitCompound();
+			}
+		},
+		[editor],
+	);
+	useEffect(() => {
+		if (!compoundPath) return;
+		const onEscape = (event: KeyboardEvent) => {
+			if (event.key !== "Escape") return;
+			if (
+				event.target instanceof HTMLElement &&
+				(event.target.isContentEditable ||
+					event.target.closest(
+						"input, textarea, [role='dialog'], [role='menu']",
+					))
+			)
+				return;
+			if (
+				document.querySelector(
+					"[role='dialog'][data-state='open'], [role='menu'][data-state='open']",
+				)
+			)
+				return;
+			event.preventDefault();
+			event.stopPropagation();
+			editor.scenes.exitCompound();
+		};
+		window.addEventListener("keydown", onEscape, true);
+		return () => window.removeEventListener("keydown", onEscape, true);
+	}, [editor, compoundPath]);
 	const tracks = useMemo<TimelineTrack[]>(
-		() =>
-			scene
-				? getOrderedTimelineTracks({ tracks: scene.tracks })
-				: [],
+		() => (scene ? getOrderedTimelineTracks({ tracks: scene.tracks }) : []),
 		[scene],
 	);
-	const mainTrackId = scene ? getMainVideoTrack({ tracks: scene.tracks }).id : null;
+	const mainTrackId = scene
+		? getMainVideoTrack({ tracks: scene.tracks }).id
+		: null;
 	const seek = (time: MediaTime) => editor.playback.seek({ time });
 
 	const timelineRef = useRef<HTMLDivElement>(null);
@@ -310,12 +349,12 @@ export function Timeline() {
 
 	const { dragView, handleElementMouseDown, handleElementClick } =
 		useElementInteraction({
-		zoomLevel,
-		tracksContainerRef,
-		tracksScrollRef,
-		snappingEnabled,
-		onSnapPointChange: handleSnapPointChange,
-	});
+			zoomLevel,
+			tracksContainerRef,
+			tracksScrollRef,
+			snappingEnabled,
+			onSnapPointChange: handleSnapPointChange,
+		});
 	const isElementDragging = dragView.kind === "dragging";
 
 	const {
@@ -449,6 +488,38 @@ export function Timeline() {
 				minZoom={minZoomLevel}
 				setZoomLevel={({ zoom }) => setZoomLevel(zoom)}
 			/>
+			{compoundBreadcrumbs.length > 0 && (
+				<nav
+					aria-label="Compound clip path"
+					data-testid="compound-breadcrumbs"
+					className="flex h-8 shrink-0 items-center gap-1 border-b px-2 text-xs"
+				>
+					<button
+						type="button"
+						className="text-muted-foreground hover:text-foreground truncate"
+						onClick={() => exitToDepth(0)}
+					>
+						{scene?.name ?? "Scene"}
+					</button>
+					{compoundBreadcrumbs.map((crumb, index) => (
+						<span key={crumb.id} className="flex min-w-0 items-center gap-1">
+							<span aria-hidden="true" className="text-muted-foreground">
+								/
+							</span>
+							<button
+								type="button"
+								className="truncate hover:underline"
+								aria-current={
+									index === compoundBreadcrumbs.length - 1 ? "page" : undefined
+								}
+								onClick={() => exitToDepth(index + 1)}
+							>
+								{crumb.name}
+							</button>
+						</span>
+					))}
+				</nav>
+			)}
 
 			<div className="relative flex flex-1 overflow-hidden" ref={timelineRef}>
 				<TrackLabelsPanel
@@ -463,9 +534,7 @@ export function Timeline() {
 					className="relative isolate flex flex-1 flex-col overflow-hidden"
 					ref={tracksContainerRef}
 				>
-					<SelectionBox
-						bounds={selectionBox?.bounds ?? null}
-					/>
+					<SelectionBox bounds={selectionBox?.bounds ?? null} />
 					<DragLine
 						dropTarget={dropTarget}
 						tracks={tracks}
@@ -623,10 +692,7 @@ function TrackLabelsPanel({
 	const editor = useEditor();
 	const scene = useScenes((e) => e.scenes.getActiveSceneOrNull());
 	const tracks = useMemo<TimelineTrack[]>(
-		() =>
-			scene
-				? getOrderedTimelineTracks({ tracks: scene.tracks })
-				: [],
+		() => (scene ? getOrderedTimelineTracks({ tracks: scene.tracks }) : []),
 		[scene],
 	);
 	const { selectedElements } = useElementSelection();
@@ -776,10 +842,7 @@ function TimelineTrackRows({
 	const editor = useEditor();
 	const scene = useScenes((e) => e.scenes.getActiveSceneOrNull());
 	const tracks = useMemo<TimelineTrack[]>(
-		() =>
-			scene
-				? getOrderedTimelineTracks({ tracks: scene.tracks })
-				: [],
+		() => (scene ? getOrderedTimelineTracks({ tracks: scene.tracks }) : []),
 		[scene],
 	);
 	const { selectedElements } = useElementSelection();
@@ -802,8 +865,8 @@ function TimelineTrackRows({
 	const draggingElementIds = useMemo(
 		() =>
 			dragView.kind === "dragging"
-			? dragView.memberTimeOffsets
-			: (null as ReadonlyMap<string, MediaTime> | null),
+				? dragView.memberTimeOffsets
+				: (null as ReadonlyMap<string, MediaTime> | null),
 		[dragView],
 	);
 	const sortedTracks = useMemo(() => {
@@ -825,7 +888,8 @@ function TimelineTrackRows({
 	}, [tracks, draggingElementIds]);
 
 	const trackTopOffsets = useMemo(
-		() => buildTrackTopOffsets({ tracks, getExtraHeight: getTrackExpansionHeight }),
+		() =>
+			buildTrackTopOffsets({ tracks, getExtraHeight: getTrackExpansionHeight }),
 		[tracks, getTrackExpansionHeight],
 	);
 
