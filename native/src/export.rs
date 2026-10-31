@@ -167,6 +167,33 @@ mod tests {
         assert!(joined.ends_with("-t 30.000 -progress pipe:1 -nostats C:/out/cut.mp4"));
     }
 
+    /// Needs FFmpeg on PATH: renders a real two-track timeline and checks the result plays for the right length.
+    #[test]
+    fn renders_a_timeline_with_ffmpeg() {
+        let dir = std::env::temp_dir().join(format!("streamcuts-export-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let clip = dir.join("clip.mp4");
+        let still = dir.join("still.png");
+        assert!(command(&ffmpeg()).args(["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=30:duration=2", "-f", "lavfi", "-i", "sine=duration=2", "-shortest", "-pix_fmt", "yuv420p"]).arg(&clip).status().unwrap().success());
+        assert!(command(&ffmpeg()).args(["-v", "error", "-y", "-f", "lavfi", "-i", "color=c=orange:s=64x64", "-frames:v", "1"]).arg(&still).status().unwrap().success());
+        let mut project = Project::new("Render");
+        project.width = 320;
+        project.height = 180;
+        let video = project.add_media(crate::ffmpeg::probe(&clip).unwrap());
+        let picture = project.add_media(crate::ffmpeg::probe(&still).unwrap());
+        project.place(&video, None, 0.0);
+        let upper = project.add_track(TrackKind::Video);
+        let still_clip = project.place(&picture, Some(upper), 1.0).unwrap();
+        project.trim_end(&still_clip, 2.5);
+        let output = dir.join("out.mp4");
+        let run = start(&project, &output, egui::Context::default()).unwrap();
+        assert_eq!(run.result.recv().unwrap(), Ok(()));
+        let rendered = crate::ffmpeg::probe(&output).unwrap();
+        assert!((rendered.duration - 2.5).abs() < 0.15, "rendered {}", rendered.duration);
+        assert!(rendered.has_audio && rendered.width == 320);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn muted_tracks_add_no_sound() {
         let mut project = Project::new("Quiet");

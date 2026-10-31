@@ -16,6 +16,7 @@ path = "src/main.rs"
 canopy-ui = { path = "../../canopy/native/crates/canopy-ui" }
 egui = "0.37.0"
 image = "0.25.10"
+rfd = "0.17.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 

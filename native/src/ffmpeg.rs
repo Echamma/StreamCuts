@@ -213,3 +213,33 @@ impl Drop for SoundStream {
         let _ = self.child.wait();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Needs FFmpeg on PATH: makes a 2-second clip with sound, then reads it back.
+    #[test]
+    fn probes_and_decodes_a_generated_clip() {
+        let dir = std::env::temp_dir().join(format!("streamcuts-ffmpeg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let clip = dir.join("clip.mp4");
+        let made = command(&ffmpeg())
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=30:duration=2", "-f", "lavfi", "-i", "sine=duration=2", "-shortest", "-pix_fmt", "yuv420p"])
+            .arg(&clip)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let media = probe(&clip).unwrap();
+        assert_eq!(media.kind, MediaKind::Video);
+        assert!((media.duration - 2.0).abs() < 0.1, "duration {}", media.duration);
+        assert!(media.has_audio && media.width == 320 && media.height == 180);
+        let frame = still(&clip, 1.0, 160, 90).unwrap();
+        assert_eq!(frame.rgba.len(), 160 * 90 * 4);
+        let stream = FrameStream::start(&clip, 0.5, 10, 64, 36).unwrap();
+        let first = stream.frames.recv().unwrap();
+        assert!((first.time - 0.5).abs() < 1e-9 && first.rgba.len() == 64 * 36 * 4);
+        drop(stream);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}

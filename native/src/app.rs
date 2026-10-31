@@ -1,0 +1,548 @@
+//! The StreamCuts editor: toolbar, media bin, preview with transport, and the timeline. One instance runs per space in
+//! Canopy, or alone in StreamCuts' own window.
+
+use crate::export::{self, Export};
+use crate::ffmpeg::Frame;
+use crate::preview::{Clock, Preview};
+use crate::project::{History, MediaKind, Project};
+use crate::storage;
+use crate::timeline::{MediaDrag, Timeline, timecode};
+use crate::worker::{Done, Job, Worker};
+use canopy_ui::canopy_core::files::Kind;
+use canopy_ui::{CanopyApp, Host, Icon, Mood, Place, Receipt, SharedFile, color, font, icon, icon_button, pane_frame, pill, primary_button, quiet_button};
+use egui::{Align2, Color32, ColorImage, Key, Modifiers, Rect, Sense, TextureHandle, TextureOptions, Ui, UiBuilder, pos2, vec2};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
+
+const BIN_WIDTH: f32 = 250.0;
+
+/// Where a file being imported goes once it has been probed.
+struct Pending {
+    at: f64,
+    track: Option<usize>,
+}
+
+pub struct StreamCuts {
+    place: Place,
+    project: Project,
+    history: History,
+    edited_at: Option<Instant>,
+    worker: Worker,
+    thumbnails: HashMap<String, TextureHandle>,
+    pending: HashMap<PathBuf, Pending>,
+    preview: Preview,
+    clock: Clock,
+    playhead: f64,
+    timeline: Timeline,
+    export: Option<Export>,
+    show_projects: bool,
+    toasts: Vec<String>,
+    exported: Vec<PathBuf>,
+}
+
+impl StreamCuts {
+    pub fn new(place: Place, ctx: &egui::Context) -> Self {
+        let _ = std::fs::create_dir_all(&place.projects_dir);
+        // Open the most recent project here, or start one.
+        let project = storage::list(&place.projects_dir)
+            .first()
+            .and_then(|doc| storage::load(&place.projects_dir.join(&doc.id)).ok())
+            .unwrap_or_else(|| Project::new("Untitled cut"));
+        let mut app = Self {
+            place,
+            project,
+            history: History::default(),
+            edited_at: None,
+            worker: Worker::new(ctx.clone()),
+            thumbnails: HashMap::new(),
+            pending: HashMap::new(),
+            preview: Preview::default(),
+            clock: Clock::default(),
+            playhead: 0.0,
+            timeline: Timeline::default(),
+            export: None,
+            show_projects: false,
+            toasts: Vec::new(),
+            exported: Vec::new(),
+        };
+        app.request_thumbnails();
+        app
+    }
+
+    fn request_thumbnails(&mut self) {
+        for media in &self.project.media {
+            if !self.thumbnails.contains_key(&media.id) && media.kind != MediaKind::Audio {
+                self.worker.send(Job::Thumbnail { media_id: media.id.clone(), path: media.path.clone(), at: (media.duration * 0.1).min(1.0) });
+            }
+        }
+    }
+
+    fn edited(&mut self) {
+        self.edited_at = Some(Instant::now());
+    }
+
+    fn open(&mut self, project: Project) {
+        let _ = self.save();
+        self.project = project;
+        self.history.clear();
+        self.timeline = Timeline::default();
+        self.playhead = 0.0;
+        self.clock.pause();
+        self.preview.reset();
+        self.request_thumbnails();
+    }
+
+    fn import(&mut self, files: Vec<PathBuf>, at: f64, track: Option<usize>) {
+        for path in files {
+            self.pending.insert(path.clone(), Pending { at, track });
+            self.worker.send(Job::Probe(path));
+        }
+    }
+
+    fn texture(ctx: &egui::Context, name: &str, frame: &Frame) -> TextureHandle {
+        ctx.load_texture(name, ColorImage::from_rgba_unmultiplied(frame.size, &frame.rgba), TextureOptions::LINEAR)
+    }
+
+    fn drain_worker(&mut self, ctx: &egui::Context) {
+        while let Ok(done) = self.worker.done.try_recv() {
+            match done {
+                Done::Probed(path, result) => {
+                    let pending = self.pending.remove(&path);
+                    match result {
+                        Ok(media) => {
+                            self.history.record(&self.project);
+                            let id = self.project.add_media(media);
+                            if let Some(p) = pending {
+                                if let Some(clip) = self.project.place(&id, p.track, p.at) {
+                                    self.timeline.selection = vec![clip];
+                                }
+                            }
+                            self.request_thumbnails();
+                            self.edited();
+                        }
+                        Err(error) => self.toasts.push(error),
+                    }
+                }
+                Done::Thumbnail(id, Ok(frame)) => {
+                    let texture = Self::texture(ctx, &format!("thumb-{id}"), &frame);
+                    self.thumbnails.insert(id, texture);
+                }
+                Done::Thumbnail(_, Err(_)) => {}
+                Done::Still(key, frame) => self.preview.still_done(ctx, key, frame),
+            }
+        }
+    }
+
+    fn seek(&mut self, t: f64) {
+        self.playhead = t.clamp(0.0, self.project.duration().max(0.0));
+        if self.clock.playing {
+            self.clock.play(self.playhead);
+        }
+    }
+
+    fn toggle_play(&mut self) {
+        if self.clock.playing {
+            self.clock.pause();
+        } else {
+            if self.playhead >= self.project.duration() - 0.05 {
+                self.playhead = 0.0;
+            }
+            self.clock.play(self.playhead);
+        }
+    }
+
+    fn split(&mut self) {
+        self.history.record(&self.project);
+        let selected: Vec<String> = self.timeline.selection.clone();
+        let made = if selected.is_empty() {
+            self.project.split_all(self.playhead).len()
+        } else {
+            selected.iter().filter_map(|id| self.project.split(id, self.playhead)).count()
+        };
+        if made > 0 {
+            self.edited();
+        }
+    }
+
+    fn delete_selection(&mut self) {
+        if self.timeline.selection.is_empty() {
+            return;
+        }
+        self.history.record(&self.project);
+        self.project.delete(&self.timeline.selection);
+        self.timeline.selection.clear();
+        self.edited();
+    }
+
+    fn shortcuts(&mut self, ui: &Ui) {
+        if ui.ctx().egui_wants_keyboard_input() {
+            return;
+        }
+        let ctx = ui.ctx();
+        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Space)) {
+            self.toggle_play();
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::S)) {
+            self.split();
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Delete) || i.consume_key(Modifiers::NONE, Key::Backspace)) {
+            self.delete_selection();
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z) || i.consume_key(Modifiers::COMMAND, Key::Y)) {
+            if self.history.redo(&mut self.project) {
+                self.edited();
+            }
+        } else if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Z)) && self.history.undo(&mut self.project) {
+            self.edited();
+        }
+        let frame = 1.0 / self.project.fps as f64;
+        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::ArrowLeft)) {
+            self.seek(self.playhead - frame);
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::ArrowRight)) {
+            self.seek(self.playhead + frame);
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Home)) {
+            self.seek(0.0);
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::End)) {
+            self.seek(self.project.duration());
+        }
+    }
+
+    fn toolbar(&mut self, ui: &mut Ui) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            let name = ui.add(egui::TextEdit::singleline(&mut self.project.name).font(font::bold(15.0)).desired_width(220.0).margin(vec2(8.0, 6.0)));
+            if name.changed() {
+                self.edited();
+            }
+            if icon_button(ui, Icon::Undo, "Undo (Ctrl+Z)", false).clicked() && self.history.undo(&mut self.project) {
+                self.edited();
+            }
+            if icon_button(ui, Icon::Redo, "Redo (Ctrl+Shift+Z)", false).clicked() && self.history.redo(&mut self.project) {
+                self.edited();
+            }
+            if quiet_button(ui, "Import", Some(Icon::Plus)).clicked() {
+                if let Some(files) = rfd::FileDialog::new().set_title("Import media").add_filter("Video, pictures and sound", &["mp4", "mov", "mkv", "webm", "avi", "m4v", "png", "jpg", "jpeg", "webp", "gif", "mp3", "wav", "m4a", "aac", "flac", "ogg"]).pick_files() {
+                    let at = self.project.duration();
+                    self.import(files, at, None);
+                }
+            }
+            for (label, w, h) in [("16:9", 1920, 1080), ("9:16", 1080, 1920), ("1:1", 1080, 1080)] {
+                if pill(ui, label, None, (self.project.width, self.project.height) == (w, h)).clicked() && (self.project.width, self.project.height) != (w, h) {
+                    self.history.record(&self.project);
+                    self.project.width = w;
+                    self.project.height = h;
+                    self.preview.reset();
+                    self.edited();
+                }
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if primary_button(ui, "Export", Mood::Ember).clicked() && self.export.is_none() {
+                    self.start_export(ui.ctx());
+                }
+                if quiet_button(ui, "Projects", Some(Icon::Project)).clicked() {
+                    self.show_projects = !self.show_projects;
+                }
+            });
+        });
+    }
+
+    fn start_export(&mut self, ctx: &egui::Context) {
+        let _ = std::fs::create_dir_all(&self.place.exports_dir);
+        let name = canopy_ui::canopy_core::files::unique_name(&self.place.exports_dir, &format!("{}.mp4", self.project.name));
+        let output = self.place.exports_dir.join(name);
+        match export::start(&self.project, &output, ctx.clone()) {
+            Ok(run) => {
+                self.export = Some(run);
+                self.exported.push(output);
+            }
+            Err(error) => self.toasts.push(error),
+        }
+    }
+
+    fn media_bin(&mut self, ui: &mut Ui) {
+        ui.label(egui::RichText::new("Media").font(font::ui(12.0)).color(color::INK_MUTED));
+        if self.project.media.is_empty() {
+            ui.add_space(12.0);
+            ui.label(egui::RichText::new("Import video, pictures or sound, or drop files here.").color(color::INK_MUTED));
+            return;
+        }
+        let mut place_now = None;
+        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            for media in &self.project.media {
+                let id = ui.id().with(("media", &media.id));
+                let response = ui.dnd_drag_source(id, MediaDrag(media.id.clone()), |ui| {
+                    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 46.0), Sense::hover());
+                    let painter = ui.painter();
+                    painter.rect_filled(rect, 8, color::VEIL);
+                    let thumb = Rect::from_min_size(rect.min + vec2(4.0, 4.0), vec2(68.0, 38.0));
+                    match self.thumbnails.get(&media.id) {
+                        Some(texture) => {
+                            painter.image(texture.id(), thumb, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                        }
+                        None => {
+                            painter.rect_filled(thumb, 4, color::VEIL_STRONG);
+                            let which = match media.kind { MediaKind::Audio => Icon::Audio, MediaKind::Image => Icon::Image, MediaKind::Video => Icon::Video };
+                            icon(painter, Rect::from_center_size(thumb.center(), vec2(18.0, 18.0)), which, color::INK_SOFT);
+                        }
+                    }
+                    let text = painter.with_clip_rect(Rect::from_min_max(pos2(thumb.right() + 8.0, rect.top()), rect.max - vec2(6.0, 0.0)));
+                    text.text(pos2(thumb.right() + 8.0, rect.top() + 8.0), Align2::LEFT_TOP, &media.name, font::ui(13.0), color::INK);
+                    let detail = match media.kind { MediaKind::Image => format!("Picture · {}×{}", media.width, media.height), _ => timecode(media.duration, self.project.fps) };
+                    text.text(pos2(thumb.right() + 8.0, rect.bottom() - 7.0), Align2::LEFT_BOTTOM, detail, font::ui(11.0), color::INK_MUTED);
+                });
+                if response.response.double_clicked() {
+                    place_now = Some(media.id.clone());
+                }
+                ui.add_space(2.0);
+            }
+        });
+        if let Some(id) = place_now {
+            self.history.record(&self.project);
+            if let Some(clip) = self.project.place(&id, None, self.playhead) {
+                self.timeline.selection = vec![clip];
+                self.edited();
+            }
+        }
+    }
+
+    fn preview(&mut self, ui: &mut Ui) {
+        let full = ui.available_rect_before_wrap();
+        let transport = 44.0;
+        let area = Rect::from_min_max(full.min, pos2(full.right(), full.bottom() - transport));
+        let aspect = self.project.width as f32 / self.project.height as f32;
+        let size = if area.width() / area.height() > aspect { vec2(area.height() * aspect, area.height()) } else { vec2(area.width(), area.width() / aspect) };
+        let screen = Rect::from_center_size(area.center(), size);
+        ui.painter().rect_filled(screen, 4, Color32::BLACK);
+        if let (Some(texture), false) = (&self.preview.texture, self.preview.blank) {
+            ui.painter().image(texture.id(), screen, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+        }
+        if self.project.duration() == 0.0 {
+            ui.painter().text(screen.center(), Align2::CENTER_CENTER, "Drag media onto the timeline to start", font::ui(14.0), color::INK_MUTED);
+        }
+        let bar = Rect::from_min_max(pos2(full.left(), full.bottom() - transport + 6.0), full.max);
+        ui.scope_builder(UiBuilder::new().max_rect(bar), |ui| {
+            ui.horizontal_centered(|ui| {
+                ui.add_space((bar.width() / 2.0 - 70.0).max(0.0));
+                if icon_button(ui, Icon::SkipBack, "Go to start (Home)", false).clicked() {
+                    self.seek(0.0);
+                }
+                let playing = self.clock.playing;
+                if icon_button(ui, if playing { Icon::Pause } else { Icon::Play }, if playing { "Pause (Space)" } else { "Play (Space)" }, false).clicked() {
+                    self.toggle_play();
+                }
+                if icon_button(ui, Icon::SkipForward, "Go to end (End)", false).clicked() {
+                    self.seek(self.project.duration());
+                }
+                ui.label(egui::RichText::new(format!("{} / {}", timecode(self.playhead, self.project.fps), timecode(self.project.duration(), self.project.fps))).font(font::ui(13.0)).color(color::INK_SOFT));
+            });
+        });
+    }
+
+    fn timeline_bar(&mut self, ui: &mut Ui) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            if icon_button(ui, Icon::Scissors, "Split at the playhead (S)", false).clicked() {
+                self.split();
+            }
+            if icon_button(ui, Icon::Trash, "Delete (Delete)", false).clicked() {
+                self.delete_selection();
+            }
+            if icon_button(ui, Icon::Magnet, "Snap to clips and the playhead", self.timeline.snap).clicked() {
+                self.timeline.snap = !self.timeline.snap;
+            }
+            if icon_button(ui, Icon::Plus, "Add a video track", false).clicked() {
+                self.history.record(&self.project);
+                self.project.add_track(crate::project::TrackKind::Video);
+                self.edited();
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if icon_button(ui, Icon::ZoomIn, "Zoom in (Ctrl+wheel)", false).clicked() {
+                    self.timeline.pps = (self.timeline.pps * 1.5).min(600.0);
+                }
+                if icon_button(ui, Icon::ZoomOut, "Zoom out (Ctrl+wheel)", false).clicked() {
+                    self.timeline.pps = (self.timeline.pps / 1.5).max(2.0);
+                }
+            });
+        });
+    }
+
+    fn projects_window(&mut self, ui: &mut Ui) {
+        if !self.show_projects {
+            return;
+        }
+        let mut open = None;
+        let mut new = false;
+        let modal = egui::Modal::new(ui.id().with("projects")).show(ui.ctx(), |ui| {
+            ui.set_width(360.0);
+            ui.label(egui::RichText::new("Your projects").font(font::display(20.0)));
+            ui.add_space(8.0);
+            if quiet_button(ui, "New project", Some(Icon::Plus)).clicked() {
+                new = true;
+            }
+            ui.add_space(6.0);
+            for doc in storage::list(&self.place.projects_dir) {
+                let current = storage::file_for(&self.place.projects_dir, &self.project).file_name().map(|n| n.to_string_lossy() == doc.id).unwrap_or(false);
+                let row = canopy_ui::Row { title: &doc.name, detail: &doc.detail, mark: canopy_ui::RowMark::Icon(Icon::Project), highlighted: current }.show(ui);
+                if row.clicked() {
+                    open = Some(doc.id.clone());
+                }
+                ui.add_space(4.0);
+            }
+        });
+        if modal.should_close() {
+            self.show_projects = false;
+        }
+        if new {
+            self.open(Project::new("Untitled cut"));
+            self.show_projects = false;
+        }
+        if let Some(id) = open {
+            if let Ok(project) = storage::load(&self.place.projects_dir.join(&id)) {
+                self.open(project);
+            }
+            self.show_projects = false;
+        }
+    }
+
+    fn export_window(&mut self, ui: &mut Ui, host: &mut dyn Host) {
+        let Some(run) = &self.export else { return };
+        if let Ok(result) = run.result.try_recv() {
+            let path = self.exported.pop();
+            self.export = None;
+            match (result, path) {
+                (Ok(()), Some(path)) => host.exported(path),
+                (Err(error), _) => host.toast(error),
+                _ => {}
+            }
+            return;
+        }
+        let progress = run.progress.load(Ordering::Relaxed) as f32 / 1000.0;
+        let mut cancel = false;
+        egui::Modal::new(ui.id().with("export")).show(ui.ctx(), |ui| {
+            ui.set_width(340.0);
+            ui.label(egui::RichText::new("Exporting").font(font::display(20.0)));
+            ui.label(canopy_ui::muted(format!("{} · {}×{} · {} fps", self.project.name, self.project.width, self.project.height, self.project.fps)));
+            ui.add_space(8.0);
+            ui.add(egui::ProgressBar::new(progress).show_percentage());
+            ui.add_space(8.0);
+            cancel = quiet_button(ui, "Stop", None).clicked();
+        });
+        if cancel {
+            run.cancel.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+impl CanopyApp for StreamCuts {
+    fn ui(&mut self, ui: &mut Ui, host: &mut dyn Host) {
+        let ctx = ui.ctx().clone();
+        self.drain_worker(&ctx);
+        for toast in self.toasts.drain(..) {
+            host.toast(toast);
+        }
+        self.shortcuts(ui);
+        if self.clock.playing {
+            self.playhead = self.clock.now();
+            if self.playhead >= self.project.duration() {
+                self.playhead = self.project.duration();
+                self.clock.pause();
+            }
+            ctx.request_repaint();
+        }
+        self.preview.update(&ctx, &self.project, self.playhead, self.clock.playing, &self.worker);
+        if self.edited_at.is_some_and(|at| at.elapsed() > Duration::from_millis(800)) {
+            if let Err(error) = self.save() {
+                host.toast(format!("Couldn't save: {error}"));
+            }
+        } else if self.edited_at.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(850));
+        }
+
+        let rect = ui.max_rect();
+        let toolbar = Rect::from_min_size(rect.min, vec2(rect.width(), 40.0));
+        ui.scope_builder(UiBuilder::new().max_rect(toolbar.shrink2(vec2(8.0, 4.0))), |ui| self.toolbar(ui));
+        let body_top = toolbar.bottom() + 4.0;
+        let timeline_height = ((rect.height() - 44.0) * 0.42).max(160.0);
+        let upper = Rect::from_min_max(pos2(rect.left(), body_top), pos2(rect.right(), rect.bottom() - timeline_height - 6.0));
+        let bin = Rect::from_min_size(upper.min, vec2(BIN_WIDTH, upper.height()));
+        let preview = Rect::from_min_max(pos2(bin.right() + 6.0, upper.top()), upper.max);
+        ui.painter().add(pane_frame(Mood::Ember).paint(bin));
+        ui.scope_builder(UiBuilder::new().max_rect(bin.shrink(8.0)), |ui| self.media_bin(ui));
+        ui.scope_builder(UiBuilder::new().max_rect(preview), |ui| self.preview(ui));
+
+        let lower = Rect::from_min_max(pos2(rect.left(), rect.bottom() - timeline_height), rect.max);
+        ui.painter().rect_filled(lower, 10, Mood::Ember.pane());
+        ui.painter().rect_stroke(lower, 10, egui::Stroke::new(1.0, color::HAIRLINE), egui::StrokeKind::Inside);
+        let bar = Rect::from_min_size(lower.min + vec2(8.0, 4.0), vec2(lower.width() - 16.0, 32.0));
+        ui.scope_builder(UiBuilder::new().max_rect(bar), |ui| self.timeline_bar(ui));
+        let lanes = Rect::from_min_max(pos2(lower.left() + 4.0, bar.bottom() + 4.0), lower.max - vec2(4.0, 4.0));
+        let output = ui.scope_builder(UiBuilder::new().max_rect(lanes), |ui| self.timeline.ui(ui, &mut self.project, &mut self.history, self.playhead, &self.thumbnails)).inner;
+        if self.clock.playing {
+            self.timeline.follow(self.playhead, lanes.width());
+        }
+        if output.changed {
+            self.edited();
+        }
+        if let Some(t) = output.seek {
+            self.seek(t);
+        }
+        if let Some((files, at, track)) = output.dropped {
+            self.import(files.into_iter().filter(|f| accepts(f)).map(|f| f.path).collect(), at, track);
+        }
+        self.projects_window(ui);
+        self.export_window(ui, host);
+    }
+
+    fn receive(&mut self, files: Vec<SharedFile>, _host: &mut dyn Host) -> Receipt {
+        let mut receipt = Receipt::default();
+        let mut media = Vec::new();
+        for file in files {
+            if file.name.to_lowercase().ends_with(storage::EXTENSION) {
+                match storage::load(&file.path) {
+                    Ok(project) => {
+                        self.open(project);
+                        receipt.accepted += 1;
+                    }
+                    Err(_) => receipt.skipped.push(file.name),
+                }
+            } else if accepts(&file) {
+                media.push(file.path);
+                receipt.accepted += 1;
+            } else {
+                receipt.skipped.push(file.name);
+            }
+        }
+        // Sent files land at the playhead, like pasting in StreamCuts on the web.
+        self.import(media, self.playhead, None);
+        receipt
+    }
+
+    fn open_document(&mut self, id: &str, host: &mut dyn Host) {
+        match storage::load(&self.place.projects_dir.join(id)) {
+            Ok(project) => self.open(project),
+            Err(error) => host.toast(error),
+        }
+    }
+
+    fn save(&mut self) -> Result<(), String> {
+        self.edited_at = None;
+        if self.project.duration() == 0.0 && self.project.media.is_empty() {
+            return Ok(()); // An untouched new project isn't worth a file.
+        }
+        storage::save(&self.place.projects_dir, &mut self.project).map(|_| ())
+    }
+
+    fn title(&self) -> String {
+        self.project.name.clone()
+    }
+}
+
+/// Video, pictures and sound.
+pub fn accepts(file: &SharedFile) -> bool {
+    matches!(file.kind, Kind::Video | Kind::Image | Kind::Audio) || file.name.to_lowercase().ends_with(storage::EXTENSION)
+}
