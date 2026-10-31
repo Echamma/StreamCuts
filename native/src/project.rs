@@ -1,0 +1,544 @@
+//! A StreamCuts project: the media it uses and the tracks of clips that place that media in time. Times are seconds.
+//! Every edit goes through a method here, so the editor, Canopy hand-offs and tests share one set of rules: clips on a
+//! track never overlap, trims stay inside the source media, and every change can be undone.
+
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+
+/// Still pictures get this long when placed on the timeline.
+pub const STILL_SECONDS: f64 = 5.0;
+/// The shortest a clip can be trimmed to.
+pub const MIN_CLIP: f64 = 0.1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MediaKind {
+    Video,
+    Audio,
+    Image,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Media {
+    pub id: String,
+    pub path: PathBuf,
+    pub name: String,
+    pub kind: MediaKind,
+    /// Length of the source; 0 for still pictures.
+    pub duration: f64,
+    pub width: u32,
+    pub height: u32,
+    pub has_audio: bool,
+}
+
+impl Media {
+    /// How long a clip of this media can be.
+    pub fn max_length(&self) -> f64 {
+        if self.kind == MediaKind::Image { f64::INFINITY } else { self.duration }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TrackKind {
+    Video,
+    Audio,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Clip {
+    pub id: String,
+    pub media_id: String,
+    /// Where the clip starts on the timeline.
+    pub start: f64,
+    /// Where in the source media the clip starts.
+    pub source_in: f64,
+    pub duration: f64,
+    #[serde(default = "full_volume")]
+    pub volume: f32,
+}
+
+fn full_volume() -> f32 {
+    1.0
+}
+
+impl Clip {
+    pub fn end(&self) -> f64 {
+        self.start + self.duration
+    }
+    /// The source time shown at timeline time `t`.
+    pub fn source_time(&self, t: f64) -> f64 {
+        self.source_in + (t - self.start)
+    }
+    pub fn contains(&self, t: f64) -> bool {
+        t >= self.start && t < self.end()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Track {
+    pub id: String,
+    pub kind: TrackKind,
+    pub name: String,
+    #[serde(default)]
+    pub muted: bool,
+    #[serde(default)]
+    pub hidden: bool,
+    pub clips: Vec<Clip>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Project {
+    pub version: u32,
+    pub id: String,
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub media: Vec<Media>,
+    /// Top to bottom as the timeline shows them: video tracks first (the top one is in front), then audio.
+    pub tracks: Vec<Track>,
+    #[serde(default)]
+    pub saved_at: u64,
+}
+
+/// A clip found on the timeline, with where it lives.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClipRef {
+    pub track: usize,
+    pub index: usize,
+}
+
+pub fn new_id() -> String {
+    canopy_ui::canopy_core::spaces::new_id()
+}
+
+impl Project {
+    pub fn new(name: &str) -> Self {
+        Project {
+            version: 1,
+            id: new_id(),
+            name: name.to_string(),
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            media: Vec::new(),
+            tracks: vec![
+                Track { id: new_id(), kind: TrackKind::Video, name: "Video 1".into(), muted: false, hidden: false, clips: Vec::new() },
+                Track { id: new_id(), kind: TrackKind::Audio, name: "Audio 1".into(), muted: false, hidden: false, clips: Vec::new() },
+            ],
+            saved_at: 0,
+        }
+    }
+
+    pub fn media(&self, id: &str) -> Option<&Media> {
+        self.media.iter().find(|m| m.id == id)
+    }
+
+    /// The end of the last clip.
+    pub fn duration(&self) -> f64 {
+        self.tracks.iter().flat_map(|t| t.clips.iter().map(Clip::end)).fold(0.0, f64::max)
+    }
+
+    pub fn find(&self, clip_id: &str) -> Option<ClipRef> {
+        self.tracks.iter().enumerate().find_map(|(track, t)| t.clips.iter().position(|c| c.id == clip_id).map(|index| ClipRef { track, index }))
+    }
+
+    pub fn clip(&self, clip_id: &str) -> Option<&Clip> {
+        self.find(clip_id).map(|r| &self.tracks[r.track].clips[r.index])
+    }
+
+    /// Adds media, or returns the one already added from the same file.
+    pub fn add_media(&mut self, media: Media) -> String {
+        if let Some(existing) = self.media.iter().find(|m| m.path == media.path) {
+            return existing.id.clone();
+        }
+        let id = media.id.clone();
+        self.media.push(media);
+        id
+    }
+
+    /// The track kind a medium's clips go on.
+    pub fn track_kind_for(kind: MediaKind) -> TrackKind {
+        if kind == MediaKind::Audio { TrackKind::Audio } else { TrackKind::Video }
+    }
+
+    /// The first track of a kind, adding one if the project has none.
+    pub fn track_of_kind(&mut self, kind: TrackKind) -> usize {
+        if let Some(index) = self.tracks.iter().position(|t| t.kind == kind) {
+            return index;
+        }
+        self.add_track(kind)
+    }
+
+    /// Adds a track: a video track goes above the others (in front), an audio track at the bottom.
+    pub fn add_track(&mut self, kind: TrackKind) -> usize {
+        let count = self.tracks.iter().filter(|t| t.kind == kind).count();
+        let name = match kind {
+            TrackKind::Video => format!("Video {}", count + 1),
+            TrackKind::Audio => format!("Audio {}", count + 1),
+        };
+        let track = Track { id: new_id(), kind, name, muted: false, hidden: false, clips: Vec::new() };
+        match kind {
+            TrackKind::Video => {
+                self.tracks.insert(0, track);
+                0
+            }
+            TrackKind::Audio => {
+                self.tracks.push(track);
+                self.tracks.len() - 1
+            }
+        }
+    }
+
+    fn overlaps(track: &Track, start: f64, end: f64, ignore: Option<&str>) -> bool {
+        track.clips.iter().any(|c| Some(c.id.as_str()) != ignore && start < c.end() - 1e-9 && end > c.start + 1e-9)
+    }
+
+    /// The earliest start at or after `at` where a clip this long fits on the track.
+    pub fn free_start(&self, track: usize, at: f64, duration: f64, ignore: Option<&str>) -> f64 {
+        let mut start = at.max(0.0);
+        let mut clips: Vec<&Clip> = self.tracks[track].clips.iter().filter(|c| Some(c.id.as_str()) != ignore).collect();
+        clips.sort_by(|a, b| a.start.total_cmp(&b.start));
+        for clip in clips {
+            if start + duration <= clip.start + 1e-9 {
+                break;
+            }
+            if start < clip.end() {
+                start = start.max(clip.end());
+            }
+        }
+        start
+    }
+
+    /// Places a clip of the media on a track at `at` (or the first free spot after it). Returns the clip's id.
+    pub fn place(&mut self, media_id: &str, track: Option<usize>, at: f64) -> Option<String> {
+        let media = self.media(media_id)?.clone();
+        let kind = Self::track_kind_for(media.kind);
+        let track = match track {
+            Some(t) if self.tracks.get(t).map(|t| t.kind) == Some(kind) => t,
+            _ => self.track_of_kind(kind),
+        };
+        let duration = if media.kind == MediaKind::Image { STILL_SECONDS } else { media.duration.max(MIN_CLIP) };
+        let start = self.free_start(track, at, duration, None);
+        let clip = Clip { id: new_id(), media_id: media.id.clone(), start, source_in: 0.0, duration, volume: 1.0 };
+        let id = clip.id.clone();
+        self.tracks[track].clips.push(clip);
+        self.sort_track(track);
+        Some(id)
+    }
+
+    fn sort_track(&mut self, track: usize) {
+        self.tracks[track].clips.sort_by(|a, b| a.start.total_cmp(&b.start));
+    }
+
+    /// Moves a clip to `start` on `track` (same kind). If it would overlap a neighbor it lands against that neighbor's
+    /// nearer edge; if there's no room at all it stays put. Returns whether it moved.
+    pub fn move_clip(&mut self, clip_id: &str, start: f64, track: usize) -> bool {
+        let Some(from) = self.find(clip_id) else { return false };
+        if self.tracks.get(track).map(|t| t.kind) != Some(self.tracks[from.track].kind) {
+            return false;
+        }
+        let clip = self.tracks[from.track].clips[from.index].clone();
+        let mut start = start.max(0.0);
+        if Self::overlaps(&self.tracks[track], start, start + clip.duration, Some(clip_id)) {
+            // Try just after and just before whatever is in the way, and take the closer one that fits.
+            let after = self.free_start(track, start, clip.duration, Some(clip_id));
+            let before = self.tracks[track].clips.iter()
+                .filter(|c| c.id != clip_id && c.start < start + clip.duration && c.end() > start)
+                .map(|c| c.start - clip.duration)
+                .fold(f64::INFINITY, f64::min);
+            let fits_before = before >= 0.0 && !Self::overlaps(&self.tracks[track], before, before + clip.duration, Some(clip_id));
+            start = if fits_before && (start - before).abs() < (after - start).abs() { before } else { after };
+            if Self::overlaps(&self.tracks[track], start, start + clip.duration, Some(clip_id)) {
+                return false;
+            }
+        }
+        self.tracks[from.track].clips.remove(from.index);
+        self.tracks[track].clips.push(Clip { start, ..clip });
+        self.sort_track(track);
+        true
+    }
+
+    /// Moves a clip's start edge to `start`, keeping its end where it is.
+    pub fn trim_start(&mut self, clip_id: &str, start: f64) -> bool {
+        let Some(at) = self.find(clip_id) else { return false };
+        let clip = self.tracks[at.track].clips[at.index].clone();
+        let previous_end = self.tracks[at.track].clips.iter().filter(|c| c.end() <= clip.start + 1e-9 && c.id != clip.id).map(Clip::end).fold(0.0, f64::max);
+        let is_still = self.media(&clip.media_id).map(|m| m.kind == MediaKind::Image).unwrap_or(false);
+        let earliest = if is_still { previous_end } else { previous_end.max(clip.start - clip.source_in) };
+        let start = start.clamp(earliest, clip.end() - MIN_CLIP);
+        let delta = start - clip.start;
+        let c = &mut self.tracks[at.track].clips[at.index];
+        c.start = start;
+        c.duration -= delta;
+        if !is_still {
+            c.source_in += delta;
+        }
+        true
+    }
+
+    /// Moves a clip's end edge to `end`, keeping its start where it is.
+    pub fn trim_end(&mut self, clip_id: &str, end: f64) -> bool {
+        let Some(at) = self.find(clip_id) else { return false };
+        let clip = self.tracks[at.track].clips[at.index].clone();
+        let next_start = self.tracks[at.track].clips.iter().filter(|c| c.start >= clip.end() - 1e-9 && c.id != clip.id).map(|c| c.start).fold(f64::INFINITY, f64::min);
+        let source_left = self.media(&clip.media_id).map(|m| m.max_length() - clip.source_in).unwrap_or(f64::INFINITY);
+        let latest = next_start.min(clip.start + source_left);
+        let end = end.clamp(clip.start + MIN_CLIP, latest);
+        self.tracks[at.track].clips[at.index].duration = end - clip.start;
+        true
+    }
+
+    /// Splits a clip in two at timeline time `t`. Returns the new right-hand clip's id.
+    pub fn split(&mut self, clip_id: &str, t: f64) -> Option<String> {
+        let at = self.find(clip_id)?;
+        let clip = self.tracks[at.track].clips[at.index].clone();
+        if t <= clip.start + MIN_CLIP / 2.0 || t >= clip.end() - MIN_CLIP / 2.0 {
+            return None;
+        }
+        let is_still = self.media(&clip.media_id).map(|m| m.kind == MediaKind::Image).unwrap_or(false);
+        let left = t - clip.start;
+        let right = Clip {
+            id: new_id(),
+            start: t,
+            source_in: if is_still { clip.source_in } else { clip.source_in + left },
+            duration: clip.duration - left,
+            ..clip.clone()
+        };
+        let id = right.id.clone();
+        self.tracks[at.track].clips[at.index].duration = left;
+        self.tracks[at.track].clips.insert(at.index + 1, right);
+        Some(id)
+    }
+
+    /// Splits every clip under timeline time `t` (when nothing is selected, the split button cuts across all tracks).
+    pub fn split_all(&mut self, t: f64) -> Vec<String> {
+        let ids: Vec<String> = self.tracks.iter().flat_map(|track| track.clips.iter().filter(|c| c.contains(t)).map(|c| c.id.clone())).collect();
+        ids.iter().filter_map(|id| self.split(id, t)).collect()
+    }
+
+    pub fn delete(&mut self, clip_ids: &[String]) -> usize {
+        let mut removed = 0;
+        for track in &mut self.tracks {
+            let before = track.clips.len();
+            track.clips.retain(|c| !clip_ids.contains(&c.id));
+            removed += before - track.clips.len();
+        }
+        removed
+    }
+
+    /// The clip in front at time `t`: the topmost visible video track with a clip there.
+    pub fn front_clip(&self, t: f64) -> Option<(&Clip, &Media)> {
+        self.tracks.iter()
+            .filter(|track| track.kind == TrackKind::Video && !track.hidden)
+            .find_map(|track| track.clips.iter().find(|c| c.contains(t)))
+            .and_then(|clip| self.media(&clip.media_id).map(|m| (clip, m)))
+    }
+
+    /// Every clip that makes sound, with its track muted state taken into account.
+    pub fn audible_clips(&self) -> Vec<(&Clip, &Media)> {
+        self.tracks.iter()
+            .filter(|track| !track.muted && !(track.kind == TrackKind::Video && track.hidden))
+            .flat_map(|track| track.clips.iter())
+            .filter_map(|clip| self.media(&clip.media_id).map(|m| (clip, m)))
+            .filter(|(clip, media)| media.has_audio && clip.volume > 0.0)
+            .collect()
+    }
+
+    /// Clip edges and the playhead, for snapping.
+    pub fn snap_points(&self, ignore: Option<&str>) -> Vec<f64> {
+        let mut points = vec![0.0];
+        for clip in self.tracks.iter().flat_map(|t| t.clips.iter()).filter(|c| Some(c.id.as_str()) != ignore) {
+            points.push(clip.start);
+            points.push(clip.end());
+        }
+        points
+    }
+}
+
+/// Undo and redo as whole-project snapshots: projects are small, and this can't drift out of step with the edits.
+#[derive(Default)]
+pub struct History {
+    undo: Vec<Project>,
+    redo: Vec<Project>,
+}
+
+impl History {
+    /// Call before changing the project.
+    pub fn record(&mut self, before: &Project) {
+        if self.undo.last() == Some(before) {
+            return;
+        }
+        self.undo.push(before.clone());
+        if self.undo.len() > 200 {
+            self.undo.remove(0);
+        }
+        self.redo.clear();
+    }
+    pub fn undo(&mut self, current: &mut Project) -> bool {
+        match self.undo.pop() {
+            Some(previous) => {
+                self.redo.push(std::mem::replace(current, previous));
+                true
+            }
+            None => false,
+        }
+    }
+    pub fn redo(&mut self, current: &mut Project) -> bool {
+        match self.redo.pop() {
+            Some(next) => {
+                self.undo.push(std::mem::replace(current, next));
+                true
+            }
+            None => false,
+        }
+    }
+    pub fn clear(&mut self) {
+        self.undo.clear();
+        self.redo.clear();
+    }
+    pub fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn media(kind: MediaKind, duration: f64) -> Media {
+        Media { id: new_id(), path: PathBuf::from(format!("C:/m/{}.mp4", new_id())), name: "m".into(), kind, duration, width: 1920, height: 1080, has_audio: kind != MediaKind::Image }
+    }
+
+    fn project_with(duration: f64) -> (Project, String) {
+        let mut project = Project::new("Test");
+        let id = project.add_media(media(MediaKind::Video, duration));
+        (project, id)
+    }
+
+    #[test]
+    fn placing_puts_clips_on_the_right_kind_of_track_without_overlap() {
+        let (mut project, video) = project_with(10.0);
+        let audio = project.add_media(media(MediaKind::Audio, 4.0));
+        let first = project.place(&video, None, 0.0).unwrap();
+        let second = project.place(&video, None, 5.0).unwrap();
+        assert_eq!(project.clip(&second).unwrap().start, 10.0, "a clip placed over another moves after it");
+        let sound = project.place(&audio, Some(0), 2.0).unwrap();
+        let at = project.find(&sound).unwrap();
+        assert_eq!(project.tracks[at.track].kind, TrackKind::Audio, "audio never lands on a video track");
+        assert_eq!(project.find(&first).unwrap().track, project.find(&second).unwrap().track);
+        assert_eq!(project.duration(), 20.0);
+    }
+
+    #[test]
+    fn the_same_file_is_added_once() {
+        let mut project = Project::new("Test");
+        let m = media(MediaKind::Video, 3.0);
+        let first = project.add_media(m.clone());
+        let second = project.add_media(Media { id: new_id(), ..m });
+        assert_eq!(first, second);
+        assert_eq!(project.media.len(), 1);
+    }
+
+    #[test]
+    fn stills_get_five_seconds_and_can_be_stretched() {
+        let mut project = Project::new("Test");
+        let still = project.add_media(media(MediaKind::Image, 0.0));
+        let clip = project.place(&still, None, 1.0).unwrap();
+        assert_eq!(project.clip(&clip).unwrap().duration, STILL_SECONDS);
+        assert!(project.trim_end(&clip, 30.0));
+        assert_eq!(project.clip(&clip).unwrap().end(), 30.0);
+        assert!(project.trim_start(&clip, 0.0));
+        assert_eq!(project.clip(&clip).unwrap().start, 0.0);
+        assert_eq!(project.clip(&clip).unwrap().source_in, 0.0);
+    }
+
+    #[test]
+    fn split_makes_two_clips_that_play_the_same_source() {
+        let (mut project, video) = project_with(10.0);
+        let clip = project.place(&video, None, 2.0).unwrap();
+        let right = project.split(&clip, 5.0).unwrap();
+        let (l, r) = (project.clip(&clip).unwrap().clone(), project.clip(&right).unwrap().clone());
+        assert_eq!((l.start, l.duration, l.source_in), (2.0, 3.0, 0.0));
+        assert_eq!((r.start, r.duration, r.source_in), (5.0, 7.0, 3.0));
+        assert_eq!(project.split(&clip, 2.01), None, "no slivers at the edges");
+        assert_eq!(project.split_all(8.0).len(), 1);
+    }
+
+    #[test]
+    fn trims_stay_inside_the_source_and_the_neighbors() {
+        let (mut project, video) = project_with(10.0);
+        let a = project.place(&video, None, 0.0).unwrap();
+        let b = project.place(&video, None, 10.0).unwrap();
+        assert!(project.trim_start(&b, 12.0));
+        let clip = project.clip(&b).unwrap().clone();
+        assert_eq!((clip.start, clip.source_in, clip.duration), (12.0, 2.0, 8.0));
+        assert!(project.trim_start(&b, 5.0));
+        assert_eq!(project.clip(&b).unwrap().start, 10.0, "can't reveal before the source starts or cross clip a");
+        assert!(project.trim_end(&a, 15.0));
+        assert_eq!(project.clip(&a).unwrap().end(), 10.0, "can't run past the source");
+        assert!(project.trim_end(&a, 4.0));
+        assert!(project.trim_end(&a, 99.0));
+        assert_eq!(project.clip(&a).unwrap().end(), 10.0);
+    }
+
+    #[test]
+    fn moving_lands_against_neighbors_and_keeps_track_kinds() {
+        let (mut project, video) = project_with(4.0);
+        let a = project.place(&video, None, 0.0).unwrap();
+        let b = project.place(&video, None, 10.0).unwrap();
+        let track = project.find(&a).unwrap().track;
+        assert!(project.move_clip(&b, 2.0, track));
+        assert_eq!(project.clip(&b).unwrap().start, 4.0, "lands right after clip a");
+        assert!(project.move_clip(&b, 20.0, track));
+        assert_eq!(project.clip(&b).unwrap().start, 20.0);
+        let audio_track = project.track_of_kind(TrackKind::Audio);
+        assert!(!project.move_clip(&b, 0.0, audio_track), "video stays on video tracks");
+        let upper = project.add_track(TrackKind::Video);
+        assert!(project.move_clip(&a, 0.0, upper));
+        assert_eq!(project.front_clip(1.0).unwrap().0.id, a, "the top video track is in front");
+    }
+
+    #[test]
+    fn hidden_and_muted_tracks_drop_out() {
+        let (mut project, video) = project_with(4.0);
+        let clip = project.place(&video, None, 0.0).unwrap();
+        assert_eq!(project.audible_clips().len(), 1);
+        let track = project.find(&clip).unwrap().track;
+        project.tracks[track].muted = true;
+        assert!(project.audible_clips().is_empty());
+        project.tracks[track].hidden = true;
+        assert!(project.front_clip(1.0).is_none());
+    }
+
+    #[test]
+    fn undo_and_redo_restore_whole_projects() {
+        let (mut project, video) = project_with(4.0);
+        let mut history = History::default();
+        history.record(&project);
+        project.place(&video, None, 0.0);
+        assert!(history.undo(&mut project));
+        assert_eq!(project.duration(), 0.0);
+        assert!(history.redo(&mut project));
+        assert_eq!(project.duration(), 4.0);
+        assert!(!history.redo(&mut project));
+    }
+
+    #[test]
+    fn projects_round_trip_through_json() {
+        let (mut project, video) = project_with(4.0);
+        project.place(&video, None, 1.5);
+        let json = serde_json::to_string(&project).unwrap();
+        assert!(json.contains("\"sourceIn\""));
+        let back: Project = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, project);
+    }
+}
