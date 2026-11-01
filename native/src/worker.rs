@@ -32,6 +32,8 @@ pub enum Job {
     /// Captions for `length` source seconds of `path` from `from`, for a clip at `speed` that starts at `at`.
     Transcribe { clip: String, path: PathBuf, from: f64, length: f64, speed: f64, at: f64 },
     Boss { media_id: String, path: PathBuf, duration: f64 },
+    /// Where a video cuts to another scene.
+    Scenes { media_id: String, path: PathBuf },
 }
 
 pub enum Done {
@@ -43,6 +45,7 @@ pub enum Done {
     /// Captions for the timeline stretch `from`..`to`.
     Captions { from: f64, to: f64, result: Result<Vec<Caption>, String> },
     Boss { media_id: String, result: Result<Vec<Suggestion>, String> },
+    Scenes { media_id: String, result: Result<Vec<f64>, String> },
 }
 
 pub struct Worker {
@@ -98,6 +101,10 @@ impl Worker {
                         }
                         Job::Transcribe { clip, path, from, length, speed, at } => {
                             aside(&finished, &ctx, move || Done::Captions { from: at, to: at + length / speed, result: transcribe::captions(&clip, &path, from, length, speed, at) });
+                            continue;
+                        }
+                        Job::Scenes { media_id, path } => {
+                            aside(&finished, &ctx, move || Done::Scenes { media_id, result: ffmpeg::scenes(&path, 0.3) });
                             continue;
                         }
                         Job::Boss { media_id, path, duration } => {

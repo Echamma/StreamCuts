@@ -105,6 +105,25 @@ pub fn probe(path: &Path) -> Result<Media, String> {
     }
 }
 
+/// Where the picture cuts to another scene, in source seconds: FFmpeg's scene score above `threshold` (0-1; the web
+/// StreamCuts uses 0.3). Reads the whole file at a small size; call it off the UI thread.
+pub fn scenes(path: &Path, threshold: f64) -> Result<Vec<f64>, String> {
+    let output = command(&ffmpeg())
+        .args(["-hide_banner", "-nostats", "-i"])
+        .arg(path)
+        .args(["-an", "-vf", &format!("scale=160:-2,select='gt(scene,{threshold})',showinfo"), "-f", "null", "-"])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("FFmpeg couldn't start ({e})."))?;
+    if !output.status.success() {
+        return Err("FFmpeg couldn't read this file for scenes.".into());
+    }
+    // showinfo prints a line per selected frame: "... pts_time:12.345 ...".
+    Ok(String::from_utf8_lossy(&output.stderr).lines().filter(|line| line.contains("Parsed_showinfo"))
+        .filter_map(|line| line.split("pts_time:").nth(1)?.split_whitespace().next()?.parse::<f64>().ok())
+        .collect())
+}
+
 /// One decoded picture, RGBA, at a source time.
 pub struct Frame {
     pub time: f64,
@@ -362,6 +381,8 @@ mod tests {
         assert!((media.duration - 2.0).abs() < 0.1, "duration {}", media.duration);
         assert!(media.has_audio && media.width == 320 && media.height == 180);
         let frame = still(&clip, 1.0, 160, 90, Picture::default()).unwrap();
+        // The generated clip is one continuous test pattern: no cuts.
+        assert!(scenes(&clip, 0.3).unwrap().is_empty());
         assert_eq!(frame.rgba.len(), 160 * 90 * 4);
         // A grade with no saturation leaves gray: red, green and blue alike in every pixel.
         let gray = Picture { grade: crate::project::Grade { saturation: 0.0, ..Default::default() }, ..Default::default() };

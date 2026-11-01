@@ -176,6 +176,15 @@ impl Project {
         true
     }
 
+    /// Marks where a media's scene changes (source seconds) show on the timeline, in every clip that plays them.
+    /// Returns how many markers were added.
+    pub fn mark_scenes(&mut self, media_id: &str, cuts: &[f64]) -> usize {
+        let times: Vec<f64> = self.tracks.iter().flat_map(|t| t.clips.iter()).filter(|c| c.media_id == media_id)
+            .flat_map(|c| cuts.iter().filter(|&&s| s > c.source_in && s < c.source_in + c.source_length()).map(move |&s| c.start + (s - c.source_in) / c.speed))
+            .collect();
+        times.into_iter().filter(|&t| self.add_marker(t, "Scene")).count()
+    }
+
     /// The nearest marker after (or, `back`, before) `t`.
     pub fn next_marker(&self, t: f64, back: bool) -> Option<f64> {
         let frame = 0.5 / self.fps.max(1) as f64;
@@ -966,6 +975,16 @@ mod tests {
         assert!(!project.add_marker(5.01, ""), "within a frame of another");
         assert_eq!(project.markers.iter().map(|m| m.t).collect::<Vec<_>>(), vec![2.0, 5.0]);
         assert_eq!((project.next_marker(2.0, false), project.next_marker(5.0, true), project.next_marker(6.0, false)), (Some(5.0), Some(2.0), None));
+    }
+
+    #[test]
+    fn scene_cuts_become_markers_where_clips_play_them() {
+        let (mut project, video) = project_with(10.0);
+        let clip = project.place(&video, None, 2.0).unwrap();
+        project.trim_start(&clip, 3.0); // plays source 1..10 from timeline 3
+        assert_eq!(project.mark_scenes(&video, &[0.5, 4.0, 9.0]), 2, "0.5 s is trimmed off");
+        assert_eq!(project.markers.iter().map(|m| m.t).collect::<Vec<_>>(), vec![6.0, 11.0]);
+        assert_eq!(project.mark_scenes(&video, &[4.0]), 0, "already marked");
     }
 
     #[test]

@@ -47,6 +47,8 @@ pub struct StreamCuts {
     /// Transcriptions still running.
     transcribing: usize,
     boss_running: Option<String>,
+    /// Media whose scenes are being found.
+    scene_jobs: Vec<String>,
     boss_plan: Option<BossPlan>,
     /// Typing in a caption: one undo step for the whole edit.
     caption_typing: bool,
@@ -83,6 +85,7 @@ impl StreamCuts {
             looks: Looks::default(),
             transcribing: 0,
             boss_running: None,
+            scene_jobs: Vec::new(),
             boss_plan: None,
             caption_typing: false,
             adjusting: false,
@@ -187,6 +190,24 @@ impl StreamCuts {
                             self.project.add_captions(from, to, captions);
                             self.edited();
                             self.toasts.push(if count == 0 { "No speech found for captions".into() } else { format!("Added {count} caption{}", if count == 1 { "" } else { "s" }) });
+                        }
+                        Err(error) => self.toasts.push(error),
+                    }
+                }
+                Done::Scenes { media_id, result } => {
+                    self.scene_jobs.retain(|id| id != &media_id);
+                    match result {
+                        Ok(cuts) => {
+                            self.history.record(&self.project);
+                            let marked = self.project.mark_scenes(&media_id, &cuts);
+                            if marked > 0 {
+                                self.edited();
+                            }
+                            self.toasts.push(match marked {
+                                0 => "No scene changes found in the clips on the timeline".into(),
+                                1 => "1 scene change marked".into(),
+                                n => format!("{n} scene changes marked"),
+                            });
                         }
                         Err(error) => self.toasts.push(error),
                     }
@@ -511,13 +532,14 @@ impl StreamCuts {
         let mut place_now = None;
         let mut find = None;
         let mut remove = None;
+        let mut scenes = None;
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             for media in &self.project.media {
                 let missing = !media.path.is_file();
                 let id = ui.scope_id().with(("media", &media.id));
                 let response = ui.dnd_drag_source(id, MediaDrag(media.id.clone()), |ui| {
                     // Clicks go to the row (click to find a missing file, double-click to place it); drags go to the drag source.
-                    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 46.0), Sense::click());
+                    let (rect, row) = ui.allocate_exact_size(vec2(ui.available_width(), 46.0), Sense::click());
                     let painter = ui.painter();
                     painter.rect_filled(rect, 8, color::VEIL);
                     let thumb = Rect::from_min_size(rect.min + vec2(4.0, 4.0), vec2(68.0, 38.0));
@@ -539,6 +561,7 @@ impl StreamCuts {
                         let detail = match media.kind { MediaKind::Image => format!("Picture · {}×{}", media.width, media.height), _ => timecode(media.duration, self.project.fps) };
                         text.text(pos2(thumb.right() + 8.0, rect.bottom() - 7.0), Align2::LEFT_BOTTOM, detail, font::ui(11.0), color::INK_MUTED);
                     }
+                    row
                 });
                 let response = egui::InnerResponse { response: response.response.on_hover_text(media.info()), ..response };
                 if missing && response.response.clicked() {
@@ -547,7 +570,18 @@ impl StreamCuts {
                     place_now = Some(media.id.clone());
                 }
                 let used = self.project.tracks.iter().any(|t| t.clips.iter().any(|c| c.media_id == media.id));
-                response.response.context_menu(|ui| {
+                response.inner.context_menu(|ui| {
+                    if media.kind == MediaKind::Video && !missing {
+                        let busy = self.scene_jobs.contains(&media.id);
+                        if ui.add_enabled(used && !busy, egui::Button::new(if busy { "Finding scenes…" } else { "Detect scenes" }))
+                            .on_disabled_hover_text("Put it on the timeline first: scene changes become markers there")
+                            .on_hover_text("Mark where the picture cuts to another scene")
+                            .clicked()
+                        {
+                            scenes = Some((media.id.clone(), media.path.clone()));
+                            ui.close();
+                        }
+                    }
                     if ui.add_enabled(!used, egui::Button::new("Remove from project")).on_disabled_hover_text("A clip on the timeline uses it").clicked() {
                         remove = Some(media.id.clone());
                     }
@@ -557,6 +591,11 @@ impl StreamCuts {
         });
         if let Some(id) = find {
             self.find_media(&id);
+        }
+        if let Some((media_id, path)) = scenes {
+            self.scene_jobs.push(media_id.clone());
+            self.worker.send(Job::Scenes { media_id, path });
+            self.toasts.push("Finding scene changes; long videos take a while".into());
         }
         if let Some(id) = remove {
             self.history.record(&self.project);
@@ -729,11 +768,25 @@ impl StreamCuts {
         let id = id.clone();
         let mut changed = clip.clone();
         let longest = (clip.duration / 2.0).min(10.0);
+        let media_path = self.project.media(&clip.media_id).map(|m| m.path.clone());
         let crossfade_limit = self.project.crossfade_limit(&id);
         let mut speed = clip.speed;
         ui.add_space(6.0);
+        let mut find_scenes = false;
         ui.menu_button(egui::RichText::new("Clip").font(font::ui(13.0)), |ui| {
             ui.set_min_width(230.0);
+            // As in the web StreamCuts (right-click a clip, Detect scenes): cuts in its video become timeline markers.
+            if kind == MediaKind::Video {
+                let busy = self.scene_jobs.contains(&clip.media_id);
+                if ui.add_enabled(!busy, egui::Button::new(if busy { "Finding scenes…" } else { "Detect scenes" }))
+                    .on_hover_text("Mark where the picture cuts to another scene")
+                    .clicked()
+                {
+                    find_scenes = true;
+                    ui.close();
+                }
+                ui.separator();
+            }
             egui::Grid::new("clip-settings").num_columns(2).spacing(vec2(10.0, 8.0)).show(ui, |ui| {
                 ui.label("Fade in");
                 ui.add(egui::DragValue::new(&mut changed.fade_in).range(0.0..=longest).speed(0.02).fixed_decimals(2).suffix(" s"));
@@ -817,6 +870,11 @@ impl StreamCuts {
         }
         if !ui.input(|i| i.pointer.any_down()) {
             self.adjusting = false;
+        }
+        if let (true, Some(path)) = (find_scenes, media_path) {
+            self.scene_jobs.push(clip.media_id.clone());
+            self.worker.send(Job::Scenes { media_id: clip.media_id.clone(), path });
+            self.toasts.push("Finding scene changes; long videos take a while".into());
         }
     }
 
