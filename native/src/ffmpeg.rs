@@ -454,6 +454,13 @@ mod tests {
         let inverted = still(&clip, 1.0, 160, 90, negative).unwrap();
         let (a, b) = (&frame.rgba[4 * 4000..][..3], &inverted.rgba[4 * 4000..][..3]);
         assert!(a.iter().zip(b).all(|(x, y)| (*x as i32 + *y as i32 - 255).abs() < 12), "{a:?} vs {b:?}");
+        // A LUT that inverts colors, from a path with a space and a comma (the filter graph has to take it whole).
+        let cube = dir.join("negative, a test.cube");
+        std::fs::write(&cube, "LUT_3D_SIZE 2\n1 1 1\n0 1 1\n1 0 1\n0 0 1\n1 1 0\n0 1 0\n1 0 0\n0 0 0\n").unwrap();
+        let looked_up = Picture { lut: Some(crate::project::LutRef::of(&cube)), ..Default::default() };
+        let inverted = still(&clip, 1.0, 160, 90, looked_up).unwrap();
+        let (a, b) = (&frame.rgba[4 * 4000..][..3], &inverted.rgba[4 * 4000..][..3]);
+        assert!(a.iter().zip(b).all(|(x, y)| (*x as i32 + *y as i32 - 255).abs() < 12), "{a:?} vs {b:?} through the LUT");
         let crisp = Picture { effects: crate::project::Effects { blur: 0.0, sharpen: 1.0, look: None }, ..Default::default() };
         let sharpened = still(&clip, 1.0, 160, 90, crisp).unwrap();
         assert_ne!(sharpened.rgba, frame.rgba, "sharpen should change the decoded picture");

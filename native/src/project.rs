@@ -3,7 +3,8 @@
 //! track never overlap, trims stay inside the source media, and every change can be undone.
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 /// Still pictures get this long when placed on the timeline.
 pub const STILL_SECONDS: f64 = 5.0;
@@ -100,6 +101,9 @@ pub struct Clip {
     pub effects: Effects,
     #[serde(default)]
     pub sound: Sound,
+    /// A `.cube` color lookup table (a camera's log-to-Rec. 709 LUT, or a look) applied before the grade.
+    #[serde(default)]
+    pub lut: Option<PathBuf>,
     /// How fast the source plays: 2 is twice as fast (the clip covers twice the source in its length).
     #[serde(default = "normal_speed")]
     pub speed: f64,
@@ -370,16 +374,66 @@ impl ExportFormat {
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Picture {
     pub framing: Framing,
+    pub lut: Option<LutRef>,
     pub grade: Grade,
     pub effects: Effects,
 }
 
+/// The LUT files clips use this run, so a `Picture` (which is `Copy`, and goes to the worker and to FFmpeg command
+/// lines) can name one by number.
+static LUTS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+/// A LUT file, by its number in this run's list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LutRef(usize);
+
+impl LutRef {
+    pub fn of(path: &Path) -> Self {
+        let mut luts = LUTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        Self(luts.iter().position(|p| p == path).unwrap_or_else(|| {
+            luts.push(path.to_owned());
+            luts.len() - 1
+        }))
+    }
+
+    pub fn path(self) -> PathBuf {
+        LUTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner())[self.0].clone()
+    }
+}
+
+/// A file path as an FFmpeg filter option inside a filter graph: forward slashes, and the characters options and
+/// graphs give meaning to (a drive's colon, commas, brackets) escaped for both.
+pub fn filter_path(path: &Path) -> String {
+    let mut out = String::new();
+    for c in path.to_string_lossy().chars() {
+        match c {
+            '\\' => out.push('/'),
+            // Escaped for the option (a backslash), and that backslash escaped for the graph.
+            ':' | '\'' => {
+                out.push_str("\\\\");
+                out.push(c);
+            }
+            ',' | ';' | '[' | ']' => {
+                out.push('\\');
+                out.push(c);
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 impl Picture {
     pub fn filter(self, width: u32, height: u32) -> String {
-        let color = match self.grade.filter() {
-            Some(eq) => format!("{},{eq}", self.framing.filter(width, height)),
-            None => self.framing.filter(width, height),
-        };
+        let mut color = self.framing.filter(width, height);
+        // The LUT first (it turns a camera's log footage into normal color), then the grade. A LUT file that's gone is
+        // left out rather than failing every picture.
+        if let Some(lut) = self.lut.map(LutRef::path).filter(|path| path.is_file()) {
+            color.push_str(&format!(",lut3d=file={}", filter_path(&lut)));
+        }
+        if let Some(grade) = self.grade.filter() {
+            color.push_str(&format!(",{grade}"));
+        }
         format!("{color}{}", self.effects.filter())
     }
 }
@@ -429,7 +483,7 @@ impl Clip {
         t >= self.start && t < self.end()
     }
     pub fn picture(&self) -> Picture {
-        Picture { framing: self.framing, grade: self.grade, effects: self.effects }
+        Picture { framing: self.framing, lut: self.lut.as_deref().map(LutRef::of), grade: self.grade, effects: self.effects }
     }
     /// How far faded in the clip is at timeline time `t`: 0 is black (silent), 1 is full.
     pub fn fade_at(&self, t: f64) -> f64 {
@@ -814,7 +868,7 @@ impl Project {
         };
         let duration = if media.kind == MediaKind::Image { STILL_SECONDS } else { media.duration.max(MIN_CLIP) };
         let start = self.free_start(track, at, duration, None);
-        let clip = Clip { id: new_id(), media_id: media.id.clone(), start, source_in: 0.0, duration, volume: 1.0, fade_in: 0.0, fade_out: 0.0, crossfade_in: 0.0, crossfade_from: None, framing: Framing::Fit, grade: Grade::default(), effects: Effects::default(), sound: Sound::default(), speed: 1.0 };
+        let clip = Clip { id: new_id(), media_id: media.id.clone(), start, source_in: 0.0, duration, volume: 1.0, fade_in: 0.0, fade_out: 0.0, crossfade_in: 0.0, crossfade_from: None, framing: Framing::Fit, grade: Grade::default(), effects: Effects::default(), sound: Sound::default(), lut: None, speed: 1.0 };
         let id = clip.id.clone();
         self.tracks[track].clips.push(clip);
         self.sort_track(track);

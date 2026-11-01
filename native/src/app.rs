@@ -961,6 +961,21 @@ impl StreamCuts {
                         ui.selectable_value(&mut changed.effects.look, Some(look), look.label());
                     }
                 });
+                // A .cube LUT, as the web StreamCuts' color page takes: a camera's log-to-normal LUT, or a look.
+                ui.horizontal(|ui| {
+                    let name = changed.lut.as_ref().and_then(|p| p.file_name()).map_or("Add a LUT…".into(), |n| n.to_string_lossy().into_owned());
+                    let missing = changed.lut.as_ref().is_some_and(|p| !p.is_file());
+                    let button = ui.button(if missing { format!("{name} (missing)") } else { name })
+                        .on_hover_text("A .cube color lookup table, applied before the color above");
+                    if button.clicked() {
+                        if let Some(path) = rfd::FileDialog::new().set_title("Choose a LUT").add_filter("Cube LUT", &["cube"]).pick_file() {
+                            changed.lut = Some(path);
+                        }
+                    }
+                    if changed.lut.is_some() && ui.small_button("Remove").clicked() {
+                        changed.lut = None;
+                    }
+                });
             }
         });
         if changed != clip || speed != clip.speed {
