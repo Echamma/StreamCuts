@@ -290,6 +290,14 @@ impl StreamCuts {
             self.edited();
         }
         let frame = 1.0 / self.project.fps as f64;
+        // Before the plain arrows, which would also take Shift+arrow.
+        for (key, back) in [(Key::ArrowLeft, true), (Key::ArrowRight, false)] {
+            if ctx.input_mut(|i| i.consume_key(Modifiers::SHIFT, key)) {
+                if let Some(t) = self.project.next_marker(self.playhead, back) {
+                    self.seek(t);
+                }
+            }
+        }
         if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::ArrowLeft)) {
             self.seek(self.playhead - frame);
         }
@@ -298,6 +306,13 @@ impl StreamCuts {
         }
         if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Home)) {
             self.seek(0.0);
+        }
+        // Markers: M marks the playhead; Shift+Left / Shift+Right go to the one before or after.
+        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::M)) {
+            self.history.record(&self.project);
+            if self.project.add_marker(self.playhead, "") {
+                self.edited();
+            }
         }
         if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::End)) {
             self.seek(self.project.duration());

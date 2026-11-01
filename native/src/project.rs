@@ -155,6 +155,38 @@ impl Effects {
     }
 }
 
+/// A marked moment on the timeline.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Marker {
+    pub id: String,
+    pub t: f64,
+    #[serde(default)]
+    pub label: String,
+}
+
+impl Project {
+    /// Marks `t` (timeline seconds), unless a marker is already within a frame of it. Returns whether one was added.
+    pub fn add_marker(&mut self, t: f64, label: &str) -> bool {
+        let frame = 1.0 / self.fps.max(1) as f64;
+        if t < 0.0 || self.markers.iter().any(|m| (m.t - t).abs() < frame) {
+            return false;
+        }
+        let at = self.markers.partition_point(|m| m.t < t);
+        self.markers.insert(at, Marker { id: new_id(), t, label: label.into() });
+        true
+    }
+
+    /// The nearest marker after (or, `back`, before) `t`.
+    pub fn next_marker(&self, t: f64, back: bool) -> Option<f64> {
+        let frame = 0.5 / self.fps.max(1) as f64;
+        if back {
+            self.markers.iter().rev().map(|m| m.t).find(|&m| m < t - frame)
+        } else {
+            self.markers.iter().map(|m| m.t).find(|&m| m > t + frame)
+        }
+    }
+}
+
 /// An export's file type and codecs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -299,6 +331,9 @@ pub struct Project {
     /// Text placed on the picture for a while: titles, labels, end cards.
     #[serde(default)]
     pub titles: Vec<Title>,
+    /// Moments marked on the timeline, in order: by hand (M) or by scene detection.
+    #[serde(default)]
+    pub markers: Vec<Marker>,
     /// Exports even out the loudness to what social video expects (-14 LUFS).
     #[serde(default)]
     pub even_loudness: bool,
@@ -407,6 +442,7 @@ impl Project {
                 Track { id: new_id(), kind: TrackKind::Audio, name: "Audio 1".into(), muted: false, hidden: false, locked: false, clips: Vec::new() },
             ],
             captions: Vec::new(),
+            markers: Vec::new(),
             titles: Vec::new(),
             even_loudness: false,
             export_format: ExportFormat::default(),
@@ -920,6 +956,16 @@ mod tests {
         assert!(project.crossfade_at(9.0).is_none());
         project.clip_mut(&outgoing).unwrap().source_in = 2.0;
         assert_eq!(project.crossfade_after(&outgoing), 0.0, "no source handle means no transition");
+    }
+
+    #[test]
+    fn markers_stay_in_order_and_apart() {
+        let (mut project, _) = project_with(10.0);
+        assert!(project.add_marker(5.0, ""));
+        assert!(project.add_marker(2.0, "scene"));
+        assert!(!project.add_marker(5.01, ""), "within a frame of another");
+        assert_eq!(project.markers.iter().map(|m| m.t).collect::<Vec<_>>(), vec![2.0, 5.0]);
+        assert_eq!((project.next_marker(2.0, false), project.next_marker(5.0, true), project.next_marker(6.0, false)), (Some(5.0), Some(2.0), None));
     }
 
     #[test]

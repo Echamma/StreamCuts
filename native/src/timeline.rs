@@ -136,6 +136,29 @@ impl Timeline {
             }
             t += step;
         }
+        // Markers: a small flag on the ruler and a faint line down the lanes; click one to go there, right-click to remove it.
+        let mut remove_marker = None;
+        for marker in &project.markers {
+            let x = x_of(marker.t);
+            if x < lanes.left() || x > rect.right() {
+                continue;
+            }
+            painter.line_segment([pos2(x, ruler.bottom()), pos2(x, rect.bottom())], Stroke::new(1.0, color::SUN.gamma_multiply(0.35)));
+            painter.add(egui::Shape::convex_polygon(vec![pos2(x - 5.0, ruler.top() + 3.0), pos2(x + 5.0, ruler.top() + 3.0), pos2(x + 5.0, ruler.top() + 10.0), pos2(x, ruler.top() + 14.0), pos2(x - 5.0, ruler.top() + 10.0)], color::SUN, Stroke::NONE));
+            let hit = ui.interact(Rect::from_center_size(pos2(x, ruler.top() + 8.0), vec2(12.0, 14.0)), ui.scope_id().with(("marker", &marker.id)), Sense::click());
+            let hit = if marker.label.is_empty() { hit } else { hit.on_hover_text(&marker.label) };
+            if hit.clicked() {
+                output.seek = Some(marker.t);
+            }
+            if hit.secondary_clicked() {
+                remove_marker = Some(marker.id.clone());
+            }
+        }
+        if let Some(id) = remove_marker {
+            history.record(project);
+            project.markers.retain(|m| m.id != id);
+            output.changed = true;
+        }
 
         // Tracks
         for (index, track) in project.tracks.iter().enumerate() {
