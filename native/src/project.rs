@@ -143,8 +143,34 @@ pub struct Project {
     /// Captions in timeline time, in order. They stay put when clips move.
     #[serde(default)]
     pub captions: Vec<Caption>,
+    /// Text placed on the picture for a while: titles, labels, end cards.
+    #[serde(default)]
+    pub titles: Vec<Title>,
     #[serde(default)]
     pub saved_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Title {
+    pub id: String,
+    pub start: f64,
+    pub end: f64,
+    pub text: String,
+    /// Where the middle of the text sits, from the top (0) to the bottom (1) of the frame.
+    #[serde(default = "middle")]
+    pub y: f32,
+    /// Text size as a fraction of the frame's height.
+    #[serde(default = "title_size")]
+    pub size: f32,
+}
+
+fn middle() -> f32 {
+    0.5
+}
+
+fn title_size() -> f32 {
+    0.09
 }
 
 /// A line of captions: shown from `start` to `end` on the timeline, with each word's timing for styles that follow
@@ -193,8 +219,27 @@ impl Project {
                 Track { id: new_id(), kind: TrackKind::Audio, name: "Audio 1".into(), muted: false, hidden: false, clips: Vec::new() },
             ],
             captions: Vec::new(),
+            titles: Vec::new(),
             saved_at: 0,
         }
+    }
+
+    /// Adds a three-second title in the middle of the frame at `at` and returns its id.
+    pub fn add_title(&mut self, at: f64) -> String {
+        let title = Title { id: new_id(), start: at, end: at + 3.0, text: "Your title".into(), y: middle(), size: title_size() };
+        let id = title.id.clone();
+        self.titles.push(title);
+        self.titles.sort_by(|a, b| a.start.total_cmp(&b.start));
+        id
+    }
+
+    pub fn title_mut(&mut self, id: &str) -> Option<&mut Title> {
+        self.titles.iter_mut().find(|t| t.id == id)
+    }
+
+    /// Whether there is any text to put on the picture.
+    pub fn has_text(&self) -> bool {
+        !self.captions.is_empty() || !self.titles.is_empty()
     }
 
     /// Puts new captions for the stretch `from`..`to` of the timeline, replacing the ones there.
@@ -214,8 +259,10 @@ impl Project {
     }
 
     /// The end of the last clip.
+    /// Where the last clip or title ends: a title after the clips shows over black (an end card).
     pub fn duration(&self) -> f64 {
-        self.tracks.iter().flat_map(|t| t.clips.iter().map(Clip::end)).fold(0.0, f64::max)
+        let clips = self.tracks.iter().flat_map(|t| t.clips.iter().map(Clip::end)).fold(0.0, f64::max);
+        self.titles.iter().map(|t| t.end).fold(clips, f64::max)
     }
 
     pub fn find(&self, clip_id: &str) -> Option<ClipRef> {
@@ -405,9 +452,10 @@ impl Project {
 
     /// Deletes clips and captions by id.
     pub fn delete(&mut self, clip_ids: &[String]) -> usize {
-        let captions = self.captions.len();
+        let text = self.captions.len() + self.titles.len();
         self.captions.retain(|c| !clip_ids.contains(&c.id));
-        let mut removed = captions - self.captions.len();
+        self.titles.retain(|t| !clip_ids.contains(&t.id));
+        let mut removed = text - self.captions.len() - self.titles.len();
         for track in &mut self.tracks {
             let before = track.clips.len();
             track.clips.retain(|c| !clip_ids.contains(&c.id));
@@ -601,6 +649,17 @@ mod tests {
         assert_eq!(project.caption_at(5.0), None);
         assert_eq!(project.delete(&["d".to_string()]), 1);
         assert_eq!(project.captions.len(), 2);
+    }
+
+    #[test]
+    fn titles_last_three_seconds_and_can_make_an_end_card() {
+        let (mut project, video) = project_with(10.0);
+        project.place(&video, None, 0.0).unwrap();
+        let id = project.add_title(9.0);
+        assert_eq!(project.duration(), 12.0, "a title past the clips makes the cut longer");
+        assert!(project.has_text());
+        assert_eq!(project.delete(&[id]), 1);
+        assert_eq!(project.duration(), 10.0);
     }
 
     #[test]

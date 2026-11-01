@@ -73,6 +73,7 @@ pub fn timecode(seconds: f64, fps: u32) -> String {
 }
 
 const CAPTION_FILL: Color32 = Color32::from_rgb(0x3A, 0x3F, 0x52);
+const TITLE_FILL: Color32 = Color32::from_rgb(0x52, 0x46, 0x2E);
 
 fn clip_fill(kind: MediaKind) -> Color32 {
     match kind {
@@ -249,9 +250,59 @@ impl Timeline {
             }
         }
 
-        // Captions, in a lane under the tracks: click to select (then edit or delete them like clips).
+        // Text lanes under the tracks: titles (click to select, drag to move in time), then captions (click to select).
+        let mut next_lane = project.tracks.len() + 1;
+        if !project.titles.is_empty() {
+            let lane = row(next_lane);
+            next_lane += 1;
+            painter.text(pos2(lane.left() + 10.0, lane.top() + 14.0), Align2::LEFT_CENTER, "Titles", font::ui(12.0), color::INK_SOFT);
+            let (mut grabbed, mut moved) = (false, None);
+            for title in &project.titles {
+                let block = Rect::from_min_max(pos2(x_of(title.start), lane.top() + 6.0), pos2(x_of(title.end).max(x_of(title.start) + 3.0), lane.top() + 34.0));
+                let visible = block.intersect(lanes);
+                if visible.width() <= 0.0 {
+                    continue;
+                }
+                let selected = self.selection.contains(&title.id);
+                lane_painter.rect_filled(block, 5, TITLE_FILL);
+                lane_painter.rect_stroke(block, 5, Stroke::new(if selected { 2.0 } else { 1.0 }, if selected { color::SELECT_INK } else { color::HAIRLINE_STRONG }), StrokeKind::Inside);
+                lane_painter.with_clip_rect(visible.shrink(3.0)).text(pos2(block.left() + 6.0, block.center().y), Align2::LEFT_CENTER, &title.text, font::ui(11.0), color::INK);
+                let response = ui.interact(visible, ui.scope_id().with(("title", &title.id)), Sense::click_and_drag());
+                if response.hovered() {
+                    ui.ctx().set_cursor_icon(CursorIcon::Grab);
+                }
+                if response.clicked() {
+                    clicked_clip = true;
+                    if ui.input(|i| i.modifiers.shift) {
+                        if selected { self.selection.retain(|id| id != &title.id) } else { self.selection.push(title.id.clone()) }
+                    } else {
+                        self.selection = vec![title.id.clone()];
+                    }
+                }
+                if response.drag_started() {
+                    grabbed = true;
+                    if !selected {
+                        self.selection = vec![title.id.clone()];
+                    }
+                }
+                if response.dragged() && response.drag_delta().x != 0.0 {
+                    moved = Some((title.id.clone(), (response.drag_delta().x / pps) as f64));
+                }
+            }
+            if grabbed {
+                history.record(project);
+            }
+            if let Some((id, dt)) = moved {
+                if let Some(title) = project.title_mut(&id) {
+                    let dt = dt.max(-title.start);
+                    title.start += dt;
+                    title.end += dt;
+                    output.changed = true;
+                }
+            }
+        }
         if !project.captions.is_empty() {
-            let lane = row(project.tracks.len() + 1);
+            let lane = row(next_lane);
             painter.text(pos2(lane.left() + 10.0, lane.top() + 14.0), Align2::LEFT_CENTER, "Captions", font::ui(12.0), color::INK_SOFT);
             for caption in &project.captions {
                 let block = Rect::from_min_max(pos2(x_of(caption.start), lane.top() + 6.0), pos2(x_of(caption.end).max(x_of(caption.start) + 3.0), lane.top() + 34.0));

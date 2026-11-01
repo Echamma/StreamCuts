@@ -413,8 +413,12 @@ impl StreamCuts {
             let tint = Color32::from_gray((fade * 255.0).round() as u8);
             ui.painter().image(texture.id(), screen, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), tint);
         }
+        let over_picture = ui.painter().with_clip_rect(screen);
+        for title in self.project.titles.iter().filter(|t| self.playhead >= t.start && self.playhead < t.end) {
+            captions::draw_title(&over_picture, screen, title);
+        }
         if let Some(caption) = self.project.caption_at(self.playhead) {
-            captions::draw(&ui.painter().with_clip_rect(screen), screen, &caption.text);
+            captions::draw(&over_picture, screen, &caption.text);
         }
         if self.project.duration() == 0.0 {
             ui.painter().text(screen.center(), Align2::CENTER_CENTER, "Drag media onto the timeline to start", font::ui(14.0), color::INK_MUTED);
@@ -463,9 +467,16 @@ impl StreamCuts {
             if self.transcribing > 0 {
                 ui.label(egui::RichText::new("Making captions…").font(font::ui(12.0)).color(color::INK_MUTED));
             }
+            if icon_button(ui, Icon::Text, "Add a title at the playhead", false).clicked() {
+                self.history.record(&self.project);
+                let id = self.project.add_title(self.playhead);
+                self.timeline.selection = vec![id];
+                self.edited();
+            }
             self.volume_control(ui);
             self.clip_settings(ui);
             self.caption_editor(ui);
+            self.title_editor(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if icon_button(ui, Icon::ZoomIn, "Zoom in (Ctrl+wheel)", false).clicked() {
                     self.timeline.pps = (self.timeline.pps * 1.5).min(600.0);
@@ -541,6 +552,46 @@ impl StreamCuts {
             self.edited();
         }
         if !ui.input(|i| i.pointer.any_down()) {
+            self.adjusting = false;
+        }
+    }
+
+    /// One selected title gets its text, and a menu for its size, height and length, in the timeline bar.
+    fn title_editor(&mut self, ui: &mut Ui) {
+        let [id] = self.timeline.selection.as_slice() else { return };
+        let Some(title) = self.project.titles.iter().find(|t| &t.id == id).cloned() else { return };
+        let id = id.clone();
+        let mut changed = title.clone();
+        ui.add_space(10.0);
+        let field = ui.add(egui::TextEdit::singleline(&mut changed.text).desired_width(ui.available_width().clamp(100.0, 260.0) - 60.0).hint_text("Title"));
+        ui.menu_button(egui::RichText::new("Size & place").font(font::ui(13.0)), |ui| {
+            ui.set_min_width(240.0);
+            ui.add(egui::Slider::new(&mut changed.size, 0.03..=0.25).show_value(false).text("Size"));
+            ui.horizontal(|ui| {
+                for (label, y) in [("Top", 0.15), ("Middle", 0.5), ("Bottom", 0.82)] {
+                    if ui.selectable_label((changed.y - y).abs() < 0.01, label).clicked() {
+                        changed.y = y;
+                    }
+                }
+            });
+            ui.add(egui::Slider::new(&mut changed.y, 0.05..=0.95).show_value(false).text("Height"));
+            let mut length = changed.end - changed.start;
+            if ui.add(egui::DragValue::new(&mut length).range(0.5..=600.0).speed(0.05).fixed_decimals(1).prefix("Shows for ").suffix(" s")).changed() {
+                changed.end = changed.start + length;
+            }
+        });
+        if changed != title {
+            // One undo step per drag, click or stretch of typing.
+            if !self.adjusting {
+                self.history.record(&self.project);
+                self.adjusting = true;
+            }
+            if let Some(target) = self.project.title_mut(&id) {
+                *target = changed;
+            }
+            self.edited();
+        }
+        if !ui.input(|i| i.pointer.any_down()) && !field.has_focus() {
             self.adjusting = false;
         }
     }

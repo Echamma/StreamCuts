@@ -68,7 +68,7 @@ pub fn arguments(project: &Project, output: &Path) -> Result<Vec<String>, String
             input += 1;
         }
     }
-    let captions = if project.captions.is_empty() { String::new() } else { format!("subtitles={CAPTIONS}:fontsdir=.,") };
+    let captions = if project.has_text() { format!("subtitles={CAPTIONS}:fontsdir=.,") } else { String::new() };
     filters.push(format!("[base{base}]{captions}format=yuv420p[vout]"));
     if !audio_labels.is_empty() {
         filters.push(format!("{}amix=inputs={}:normalize=0:duration=longest[aout]", audio_labels.join(""), audio_labels.len()));
@@ -104,7 +104,7 @@ pub fn start(project: &Project, output: &Path, ctx: egui::Context) -> Result<Exp
     let cancel = Arc::new(AtomicBool::new(false));
     let (send, result) = std::sync::mpsc::channel();
     // Captions: the ASS file and its font go in a folder of their own that FFmpeg runs in.
-    let folder = if project.captions.is_empty() {
+    let folder = if !project.has_text() {
         None
     } else {
         let folder = std::env::temp_dir().join(format!("streamcuts-export-{}", new_id()));

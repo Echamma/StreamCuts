@@ -1,8 +1,8 @@
-//! How captions look: white Nunito ExtraBold with a black outline, centered near the bottom of the frame. The preview
-//! draws them with egui and exports burn them in from an ASS file through FFmpeg's `subtitles` filter, both from the
-//! same proportions so what you see is what you get.
+//! How text on the picture looks: white Nunito ExtraBold with a black outline, captions centered near the bottom of the
+//! frame and titles wherever they're placed. The preview draws them with egui and exports burn them in from an ASS file
+//! through FFmpeg's `subtitles` filter, both from the same proportions so what you see is what you get.
 
-use crate::project::Project;
+use crate::project::{Project, Title};
 use canopy_ui::{CAPTION_FONT, font};
 use egui::{Color32, Painter, Rect, pos2, vec2};
 
@@ -16,11 +16,22 @@ const OUTLINE: f32 = 0.09;
 /// against the preview, Nunito ExtraBold needs 1.385 times the size to come out the same width.
 const ASS_SIZE: f32 = 1.385;
 
-/// Draws `text` over a preview picture that fills `screen`.
+/// Draws a caption over a preview picture that fills `screen`.
 pub fn draw(painter: &Painter, screen: Rect, text: &str) {
-    let size = (screen.height() * SIZE).max(8.0);
+    outlined(painter, screen, text, SIZE, |size| pos2(screen.center().x - size.x / 2.0, screen.bottom() - screen.height() * BOTTOM - size.y));
+}
+
+/// Draws a title over a preview picture that fills `screen`, centered across and at its height.
+pub fn draw_title(painter: &Painter, screen: Rect, title: &Title) {
+    let y = screen.top() + screen.height() * title.y;
+    outlined(painter, screen, &title.text, title.size, |size| pos2(screen.center().x - size.x / 2.0, y - size.y / 2.0));
+}
+
+/// White text with a black outline, `size` a fraction of the picture's height, placed by `origin` from its size.
+fn outlined(painter: &Painter, screen: Rect, text: &str, size: f32, origin: impl Fn(egui::Vec2) -> egui::Pos2) {
+    let size = (screen.height() * size).max(8.0);
     let galley = painter.layout(text.to_owned(), font::display(size), Color32::WHITE, screen.width() * WIDTH);
-    let origin = pos2(screen.center().x - galley.size().x / 2.0, screen.bottom() - screen.height() * BOTTOM - galley.size().y);
+    let origin = origin(galley.size());
     let outline = (size * OUTLINE).max(1.0);
     for (dx, dy) in [(-1.0, -1.0), (0.0, -1.0), (1.0, -1.0), (-1.0, 0.0), (1.0, 0.0), (-1.0, 1.0), (0.0, 1.0), (1.0, 1.0)] {
         painter.galley_with_override_text_color(origin + vec2(dx, dy) * outline, galley.clone(), Color32::BLACK);
@@ -53,7 +64,8 @@ pub fn ass(project: &Project) -> String {
     let mut out = format!(
         "[Script Info]\nScriptType: v4.00+\nPlayResX: {w}\nPlayResY: {h}\nWrapStyle: 0\nScaledBorderAndShadow: yes\n\n\
          [V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n\
-         Style: Default,{font},{size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,{outline:.1},0,2,{side},{side},{bottom},1\n\n\
+         Style: Default,{font},{size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,{outline:.1},0,2,{side},{side},{bottom},1\n\
+         Style: Title,{font},{size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,{outline:.1},0,5,{side},{side},0,1\n\n\
          [Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n",
         font = CAPTION_FONT.0,
         outline = h * SIZE * OUTLINE,
@@ -61,6 +73,17 @@ pub fn ass(project: &Project) -> String {
     );
     for caption in &project.captions {
         out.push_str(&format!("Dialogue: 0,{},{},Default,,0,0,0,,{}\n", ass_time(caption.start), ass_time(caption.end), ass_text(&caption.text)));
+    }
+    for title in &project.titles {
+        // Placed and sized one by one: the middle of the text at the title's height, centered across.
+        let (x, y, size) = ((w / 2.0).round(), (h * title.y).round(), (h * title.size * ASS_SIZE).round());
+        let outline = h * title.size * OUTLINE;
+        out.push_str(&format!(
+            "Dialogue: 1,{},{},Title,,0,0,0,,{{\\pos({x},{y})\\fs{size}\\bord{outline:.1}}}{}\n",
+            ass_time(title.start),
+            ass_time(title.end),
+            ass_text(&title.text)
+        ));
     }
     out
 }
@@ -82,5 +105,8 @@ mod tests {
         assert!(ass.contains("Style: Default,Nunito ExtraLight,82,"));
         assert!(ass.contains("Dialogue: 0,0:00:01.50,0:00:02.76,Default,,0,0,0,,Hello (there)\n"));
         assert!(ass.contains("Dialogue: 0,1:02:05.00,1:02:06.00,Default,,0,0,0,,an hour in\n"));
+        let id = project.add_title(2.0);
+        project.title_mut(&id).unwrap().y = 0.25;
+        assert!(super::ass(&project).contains("Dialogue: 1,0:00:02.00,0:00:05.00,Title,,0,0,0,,{\\pos(960,270)\\fs135\\bord8.7}Your title\n"));
     }
 }
