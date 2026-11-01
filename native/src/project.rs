@@ -111,17 +111,19 @@ fn normal_speed() -> f64 {
 pub const SPEEDS: std::ops::RangeInclusive<f64> = 0.25..=4.0;
 
 /// A clip's color, as FFmpeg's `eq` takes it: brightness from -1 to 1 (0 leaves it), contrast and saturation as
-/// multipliers (1 leaves them).
+/// multipliers (1 leaves them); then its color wheels.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Grade {
     pub brightness: f32,
     pub contrast: f32,
     pub saturation: f32,
+    #[serde(default)]
+    pub wheels: Wheels,
 }
 
 impl Default for Grade {
     fn default() -> Self {
-        Self { brightness: 0.0, contrast: 1.0, saturation: 1.0 }
+        Self { brightness: 0.0, contrast: 1.0, saturation: 1.0, wheels: Wheels::default() }
     }
 }
 
@@ -131,7 +133,53 @@ impl Grade {
     }
 
     pub fn filter(self) -> Option<String> {
-        (!self.is_neutral()).then(|| format!("eq=brightness={:.3}:contrast={:.3}:saturation={:.3}", self.brightness, self.contrast, self.saturation))
+        let eq = (self.brightness, self.contrast, self.saturation) != (0.0, 1.0, 1.0);
+        let eq = eq.then(|| format!("eq=brightness={:.3}:contrast={:.3}:saturation={:.3}", self.brightness, self.contrast, self.saturation));
+        match (eq, self.wheels.filter()) {
+            (Some(eq), Some(wheels)) => Some(format!("{eq},{wheels}")),
+            (eq, wheels) => eq.or(wheels),
+        }
+    }
+}
+
+/// One color wheel: a push towards a hue (`r`, `g` and `b` add up to about 0; they come from where the wheel's dot
+/// sits) and a master level. All 0 leaves the picture alone.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct Wheel {
+    pub r: f32,
+    pub g: f32,
+    pub b: f32,
+    pub master: f32,
+}
+
+impl Wheel {
+    /// The wheel's value for one channel (0 red, 1 green, 2 blue): its push there plus its master.
+    fn channel(self, c: usize) -> f32 {
+        self.master + [self.r, self.g, self.b][c]
+    }
+}
+
+/// Lift, gamma and gain wheels, as in the web StreamCuts' color page: lift moves the shadows, gamma the midtones and
+/// gain the highlights. Each channel becomes `(gain * (x + lift * (1 - x)))^(1 / gamma)`, with gain and gamma 1 plus
+/// their wheel's value.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct Wheels {
+    pub lift: Wheel,
+    pub gamma: Wheel,
+    pub gain: Wheel,
+}
+
+impl Wheels {
+    /// FFmpeg's `lutrgb` with each channel's curve; `None` when the wheels are at rest.
+    pub fn filter(self) -> Option<String> {
+        if self == Self::default() {
+            return None;
+        }
+        let curve = |c: usize| {
+            let (lift, gamma, gain) = (self.lift.channel(c), (1.0 + self.gamma.channel(c)).max(0.1), (1.0 + self.gain.channel(c)).max(0.0));
+            format!("'maxval*pow(clip(({gain:.4})*(val/maxval+({lift:.4})*(1-val/maxval)),0,1),{:.4})'", 1.0 / gamma)
+        };
+        Some(format!("lutrgb=r={}:g={}:b={}", curve(0), curve(1), curve(2)))
     }
 }
 
@@ -1124,6 +1172,14 @@ mod tests {
         assert!(project.crossfade_at(9.0).is_none());
         project.clip_mut(&outgoing).unwrap().source_in = 2.0;
         assert_eq!(project.crossfade_after(&outgoing), 0.0, "no source handle means no transition");
+    }
+
+    #[test]
+    fn color_wheels_at_rest_add_no_filter() {
+        assert_eq!(Grade::default().filter(), None);
+        let warm = Grade { wheels: Wheels { gain: Wheel { r: 0.2, ..Default::default() }, ..Default::default() }, ..Default::default() };
+        let filter = warm.filter().unwrap();
+        assert!(filter.starts_with("lutrgb=r='maxval*pow(clip((1.2000)*") && filter.contains(":g='maxval*pow(clip((1.0000)*"), "{filter}");
     }
 
     #[test]

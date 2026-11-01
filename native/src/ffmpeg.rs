@@ -439,6 +439,11 @@ mod tests {
         let graded = still(&clip, 1.0, 160, 90, gray).unwrap();
         let spread = graded.rgba.chunks(4).map(|p| p[0].max(p[1]).max(p[2]) - p[0].min(p[1]).min(p[2])).max().unwrap();
         assert!(spread <= 6, "colors left in a gray picture: {spread}");
+        // No gain at all: every channel's highlights (and everything below them) go to black.
+        let wheels = crate::project::Wheels { gain: crate::project::Wheel { master: -1.0, ..Default::default() }, ..Default::default() };
+        let dark = Picture { grade: crate::project::Grade { wheels, ..Default::default() }, ..Default::default() };
+        let black = still(&clip, 1.0, 160, 90, dark).unwrap();
+        assert!(black.rgba.chunks(4).all(|p| p[..3].iter().all(|&v| v <= 4)), "the wheels' filter didn't apply");
         let soft = Picture { effects: crate::project::Effects { blur: 4.0, sharpen: 0.0, look: None }, ..Default::default() };
         let blurred = still(&clip, 1.0, 160, 90, soft).unwrap();
         assert_ne!(blurred.rgba, frame.rgba, "blur should change the decoded picture");

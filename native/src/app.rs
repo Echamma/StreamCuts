@@ -915,6 +915,12 @@ impl StreamCuts {
                 ui.add(egui::Slider::new(&mut changed.grade.brightness, -0.5..=0.5).show_value(false).text("Brightness"));
                 ui.add(egui::Slider::new(&mut changed.grade.contrast, 0.5..=2.0).show_value(false).text("Contrast"));
                 ui.add(egui::Slider::new(&mut changed.grade.saturation, 0.0..=2.5).show_value(false).text("Saturation"));
+                ui.horizontal(|ui| {
+                    let wheels = &mut changed.grade.wheels;
+                    color_wheel(ui, "Lift", &mut wheels.lift);
+                    color_wheel(ui, "Gamma", &mut wheels.gamma);
+                    color_wheel(ui, "Gain", &mut wheels.gain);
+                });
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("Effects").font(font::ui(12.0)).color(color::INK_MUTED));
@@ -1252,4 +1258,50 @@ impl CanopyApp for StreamCuts {
 /// Video, pictures and sound.
 pub fn accepts(file: &SharedFile) -> bool {
     matches!(file.kind, Kind::Video | Kind::Image | Kind::Audio) || file.name.to_lowercase().ends_with(storage::EXTENSION)
+}
+
+/// A color wheel, like the web StreamCuts' trackballs: drag its dot towards a hue to push the picture that way
+/// (double-click to center it), with the wheel's master level under it.
+fn color_wheel(ui: &mut Ui, label: &str, wheel: &mut crate::project::Wheel) {
+    // The push at the rim, and where each primary sits: red up, green and blue a third of a turn either side.
+    const AMOUNT: f32 = 0.5;
+    let dir = |c: usize| {
+        let a = [90.0f32, 210.0, 330.0][c].to_radians();
+        vec2(a.cos(), a.sin())
+    };
+    ui.vertical(|ui| {
+        ui.label(egui::RichText::new(label).font(font::ui(11.0)).color(color::INK_MUTED));
+        let (rect, response) = ui.allocate_exact_size(vec2(64.0, 64.0), Sense::click_and_drag());
+        let (center, radius) = (rect.center(), rect.width() / 2.0);
+        // Gray in the middle, and at the rim the color a push that way gives.
+        let mut disc = egui::Mesh::default();
+        disc.colored_vertex(center, Color32::from_gray(128));
+        let steps = 48;
+        for i in 0..=steps {
+            let a = i as f32 / steps as f32 * std::f32::consts::TAU;
+            let p = vec2(a.cos(), a.sin());
+            let [r, g, b] = [0, 1, 2].map(|c| (127.5 + 127.5 * p.dot(dir(c))).clamp(0.0, 255.0) as u8);
+            disc.colored_vertex(center + vec2(p.x, -p.y) * radius, Color32::from_rgb(r, g, b));
+            if i > 0 {
+                disc.add_triangle(0, i, i + 1);
+            }
+        }
+        ui.painter().add(disc);
+        if response.double_clicked() {
+            (wheel.r, wheel.g, wheel.b) = (0.0, 0.0, 0.0);
+        } else if response.dragged() || response.clicked() {
+            if let Some(pos) = response.interact_pointer_pos() {
+                let p = (pos - center) / radius;
+                let p = vec2(p.x, -p.y);
+                let p = if p.length() > 1.0 { p.normalized() } else { p };
+                [wheel.r, wheel.g, wheel.b] = [0, 1, 2].map(|c| AMOUNT * p.dot(dir(c)));
+            }
+        }
+        // The dot: where the push points (the inverse of the above on pushes that add up to 0).
+        let dot = (0..3).fold(egui::Vec2::ZERO, |sum, c| sum + dir(c) * [wheel.r, wheel.g, wheel.b][c]) * (2.0 / 3.0 / AMOUNT);
+        ui.painter().circle(center + vec2(dot.x, -dot.y) * radius, 4.5, Color32::WHITE, egui::Stroke::new(1.5, Color32::BLACK));
+        response.on_hover_text("Drag towards a color; double-click to center");
+        ui.add(egui::DragValue::new(&mut wheel.master).range(-0.5..=0.5).speed(0.005).fixed_decimals(2))
+            .on_hover_text(format!("{label} for all colors"));
+    });
 }
