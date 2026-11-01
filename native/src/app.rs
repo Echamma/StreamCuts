@@ -6,7 +6,7 @@ use crate::captions;
 use crate::export::{self, Export};
 use crate::ffmpeg::Frame;
 use crate::preview::{Clock, Preview};
-use crate::project::{Framing, Grade, History, MediaKind, Project, SPEEDS};
+use crate::project::{Framing, Grade, History, MediaKind, Picture, Project, SPEEDS};
 use crate::storage;
 use crate::filmstrip::Strip;
 use crate::timeline::{Looks, MediaDrag, Timeline, timecode};
@@ -469,6 +469,15 @@ impl StreamCuts {
             let fade = self.project.front_clip(self.playhead).map_or(1.0, |(clip, _)| clip.fade_at(self.playhead));
             let tint = Color32::from_gray((fade * 255.0).round() as u8);
             ui.painter().image(texture.id(), screen, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), tint);
+            // Scrubbing: until the exact still arrives (a static FFmpeg takes half a second to start), show the nearest
+            // filmstrip frame, which is there at once. Only when it looks the same: a 16:9 frame, fitted, ungraded.
+            if self.preview.waiting() && self.project.width * 9 == self.project.height * 16 {
+                if let Some((clip, media)) = self.project.front_clip(self.playhead).filter(|(clip, _)| clip.picture() == Picture::default()) {
+                    if let Some(strip) = self.looks.filmstrips.get(&media.id) {
+                        ui.painter().image(strip.texture.id(), screen, strip.uv(clip.source_time(self.playhead)), tint);
+                    }
+                }
+            }
         }
         let over_picture = ui.painter().with_clip_rect(screen);
         for title in self.project.titles.iter().filter(|t| self.playhead >= t.start && self.playhead < t.end) {

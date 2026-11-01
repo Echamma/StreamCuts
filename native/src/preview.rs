@@ -8,6 +8,9 @@ use crate::worker::{Job, StillKey, Worker};
 use egui::{ColorImage, TextureHandle, TextureOptions};
 use std::time::Instant;
 
+/// A still that takes longer than this gets a stand-in from the filmstrip.
+const SLOW_STILL: std::time::Duration = std::time::Duration::from_millis(150);
+
 /// How far ahead of a cut the next clip's picture starts decoding.
 const PRELOAD: f64 = 1.0;
 
@@ -33,6 +36,7 @@ pub struct Preview {
     pub texture: Option<TextureHandle>,
     shown: Option<StillKey>,
     waiting: Option<StillKey>,
+    asked_at: Option<Instant>,
     playing: Option<Playing>,
     next: Option<Playing>,
     /// Nothing is in front at the playhead.
@@ -127,6 +131,14 @@ impl Preview {
             let at = if media.kind == MediaKind::Image { 0.0 } else { frame_number as f64 / project.fps as f64 };
             worker.send(Job::Still { key: key.clone(), path: media.path.clone(), at, width, height, picture });
             self.waiting = Some(key);
+            self.asked_at = Some(Instant::now());
+        }
+        // Draw again once a slow still has kept us waiting long enough for the stand-in (just past the mark: egui
+        // times a repaint from the start of the frame that asked).
+        if let Some(asked) = self.asked_at.filter(|_| self.waiting.is_some()) {
+            if let Some(left) = SLOW_STILL.checked_sub(asked.elapsed()) {
+                ctx.request_repaint_after(left + std::time::Duration::from_millis(10));
+            }
         }
     }
 
@@ -148,6 +160,12 @@ impl Preview {
             return;
         }
         self.next = Some(Playing::start(project, clip, media, clip.source_time(at)));
+    }
+
+    /// Whether a still has been on its way for a while (the picture shown is from somewhere else). Quick stills don't
+    /// count, so a fast FFmpeg doesn't flicker between a stand-in and the real picture.
+    pub fn waiting(&self) -> bool {
+        self.waiting.is_some() && self.playing.is_none() && self.asked_at.is_some_and(|at| at.elapsed() > SLOW_STILL)
     }
 
     /// Forgets the picture so the next update fetches it again (after the project's shape changes).
