@@ -2,9 +2,11 @@
 //! It edits the project through `Project`'s methods and reports seeks and drops back to the editor.
 
 use crate::project::{History, MediaKind, Project, TrackKind};
+use crate::waveform::Waveform;
 use canopy_ui::{DraggedFiles, Icon, SharedFile, color, font, icon_button};
 use egui::{Align2, Color32, CursorIcon, DragAndDrop, Rect, Sense, Stroke, StrokeKind, TextureHandle, Ui, UiBuilder, pos2, vec2};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 pub const RULER: f32 = 26.0;
 pub const ROW: f32 = 54.0;
@@ -80,7 +82,15 @@ impl Timeline {
         points.into_iter().filter(|p| (p - t).abs() <= reach).min_by(|a, b| (a - t).abs().total_cmp(&(b - t).abs())).unwrap_or(t)
     }
 
-    pub fn ui(&mut self, ui: &mut Ui, project: &mut Project, history: &mut History, playhead: f64, thumbnails: &HashMap<String, TextureHandle>) -> Output {
+    pub fn ui(
+        &mut self,
+        ui: &mut Ui,
+        project: &mut Project,
+        history: &mut History,
+        playhead: f64,
+        thumbnails: &HashMap<String, TextureHandle>,
+        waveforms: &HashMap<String, Arc<Waveform>>,
+    ) -> Output {
         let mut output = Output::default();
         let rect = ui.available_rect_before_wrap();
         let background = ui.allocate_rect(rect, Sense::click_and_drag());
@@ -154,6 +164,20 @@ impl Timeline {
             }
             let selected = self.selection.contains(&clip.id);
             lane_painter.rect_filled(clip_rect, 6, clip_fill(media.kind));
+            if let Some(wave) = waveforms.get(&media.id) {
+                // The sound, mirrored about the middle of the clip's body, under the thumbnail.
+                let area = Rect::from_min_max(pos2(clip_rect.left(), clip_rect.top() + 16.0), clip_rect.max - vec2(0.0, 3.0));
+                let ink = color::INK.gamma_multiply(if media.kind == MediaKind::Audio { 0.55 } else { 0.3 });
+                let (step, half) = (2.0, area.height() / 2.0);
+                let mut x = visible.left().max(area.left());
+                while x < visible.right().min(area.right()) {
+                    // Square root, so quiet sound (speech sits around a tenth of full scale) still shows.
+                    let loud = (wave.peak(clip.source_time(t_of(x)), clip.source_time(t_of(x + step))) as f32 / 255.0 * clip.volume).min(1.0).sqrt();
+                    let h = (loud * half).max(0.5);
+                    lane_painter.line_segment([pos2(x, area.center().y - h), pos2(x, area.center().y + h)], Stroke::new(1.2, ink));
+                    x += step;
+                }
+            }
             if let Some(texture) = thumbnails.get(&media.id).filter(|_| media.kind != MediaKind::Audio) {
                 let height = clip_rect.height() - 18.0;
                 let thumb = Rect::from_min_size(pos2(clip_rect.left() + 2.0, clip_rect.top() + 16.0), vec2((height * 16.0 / 9.0).min(clip_rect.width() - 4.0), height));
@@ -164,7 +188,7 @@ impl Timeline {
             lane_painter.with_clip_rect(visible.shrink(2.0)).text(pos2(clip_rect.left() + 6.0, clip_rect.top() + 8.0), Align2::LEFT_CENTER, &media.name, font::ui(11.0), color::INK);
             lane_painter.rect_stroke(clip_rect, 6, Stroke::new(if selected { 2.0 } else { 1.0 }, if selected { color::SELECT_INK } else { color::HAIRLINE_STRONG }), StrokeKind::Inside);
 
-            let response = ui.interact(visible, ui.id().with(("clip", &clip.id)), Sense::click_and_drag());
+            let response = ui.interact(visible, ui.scope_id().with(("clip", &clip.id)), Sense::click_and_drag());
             let near_edge = |x: f32| (x - clip_rect.left()).abs() <= EDGE || (x - clip_rect.right()).abs() <= EDGE;
             if response.hovered() {
                 ui.ctx().set_cursor_icon(if pointer.map(|p| near_edge(p.x)).unwrap_or(false) { CursorIcon::ResizeHorizontal } else { CursorIcon::Grab });

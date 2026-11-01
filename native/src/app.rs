@@ -8,12 +8,14 @@ use crate::preview::{Clock, Preview};
 use crate::project::{History, MediaKind, Project};
 use crate::storage;
 use crate::timeline::{MediaDrag, Timeline, timecode};
+use crate::waveform::Waveform;
 use crate::worker::{Done, Job, Worker};
 use canopy_ui::canopy_core::files::Kind;
 use canopy_ui::{CanopyApp, Host, Icon, Mood, Place, Receipt, SharedFile, color, font, icon, icon_button, pane_frame, pill, primary_button, quiet_button};
 use egui::{Align2, Color32, ColorImage, Key, Modifiers, Rect, Sense, TextureHandle, TextureOptions, Ui, UiBuilder, pos2, vec2};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
@@ -35,6 +37,8 @@ pub struct StreamCuts {
     edited_at: Option<Instant>,
     worker: Worker,
     thumbnails: HashMap<String, TextureHandle>,
+    waveforms: HashMap<String, Arc<Waveform>>,
+    waveforms_asked: HashSet<String>,
     pending: HashMap<PathBuf, Pending>,
     preview: Preview,
     clock: Clock,
@@ -62,6 +66,8 @@ impl StreamCuts {
             edited_at: None,
             worker: Worker::new(ctx.clone()),
             thumbnails: HashMap::new(),
+            waveforms: HashMap::new(),
+            waveforms_asked: HashSet::new(),
             pending: HashMap::new(),
             preview: Preview::default(),
             clock: Clock::default(),
@@ -79,6 +85,9 @@ impl StreamCuts {
 
     fn request_thumbnails(&mut self) {
         for media in &self.project.media {
+            if media.has_audio && self.waveforms_asked.insert(media.id.clone()) {
+                self.worker.send(Job::Waveform { media_id: media.id.clone(), path: media.path.clone() });
+            }
             if !self.thumbnails.contains_key(&media.id) && media.kind != MediaKind::Audio {
                 self.worker.send(Job::Thumbnail { media_id: media.id.clone(), path: media.path.clone(), at: (media.duration * 0.1).min(1.0) });
             }
@@ -137,6 +146,10 @@ impl StreamCuts {
                 }
                 Done::Thumbnail(_, Err(_)) => {}
                 Done::Still(key, frame) => self.preview.still_done(ctx, key, frame),
+                Done::Waveform(id, Ok(wave)) => {
+                    self.waveforms.insert(id, Arc::new(wave));
+                }
+                Done::Waveform(_, Err(_)) => {}
             }
         }
     }
@@ -188,18 +201,23 @@ impl StreamCuts {
         }
     }
 
-    fn delete_selection(&mut self) {
+    /// Deletes the selected clips; `ripple` also closes the gaps they leave.
+    fn delete_selection(&mut self, ripple: bool) {
         if self.timeline.selection.is_empty() {
             return;
         }
         self.history.record(&self.project);
-        self.project.delete(&self.timeline.selection);
+        if ripple {
+            self.project.ripple_delete(&self.timeline.selection);
+        } else {
+            self.project.delete(&self.timeline.selection);
+        }
         self.timeline.selection.clear();
         self.edited();
     }
 
-    fn shortcuts(&mut self, ui: &Ui) {
-        if ui.ctx().egui_wants_keyboard_input() {
+    fn shortcuts(&mut self, ui: &Ui, focused: bool) {
+        if !focused || ui.ctx().egui_wants_keyboard_input() {
             return;
         }
         let ctx = ui.ctx();
@@ -209,8 +227,11 @@ impl StreamCuts {
         if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::S)) {
             self.split();
         }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::SHIFT, Key::Delete) || i.consume_key(Modifiers::SHIFT, Key::Backspace)) {
+            self.delete_selection(true);
+        }
         if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Delete) || i.consume_key(Modifiers::NONE, Key::Backspace)) {
-            self.delete_selection();
+            self.delete_selection(false);
         }
         if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z) || i.consume_key(Modifiers::COMMAND, Key::Y)) {
             if self.history.redo(&mut self.project) {
@@ -311,7 +332,7 @@ impl StreamCuts {
         let mut place_now = None;
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             for media in &self.project.media {
-                let id = ui.id().with(("media", &media.id));
+                let id = ui.scope_id().with(("media", &media.id));
                 let response = ui.dnd_drag_source(id, MediaDrag(media.id.clone()), |ui| {
                     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 46.0), Sense::hover());
                     let painter = ui.painter();
@@ -386,8 +407,9 @@ impl StreamCuts {
             if icon_button(ui, Icon::Scissors, "Split at the playhead (S)", false).clicked() {
                 self.split();
             }
-            if icon_button(ui, Icon::Trash, "Delete (Delete)", false).clicked() {
-                self.delete_selection();
+            if icon_button(ui, Icon::Trash, "Delete (Delete; Shift+Delete closes the gap)", false).clicked() {
+                let ripple = ui.input(|i| i.modifiers.shift);
+                self.delete_selection(ripple);
             }
             if icon_button(ui, Icon::Magnet, "Snap to clips and the playhead", self.timeline.snap).clicked() {
                 self.timeline.snap = !self.timeline.snap;
@@ -397,6 +419,7 @@ impl StreamCuts {
                 self.project.add_track(crate::project::TrackKind::Video);
                 self.edited();
             }
+            self.volume_control(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if icon_button(ui, Icon::ZoomIn, "Zoom in (Ctrl+wheel)", false).clicked() {
                     self.timeline.pps = (self.timeline.pps * 1.5).min(600.0);
@@ -408,13 +431,38 @@ impl StreamCuts {
         });
     }
 
+    /// One selected clip with sound gets a volume slider in the timeline bar.
+    fn volume_control(&mut self, ui: &mut Ui) {
+        let [id] = self.timeline.selection.as_slice() else { return };
+        let Some(clip) = self.project.clip(id) else { return };
+        if !self.project.media(&clip.media_id).is_some_and(|media| media.has_audio) {
+            return;
+        }
+        let (id, before) = (id.clone(), clip.volume);
+        let mut percent = (before * 100.0).round();
+        ui.add_space(10.0);
+        icon(ui.painter(), Rect::from_center_size(ui.cursor().min + vec2(8.0, 15.0), vec2(14.0, 14.0)), Icon::Audio, color::INK_SOFT);
+        ui.add_space(20.0);
+        let slider = ui.add(egui::Slider::new(&mut percent, 0.0..=200.0).suffix("%").step_by(1.0)).on_hover_text("The clip's volume");
+        // One undo step per drag, not one per frame of it.
+        if slider.drag_started() || (slider.changed() && !slider.dragged()) {
+            self.history.record(&self.project);
+        }
+        if slider.changed() {
+            if let Some(clip) = self.project.clip_mut(&id) {
+                clip.volume = percent / 100.0;
+            }
+            self.edited();
+        }
+    }
+
     fn projects_window(&mut self, ui: &mut Ui) {
         if !self.show_projects {
             return;
         }
         let mut open = None;
         let mut new = false;
-        let modal = egui::Modal::new(ui.id().with("projects")).show(ui.ctx(), |ui| {
+        let modal = egui::Modal::new(ui.scope_id().with("projects")).show(ui.ctx(), |ui| {
             ui.set_width(360.0);
             ui.label(egui::RichText::new("Your projects").font(font::display(20.0)));
             ui.add_space(8.0);
@@ -460,7 +508,7 @@ impl StreamCuts {
         }
         let progress = run.progress.load(Ordering::Relaxed) as f32 / 1000.0;
         let mut cancel = false;
-        egui::Modal::new(ui.id().with("export")).show(ui.ctx(), |ui| {
+        egui::Modal::new(ui.scope_id().with("export")).show(ui.ctx(), |ui| {
             ui.set_width(340.0);
             ui.label(egui::RichText::new("Exporting").font(font::display(20.0)));
             ui.label(canopy_ui::muted(format!("{} · {}×{} · {} fps", self.project.name, self.project.width, self.project.height, self.project.fps)));
@@ -482,7 +530,7 @@ impl CanopyApp for StreamCuts {
         for toast in self.toasts.drain(..) {
             host.toast(toast);
         }
-        self.shortcuts(ui);
+        self.shortcuts(ui, host.focused());
         if self.clock.playing {
             if self.audio.update(&self.project, self.playhead) {
                 self.playhead = self.audio.now().unwrap_or_else(|| self.clock.now());
@@ -524,7 +572,7 @@ impl CanopyApp for StreamCuts {
         let bar = Rect::from_min_size(lower.min + vec2(8.0, 4.0), vec2(lower.width() - 16.0, 32.0));
         ui.scope_builder(UiBuilder::new().max_rect(bar), |ui| self.timeline_bar(ui));
         let lanes = Rect::from_min_max(pos2(lower.left() + 4.0, bar.bottom() + 4.0), lower.max - vec2(4.0, 4.0));
-        let output = ui.scope_builder(UiBuilder::new().max_rect(lanes), |ui| self.timeline.ui(ui, &mut self.project, &mut self.history, self.playhead, &self.thumbnails)).inner;
+        let output = ui.scope_builder(UiBuilder::new().max_rect(lanes), |ui| self.timeline.ui(ui, &mut self.project, &mut self.history, self.playhead, &self.thumbnails, &self.waveforms)).inner;
         if self.clock.playing {
             self.timeline.follow(self.playhead, lanes.width());
         }

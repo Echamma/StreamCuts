@@ -152,6 +152,10 @@ impl Project {
         self.find(clip_id).map(|r| &self.tracks[r.track].clips[r.index])
     }
 
+    pub fn clip_mut(&mut self, clip_id: &str) -> Option<&mut Clip> {
+        self.find(clip_id).map(|r| &mut self.tracks[r.track].clips[r.index])
+    }
+
     /// Adds media, or returns the one already added from the same file.
     pub fn add_media(&mut self, media: Media) -> String {
         if let Some(existing) = self.media.iter().find(|m| m.path == media.path) {
@@ -332,6 +336,24 @@ impl Project {
         removed
     }
 
+    /// Deletes clips and closes the gaps they leave: later clips on the same track move left by what was deleted.
+    pub fn ripple_delete(&mut self, clip_ids: &[String]) -> usize {
+        let mut removed = 0;
+        for track in &mut self.tracks {
+            let gone: Vec<(f64, f64)> = track.clips.iter().filter(|c| clip_ids.contains(&c.id)).map(|c| (c.start, c.duration)).collect();
+            if gone.is_empty() {
+                continue;
+            }
+            track.clips.retain(|c| !clip_ids.contains(&c.id));
+            removed += gone.len();
+            for clip in &mut track.clips {
+                let shift: f64 = gone.iter().filter(|(start, _)| *start < clip.start).map(|(_, duration)| duration).sum();
+                clip.start = (clip.start - shift).max(0.0);
+            }
+        }
+        removed
+    }
+
     /// The clip in front at time `t`: the topmost visible video track with a clip there.
     pub fn front_clip(&self, t: f64) -> Option<(&Clip, &Media)> {
         self.tracks.iter()
@@ -471,6 +493,20 @@ mod tests {
         assert_eq!((r.start, r.duration, r.source_in), (5.0, 7.0, 3.0));
         assert_eq!(project.split(&clip, 2.01), None, "no slivers at the edges");
         assert_eq!(project.split_all(8.0).len(), 1);
+    }
+
+    #[test]
+    fn ripple_delete_closes_the_gap_on_that_track_only() {
+        let (mut project, video) = project_with(10.0);
+        let a = project.place(&video, None, 0.0).unwrap();
+        let b = project.place(&video, None, 10.0).unwrap();
+        let c = project.place(&video, None, 25.0).unwrap();
+        let other = project.add_track(TrackKind::Video);
+        let d = project.place(&video, Some(other), 30.0).unwrap();
+        assert_eq!(project.ripple_delete(&[b.clone()]), 1);
+        assert!(project.clip(&b).is_none());
+        let starts: Vec<f64> = [&a, &c, &d].iter().map(|id| project.clip(id).unwrap().start).collect();
+        assert_eq!(starts, vec![0.0, 15.0, 30.0], "c moves left by b's length; the other track stays");
     }
 
     #[test]

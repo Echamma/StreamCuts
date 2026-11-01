@@ -8,6 +8,7 @@ pub mod preview;
 pub mod project;
 pub mod storage;
 pub mod timeline;
+pub mod waveform;
 pub mod worker;
 
 use canopy_ui::{Accent, AppDescriptor, CanopyApp, Document, Place};
