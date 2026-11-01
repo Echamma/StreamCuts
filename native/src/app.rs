@@ -394,6 +394,7 @@ impl StreamCuts {
         }
         let mut place_now = None;
         let mut find = None;
+        let mut remove = None;
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             for media in &self.project.media {
                 let missing = !media.path.is_file();
@@ -428,11 +429,23 @@ impl StreamCuts {
                 } else if response.response.double_clicked() {
                     place_now = Some(media.id.clone());
                 }
+                let used = self.project.tracks.iter().any(|t| t.clips.iter().any(|c| c.media_id == media.id));
+                response.response.context_menu(|ui| {
+                    if ui.add_enabled(!used, egui::Button::new("Remove from project")).on_disabled_hover_text("A clip on the timeline uses it").clicked() {
+                        remove = Some(media.id.clone());
+                    }
+                });
                 ui.add_space(2.0);
             }
         });
         if let Some(id) = find {
             self.find_media(&id);
+        }
+        if let Some(id) = remove {
+            self.history.record(&self.project);
+            if self.project.remove_media(&id) {
+                self.edited();
+            }
         }
         if let Some(id) = place_now {
             self.history.record(&self.project);

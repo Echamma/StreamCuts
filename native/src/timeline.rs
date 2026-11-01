@@ -41,11 +41,20 @@ pub struct Timeline {
     pub selection: Vec<String>,
     pub snap: bool,
     gesture: Option<Gesture>,
+    /// A title being dragged, and by which part.
+    title_grab: Option<(String, Grab)>,
+}
+
+#[derive(Clone, Copy)]
+enum Grab {
+    Move,
+    Start,
+    End,
 }
 
 impl Default for Timeline {
     fn default() -> Self {
-        Self { pps: 60.0, scroll: 0.0, selection: Vec::new(), snap: true, gesture: None }
+        Self { pps: 60.0, scroll: 0.0, selection: Vec::new(), snap: true, gesture: None, title_grab: None }
     }
 }
 
@@ -268,8 +277,9 @@ impl Timeline {
                 lane_painter.rect_stroke(block, 5, Stroke::new(if selected { 2.0 } else { 1.0 }, if selected { color::SELECT_INK } else { color::HAIRLINE_STRONG }), StrokeKind::Inside);
                 lane_painter.with_clip_rect(visible.shrink(3.0)).text(pos2(block.left() + 6.0, block.center().y), Align2::LEFT_CENTER, &title.text, font::ui(11.0), color::INK);
                 let response = ui.interact(visible, ui.scope_id().with(("title", &title.id)), Sense::click_and_drag());
+                let near_edge = |x: f32| (x - block.left()).abs() <= EDGE || (x - block.right()).abs() <= EDGE;
                 if response.hovered() {
-                    ui.ctx().set_cursor_icon(CursorIcon::Grab);
+                    ui.ctx().set_cursor_icon(if pointer.is_some_and(|p| near_edge(p.x)) { CursorIcon::ResizeHorizontal } else { CursorIcon::Grab });
                 }
                 if response.clicked() {
                     clicked_clip = true;
@@ -284,19 +294,37 @@ impl Timeline {
                     if !selected {
                         self.selection = vec![title.id.clone()];
                     }
+                    // Its edges change when it starts or ends; anywhere else moves it.
+                    let grab = match response.interact_pointer_pos() {
+                        Some(p) if (p.x - block.left()).abs() <= EDGE => Grab::Start,
+                        Some(p) if (p.x - block.right()).abs() <= EDGE => Grab::End,
+                        _ => Grab::Move,
+                    };
+                    self.title_grab = Some((title.id.clone(), grab));
                 }
                 if response.dragged() && response.drag_delta().x != 0.0 {
                     moved = Some((title.id.clone(), (response.drag_delta().x / pps) as f64));
+                }
+                if response.drag_stopped() {
+                    self.title_grab = None;
                 }
             }
             if grabbed {
                 history.record(project);
             }
             if let Some((id, dt)) = moved {
+                let grab = self.title_grab.as_ref().filter(|(grabbed, _)| grabbed == &id).map_or(Grab::Move, |(_, grab)| *grab);
                 if let Some(title) = project.title_mut(&id) {
-                    let dt = dt.max(-title.start);
-                    title.start += dt;
-                    title.end += dt;
+                    const SHORTEST: f64 = 0.3;
+                    match grab {
+                        Grab::Move => {
+                            let dt = dt.max(-title.start);
+                            title.start += dt;
+                            title.end += dt;
+                        }
+                        Grab::Start => title.start = (title.start + dt).clamp(0.0, title.end - SHORTEST),
+                        Grab::End => title.end = (title.end + dt).max(title.start + SHORTEST),
+                    }
                     output.changed = true;
                 }
             }

@@ -341,6 +341,16 @@ impl Project {
         self.captions.iter().find(|c| t >= c.start && t < c.end)
     }
 
+    /// Takes media out of the project, if no clip uses it.
+    pub fn remove_media(&mut self, id: &str) -> bool {
+        let used = self.tracks.iter().any(|t| t.clips.iter().any(|c| c.media_id == id));
+        let before = self.media.len();
+        if !used {
+            self.media.retain(|m| m.id != id);
+        }
+        self.media.len() < before
+    }
+
     /// Media the timeline uses whose file isn't where the project says it is.
     pub fn missing_media(&self) -> Vec<&Media> {
         let used: Vec<&str> = self.tracks.iter().flat_map(|t| t.clips.iter().map(|c| c.media_id.as_str())).collect();
@@ -805,6 +815,16 @@ mod tests {
         assert_eq!(project.clip(&right).unwrap().source_in, 2.0);
         project.trim_start(&right, 13.5);
         assert_eq!(project.clip(&right).unwrap().source_in, 3.0);
+    }
+
+    #[test]
+    fn only_unused_media_can_be_removed() {
+        let (mut project, video) = project_with(10.0);
+        let spare = project.add_media(media(MediaKind::Audio, 5.0));
+        project.place(&video, None, 0.0).unwrap();
+        assert!(!project.remove_media(&video), "a clip uses it");
+        assert!(project.remove_media(&spare));
+        assert_eq!(project.media.len(), 1);
     }
 
     #[test]
