@@ -33,6 +33,9 @@ enum Gesture {
     TrimEnd(String),
     /// Ctrl-drag on the cut between two touching clips: the first ends and the second starts where the pointer is.
     Roll { left: String, right: String },
+    /// Ctrl-drag inside a clip that touches another: it moves, playing the same footage, and the clips touching it
+    /// give or take the difference.
+    Slide { clip: String, grab: f64 },
     /// Alt-drag: the clip stays put and plays another stretch of its source (where the drag began, from `source_in`).
     Slip { clip: String, from: f64, source_in: f64 },
 }
@@ -97,7 +100,7 @@ fn clip_fill(kind: MediaKind) -> Color32 {
 }
 
 impl Timeline {
-    fn snap(&self, project: &Project, ignore: Option<&str>, playhead: f64, t: f64) -> f64 {
+    fn snap(&self, project: &Project, ignore: &[&str], playhead: f64, t: f64) -> f64 {
         if !self.snap {
             return t;
         }
@@ -296,12 +299,17 @@ impl Timeline {
                 if let Some(p) = ui.input(|i| i.pointer.press_origin()).or(response.interact_pointer_pos()) {
                     history.record(project);
                     let (alt, ctrl) = ui.input(|i| (i.modifiers.alt, i.modifiers.command));
-                    // Ctrl on a start edge that touches the clip before: roll the cut between them.
-                    let roll = (ctrl && (p.x - clip_rect.left()).abs() <= EDGE).then(|| project.left_neighbor(&clip.id)).flatten();
-                    self.gesture = Some(if let Some(left) = roll {
+                    // Ctrl on an edge that touches another clip rolls the cut between them; Ctrl inside slides.
+                    let (at_start, at_end) = ((p.x - clip_rect.left()).abs() <= EDGE, (p.x - clip_rect.right()).abs() <= EDGE);
+                    let (left, right) = (project.left_neighbor(&clip.id), project.right_neighbor(&clip.id));
+                    self.gesture = Some(if let (true, true, Some(left)) = (ctrl, at_start, left.clone()) {
                         Gesture::Roll { left, right: clip.id.clone() }
+                    } else if let (true, true, Some(right)) = (ctrl, at_end, right.clone()) {
+                        Gesture::Roll { left: clip.id.clone(), right }
                     } else if alt {
                         Gesture::Slip { clip: clip.id.clone(), from: t_of(p.x), source_in: clip.source_in }
+                    } else if ctrl && !at_start && !at_end && (left.is_some() || right.is_some()) {
+                        Gesture::Slide { clip: clip.id.clone(), grab: t_of(p.x) - clip.start }
                     } else if (p.x - clip_rect.left()).abs() <= EDGE {
                         Gesture::TrimStart(clip.id.clone())
                     } else if (p.x - clip_rect.right()).abs() <= EDGE {
@@ -420,22 +428,33 @@ impl Timeline {
                         if let Some(at) = project.find(clip) {
                             let duration = project.tracks[at.track].clips[at.index].duration;
                             let start = t - grab;
-                            let snapped_start = self.snap(project, Some(clip), playhead, start);
-                            let snapped_end = self.snap(project, Some(clip), playhead, start + duration) - duration;
+                            let snapped_start = self.snap(project, &[clip.as_str()], playhead, start);
+                            let snapped_end = self.snap(project, &[clip.as_str()], playhead, start + duration) - duration;
                             let start = if (snapped_start - start).abs() <= (snapped_end - start).abs() { snapped_start } else { snapped_end };
                             let hovered = row_at(p.y);
                             let track = if hovered >= 0.0 && (hovered as usize) < project.tracks.len() && project.tracks[hovered as usize].kind == project.tracks[at.track].kind && !project.tracks[hovered as usize].locked { hovered as usize } else { at.track };
                             output.changed |= project.move_clip(clip, start, track);
                         }
                     }
+                    // The cut snaps to anything but the two clips it joins (their edges are the cut).
+                    Gesture::Roll { left, right } => output.changed |= project.roll(left, right, self.snap(project, &[left.as_str(), right.as_str()], playhead, t)),
+                    Gesture::Slide { clip, grab } => {
+                        let duration = project.clip(clip).map_or(0.0, |c| c.duration);
+                        let (left, right) = (project.left_neighbor(clip), project.right_neighbor(clip));
+                        let ignore: Vec<&str> = [Some(clip.as_str()), left.as_deref(), right.as_deref()].into_iter().flatten().collect();
+                        let start = t - grab;
+                        let snapped_start = self.snap(project, &ignore, playhead, start);
+                        let snapped_end = self.snap(project, &ignore, playhead, start + duration) - duration;
+                        let start = if (snapped_start - start).abs() <= (snapped_end - start).abs() { snapped_start } else { snapped_end };
+                        output.changed |= project.slide(clip, start);
+                    }
                     // Dragging right shows earlier footage, as the picture follows the pointer.
-                    Gesture::Roll { left, right } => output.changed |= project.roll(left, right, self.snap(project, Some(right), playhead, t)),
                     Gesture::Slip { clip, from, source_in } => {
                         let speed = project.clip(clip).map_or(1.0, |c| c.speed);
                         output.changed |= project.slip(clip, source_in - (t - from) * speed);
                     }
-                    Gesture::TrimStart(clip) => output.changed |= project.trim_start(clip, self.snap(project, Some(clip), playhead, t)),
-                    Gesture::TrimEnd(clip) => output.changed |= project.trim_end(clip, self.snap(project, Some(clip), playhead, t)),
+                    Gesture::TrimStart(clip) => output.changed |= project.trim_start(clip, self.snap(project, &[clip.as_str()], playhead, t)),
+                    Gesture::TrimEnd(clip) => output.changed |= project.trim_end(clip, self.snap(project, &[clip.as_str()], playhead, t)),
                 }
                 ui.ctx().set_cursor_icon(if matches!(gesture, Gesture::Move { .. }) { CursorIcon::Grabbing } else { CursorIcon::ResizeHorizontal });
             } else {
@@ -470,7 +489,7 @@ impl Timeline {
         if let Some(p) = pointer.filter(|p| dragging && lanes.contains(*p)) {
             painter.line_segment([pos2(p.x, rect.top() + RULER), pos2(p.x, rect.bottom())], Stroke::new(2.0, color::SELECT_LINE));
             if ui.input(|i| i.pointer.any_released()) {
-                let at = self.snap(project, None, playhead, t_of(p.x).max(0.0));
+                let at = self.snap(project, &[], playhead, t_of(p.x).max(0.0));
                 let hovered = row_at(p.y);
                 let track = (hovered >= 0.0 && (hovered as usize) < project.tracks.len()).then_some(hovered as usize);
                 // Nothing lands on a locked track.

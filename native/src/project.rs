@@ -740,7 +740,6 @@ impl Project {
         true
     }
 
-    /// Moves a clip's start edge to `start`, keeping its end where it is.
     /// The clip that ends exactly where `clip_id` starts on its track, if any (the two share a cut).
     pub fn left_neighbor(&self, clip_id: &str) -> Option<String> {
         let at = self.find(clip_id)?;
@@ -748,26 +747,87 @@ impl Project {
         self.tracks[at.track].clips.iter().find(|c| c.id != clip.id && (c.end() - clip.start).abs() < 1e-6).map(|c| c.id.clone())
     }
 
+    /// The clip that starts exactly where `clip_id` ends on its track, if any.
+    pub fn right_neighbor(&self, clip_id: &str) -> Option<String> {
+        let at = self.find(clip_id)?;
+        let clip = &self.tracks[at.track].clips[at.index];
+        self.tracks[at.track].clips.iter().find(|c| c.id != clip.id && (c.start - clip.end()).abs() < 1e-6).map(|c| c.id.clone())
+    }
+
+    /// How far a clip could grow, in timeline seconds: its start back into the footage before its in point, and its
+    /// end on into the footage after its out point. Pictures have no limit.
+    fn source_room(&self, clip: &Clip) -> (f64, f64) {
+        match self.media(&clip.media_id) {
+            Some(media) if media.kind != MediaKind::Image => {
+                (clip.source_in / clip.speed, (media.max_length() - clip.source_in - clip.source_length()) / clip.speed)
+            }
+            _ => (f64::INFINITY, f64::INFINITY),
+        }
+    }
+
+    /// Slides a clip to `start`, keeping the footage it plays: the clip touching it before ends where it now starts and
+    /// the one touching it after starts where it now ends, each within its source and no shorter than the shortest
+    /// clip. A side with a gap instead keeps the clip off the clip beyond it. Returns whether it changed.
+    pub fn slide(&mut self, clip_id: &str, start: f64) -> bool {
+        let Some(at) = self.find(clip_id) else { return false };
+        let clip = self.tracks[at.track].clips[at.index].clone();
+        let (left, right) = (self.left_neighbor(clip_id), self.right_neighbor(clip_id));
+        let others = || self.tracks[at.track].clips.iter().filter(|c| c.id != clip.id);
+        let (mut lo, mut hi) = (-clip.start, f64::INFINITY);
+        match left.as_deref().and_then(|id| self.clip(id)) {
+            Some(l) => {
+                lo = lo.max(MIN_CLIP - l.duration);
+                hi = hi.min(self.source_room(l).1);
+            }
+            None => lo = lo.max(others().filter(|c| c.end() <= clip.start + 1e-9).map(Clip::end).fold(0.0, f64::max) - clip.start),
+        }
+        match right.as_deref().and_then(|id| self.clip(id)) {
+            Some(r) => {
+                hi = hi.min(r.duration - MIN_CLIP);
+                lo = lo.max(-self.source_room(r).0);
+            }
+            None => hi = hi.min(others().filter(|c| c.start >= clip.end() - 1e-9).map(|c| c.start).fold(f64::INFINITY, f64::min) - clip.end()),
+        }
+        let by = (start - clip.start).max(lo).min(hi);
+        if by.abs() < 1e-9 {
+            return false;
+        }
+        if let Some(l) = left.as_deref().and_then(|id| self.clip_mut(id)) {
+            l.duration += by;
+        }
+        let right_still = right.as_deref().and_then(|id| self.clip(id)).and_then(|r| self.media(&r.media_id)).is_some_and(|m| m.kind == MediaKind::Image);
+        if let Some(r) = right.as_deref().and_then(|id| self.clip_mut(id)) {
+            r.start += by;
+            r.duration -= by;
+            if !right_still {
+                r.source_in += by * r.speed;
+            }
+        }
+        self.tracks[at.track].clips[at.index].start += by;
+        // The clip's captions go with it.
+        self.captions.iter_mut().filter(|c| c.belongs_to(&clip.id, clip.start, clip.end())).for_each(|c| c.shift(by));
+        self.captions.sort_by(|a, b| a.start.total_cmp(&b.start));
+        true
+    }
+
     /// Rolls the cut between two touching clips to `t`: the first ends there and the second starts there, each
     /// within the footage its source has, and neither shorter than the shortest clip. Returns whether it changed.
     pub fn roll(&mut self, left_id: &str, right_id: &str, t: f64) -> bool {
         let (Some(left), Some(right)) = (self.clip(left_id).cloned(), self.clip(right_id).cloned()) else { return false };
-        let (Some(left_media), Some(right_media)) = (self.media(&left.media_id).cloned(), self.media(&right.media_id).cloned()) else { return false };
+        let Some(right_media) = self.media(&right.media_id).cloned() else { return false };
         // How far each can grow into the other: the first by the footage after its out point, the second by the
-        // footage before its in point (pictures have no limit).
-        let left_room = if left_media.kind == MediaKind::Image { f64::INFINITY } else { (left_media.max_length() - left.source_in - left.source_length()) / left.speed };
-        let right_room = if right_media.kind == MediaKind::Image { f64::INFINITY } else { right.source_in / right.speed };
+        // footage before its in point.
+        let (left_room, right_room) = (self.source_room(&left).1, self.source_room(&right).0);
         let cut = right.start;
         let t = t.clamp((left.start + MIN_CLIP).max(cut - right_room), (right.end() - MIN_CLIP).min(cut + left_room));
         if (t - cut).abs() < 1e-9 {
             return false;
         }
-        let image = |kind: MediaKind| kind == MediaKind::Image;
         let left_clip = self.clip_mut(left_id).unwrap();
         left_clip.duration = t - left_clip.start;
         let right_clip = self.clip_mut(right_id).unwrap();
         let shift = t - right_clip.start;
-        if !image(right_media.kind) {
+        if right_media.kind != MediaKind::Image {
             right_clip.source_in += shift * right_clip.speed;
         }
         right_clip.start = t;
@@ -794,6 +854,7 @@ impl Project {
         true
     }
 
+    /// Moves a clip's start edge to `start`, keeping its end where it is.
     pub fn trim_start(&mut self, clip_id: &str, start: f64) -> bool {
         let Some(at) = self.find(clip_id) else { return false };
         let clip = self.tracks[at.track].clips[at.index].clone();
@@ -936,9 +997,9 @@ impl Project {
     }
 
     /// Clip edges and the playhead, for snapping.
-    pub fn snap_points(&self, ignore: Option<&str>) -> Vec<f64> {
+    pub fn snap_points(&self, ignore: &[&str]) -> Vec<f64> {
         let mut points = vec![0.0];
-        for clip in self.tracks.iter().flat_map(|t| t.clips.iter()).filter(|c| Some(c.id.as_str()) != ignore) {
+        for clip in self.tracks.iter().flat_map(|t| t.clips.iter()).filter(|c| !ignore.contains(&c.id.as_str())) {
             points.push(clip.start);
             points.push(clip.end());
         }
@@ -1063,6 +1124,25 @@ mod tests {
         assert!(project.crossfade_at(9.0).is_none());
         project.clip_mut(&outgoing).unwrap().source_in = 2.0;
         assert_eq!(project.crossfade_after(&outgoing), 0.0, "no source handle means no transition");
+    }
+
+    #[test]
+    fn sliding_moves_a_clip_between_its_neighbors() {
+        let (mut project, video) = project_with(10.0);
+        let a = project.place(&video, None, 0.0).unwrap();
+        project.trim_end(&a, 3.0); // 0..3, source 0..3
+        let b = project.place(&video, None, 3.0).unwrap();
+        project.trim_end(&b, 5.0); // 3..5, source 0..2
+        let c = project.place(&video, None, 5.0).unwrap();
+        project.trim_start(&c, 7.0);
+        project.move_clip(&c, 5.0, project.find(&c).unwrap().track); // 5..13, source 2..10
+        assert_eq!((project.left_neighbor(&b), project.right_neighbor(&b)), (Some(a.clone()), Some(c.clone())));
+        assert!(project.slide(&b, 4.0));
+        let at = |p: &Project, id: &str| { let clip = p.clip(id).unwrap(); (clip.start, clip.end(), clip.source_in) };
+        assert_eq!((at(&project, &a), at(&project, &b), at(&project, &c)), ((0.0, 4.0, 0.0), (4.0, 6.0, 0.0), (6.0, 13.0, 3.0)));
+        // Back towards the start: c has only 3 s of footage before its in point.
+        project.slide(&b, 0.0);
+        assert_eq!((at(&project, &a), at(&project, &b), at(&project, &c)), ((0.0, 1.0, 0.0), (1.0, 3.0, 0.0), (3.0, 13.0, 0.0)));
     }
 
     #[test]
