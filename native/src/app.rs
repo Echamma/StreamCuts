@@ -525,6 +525,7 @@ impl StreamCuts {
                         text.text(pos2(thumb.right() + 8.0, rect.bottom() - 7.0), Align2::LEFT_BOTTOM, detail, font::ui(11.0), color::INK_MUTED);
                     }
                 });
+                let response = egui::InnerResponse { response: response.response.on_hover_text(media.info()), ..response };
                 if missing && response.response.clicked() {
                     find = Some(media.id.clone());
                 } else if response.response.double_clicked() {

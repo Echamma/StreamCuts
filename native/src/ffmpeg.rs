@@ -67,7 +67,7 @@ pub fn probe(path: &Path) -> Result<Media, String> {
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     if is_image(path) {
         let (width, height) = image::image_dimensions(path).map_err(|e| format!("{name} couldn't be read: {e}"))?;
-        return Ok(Media { id: new_id(), path: path.to_path_buf(), name, kind: MediaKind::Image, duration: 0.0, width, height, has_audio: false });
+        return Ok(Media { id: new_id(), path: path.to_path_buf(), name, kind: MediaKind::Image, duration: 0.0, width, height, has_audio: false, frame_rate: 0.0 });
     }
     let output = command(&ffprobe())
         .args(["-v", "error", "-print_format", "json", "-show_format", "-show_streams"])
@@ -93,8 +93,14 @@ pub fn probe(path: &Path) -> Result<Media, String> {
             width: v["width"].as_u64().unwrap_or(0) as u32,
             height: v["height"].as_u64().unwrap_or(0) as u32,
             has_audio,
+            // "30000/1001" and the like.
+            frame_rate: v["avg_frame_rate"].as_str().or(v["r_frame_rate"].as_str()).and_then(|rate| {
+                let (n, d) = rate.split_once('/')?;
+                let (n, d) = (n.parse::<f64>().ok()?, d.parse::<f64>().ok()?);
+                (d > 0.0).then(|| n / d)
+            }).unwrap_or(0.0),
         }),
-        None if has_audio => Ok(Media { id: new_id(), path: path.to_path_buf(), name, kind: MediaKind::Audio, duration, width: 0, height: 0, has_audio }),
+        None if has_audio => Ok(Media { id: new_id(), path: path.to_path_buf(), name, kind: MediaKind::Audio, duration, width: 0, height: 0, has_audio, frame_rate: 0.0 }),
         None => Err(format!("{name} has no picture or sound StreamCuts can use.")),
     }
 }
@@ -350,6 +356,8 @@ mod tests {
             .unwrap();
         assert!(made.success());
         let media = probe(&clip).unwrap();
+        assert!((media.frame_rate - 30.0).abs() < 0.01, "frame rate {}", media.frame_rate);
+        assert!(media.info().starts_with("Video · 320×180 · 30 fps · 0:00:02 · with sound · "), "{}", media.info());
         assert_eq!(media.kind, MediaKind::Video);
         assert!((media.duration - 2.0).abs() < 0.1, "duration {}", media.duration);
         assert!(media.has_audio && media.width == 320 && media.height == 180);

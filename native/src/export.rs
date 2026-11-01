@@ -204,7 +204,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn media(kind: MediaKind, duration: f64, has_audio: bool) -> Media {
-        Media { id: new_id(), path: PathBuf::from(format!("C:/m/{}.mp4", new_id())), name: "m".into(), kind, duration, width: 1280, height: 720, has_audio }
+        Media { id: new_id(), path: PathBuf::from(format!("C:/m/{}.mp4", new_id())), name: "m".into(), kind, duration, width: 1280, height: 720, has_audio, frame_rate: 30.0 }
     }
 
     #[test]

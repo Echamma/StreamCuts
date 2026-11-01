@@ -30,9 +30,33 @@ pub struct Media {
     pub width: u32,
     pub height: u32,
     pub has_audio: bool,
+    /// Frames a second of a video; 0 when unknown (projects saved before it was read) or not a video.
+    #[serde(default)]
+    pub frame_rate: f64,
 }
 
 impl Media {
+    /// What the web StreamCuts' media info shows: kind, size, frame rate, length, sound, and the file's size.
+    pub fn info(&self) -> String {
+        let mut parts = vec![match self.kind { MediaKind::Video => "Video", MediaKind::Audio => "Sound", MediaKind::Image => "Picture" }.to_owned()];
+        if self.kind != MediaKind::Audio {
+            parts.push(format!("{}×{}", self.width, self.height));
+        }
+        if self.frame_rate > 0.0 {
+            parts.push(format!("{} fps", (self.frame_rate * 100.0).round() / 100.0));
+        }
+        if self.kind != MediaKind::Image {
+            let seconds = self.duration.round() as u64;
+            parts.push(format!("{}:{:02}:{:02}", seconds / 3600, seconds / 60 % 60, seconds % 60));
+        }
+        if self.kind == MediaKind::Video {
+            parts.push(if self.has_audio { "with sound" } else { "no sound" }.into());
+        }
+        if let Ok(meta) = std::fs::metadata(&self.path) {
+            parts.push(format!("{:.1} MB", meta.len() as f64 / 1_048_576.0));
+        }
+        parts.join(" · ")
+    }
     /// How long a clip of this media can be.
     pub fn max_length(&self) -> f64 {
         if self.kind == MediaKind::Image { f64::INFINITY } else { self.duration }
@@ -829,7 +853,7 @@ mod tests {
     use super::*;
 
     fn media(kind: MediaKind, duration: f64) -> Media {
-        Media { id: new_id(), path: PathBuf::from(format!("C:/m/{}.mp4", new_id())), name: "m".into(), kind, duration, width: 1920, height: 1080, has_audio: kind != MediaKind::Image }
+        Media { id: new_id(), path: PathBuf::from(format!("C:/m/{}.mp4", new_id())), name: "m".into(), kind, duration, width: 1920, height: 1080, has_audio: kind != MediaKind::Image, frame_rate: 30.0 }
     }
 
     fn project_with(duration: f64) -> (Project, String) {
