@@ -7,7 +7,7 @@ use crate::captions;
 use crate::export::{self, Export};
 use crate::ffmpeg::Frame;
 use crate::preview::{Clock, Preview};
-use crate::project::{Effects, Framing, Grade, History, MediaKind, Picture, Project, SPEEDS};
+use crate::project::{Effects, ExportFormat, Framing, Grade, History, MediaKind, Picture, Project, SPEEDS};
 use crate::storage;
 use crate::filmstrip::Strip;
 use crate::timeline::{Looks, MediaDrag, Timeline, timecode};
@@ -366,6 +366,17 @@ impl StreamCuts {
                     self.project.even_loudness = !even;
                     self.edited();
                 }
+                let mut format = self.project.export_format;
+                egui::ComboBox::from_id_salt("streamcuts-export-format").selected_text(format.label()).width(120.0).show_ui(ui, |ui| {
+                    for choice in ExportFormat::ALL {
+                        ui.selectable_value(&mut format, choice, choice.label());
+                    }
+                }).response.on_hover_text("What Export makes");
+                if format != self.project.export_format {
+                    self.history.record(&self.project);
+                    self.project.export_format = format;
+                    self.edited();
+                }
             });
         });
     }
@@ -464,7 +475,7 @@ impl StreamCuts {
             return;
         }
         let _ = std::fs::create_dir_all(&self.place.exports_dir);
-        let name = canopy_ui::canopy_core::files::unique_name(&self.place.exports_dir, &format!("{}.mp4", self.project.name));
+        let name = canopy_ui::canopy_core::files::unique_name(&self.place.exports_dir, &format!("{}.{}", self.project.name, self.project.export_format.extension()));
         let output = self.place.exports_dir.join(name);
         match export::start(&self.project, &output, ctx.clone()) {
             Ok(run) => {

@@ -131,6 +131,42 @@ impl Effects {
     }
 }
 
+/// An export's file type and codecs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExportFormat {
+    /// H.264 and AAC: plays anywhere, uploads anywhere.
+    #[default]
+    Mp4,
+    /// ProRes 422 HQ and PCM in a MOV, for further editing.
+    Prores,
+    /// AV1 (SVT-AV1) and AAC in an MP4: smaller files at the same quality.
+    Av1,
+    /// Only the mixed sound, as a 48 kHz WAV stem.
+    Audio,
+}
+
+impl ExportFormat {
+    pub const ALL: [ExportFormat; 4] = [ExportFormat::Mp4, ExportFormat::Prores, ExportFormat::Av1, ExportFormat::Audio];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ExportFormat::Mp4 => "MP4 (H.264)",
+            ExportFormat::Prores => "ProRes (MOV)",
+            ExportFormat::Av1 => "AV1 (MP4)",
+            ExportFormat::Audio => "Sound only (WAV)",
+        }
+    }
+
+    pub fn extension(self) -> &'static str {
+        match self {
+            ExportFormat::Mp4 | ExportFormat::Av1 => "mp4",
+            ExportFormat::Prores => "mov",
+            ExportFormat::Audio => "wav",
+        }
+    }
+}
+
 /// How a clip's picture is shown: where it sits in the frame, and its color. Export, stills and playback all draw it
 /// through `filter`, so the preview is what gets exported.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -239,6 +275,9 @@ pub struct Project {
     /// Exports even out the loudness to what social video expects (-14 LUFS).
     #[serde(default)]
     pub even_loudness: bool,
+    /// What Export makes (the web StreamCuts' Deliver page offers the same).
+    #[serde(default)]
+    pub export_format: ExportFormat,
     /// The gap under captions, as a fraction of the frame's height (shorts often want them higher).
     #[serde(default = "caption_gap")]
     pub caption_bottom: f32,
@@ -343,6 +382,7 @@ impl Project {
             captions: Vec::new(),
             titles: Vec::new(),
             even_loudness: false,
+            export_format: ExportFormat::default(),
             caption_bottom: caption_gap(),
             saved_at: 0,
         }

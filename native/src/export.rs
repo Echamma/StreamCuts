@@ -4,7 +4,7 @@
 
 use crate::captions;
 use crate::ffmpeg::{command, ffmpeg};
-use crate::project::{MediaKind, Project, TrackKind, new_id};
+use crate::project::{ExportFormat, MediaKind, Project, TrackKind, new_id};
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::Stdio;
@@ -90,15 +90,35 @@ pub fn arguments(project: &Project, output: &Path) -> Result<Vec<String>, String
             filters.push(format!("{mix}[aout]"));
         }
     }
-    args.extend(["-filter_complex".into(), filters.join(";"), "-map".into(), "[vout]".into()]);
-    if !audio_labels.is_empty() {
-        args.extend(["-map".into(), "[aout]".into(), "-c:a".into(), "aac".into(), "-b:a".into(), "192k".into()]);
+    let format = project.export_format;
+    if format == ExportFormat::Audio && audio_labels.is_empty() {
+        return Err("Nothing on the timeline makes sound.".into());
     }
-    args.extend(
-        ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-t"]
-            .iter()
-            .map(|s| s.to_string()),
-    );
+    if format == ExportFormat::Audio {
+        // FFmpeg refuses a filter output nothing reads: the picture goes nowhere.
+        filters.push("[vout]nullsink".into());
+    }
+    args.extend(["-filter_complex".into(), filters.join(";")]);
+    if format != ExportFormat::Audio {
+        args.extend(["-map".into(), "[vout]".into()]);
+    }
+    if !audio_labels.is_empty() {
+        let sound: &[&str] = match format {
+            ExportFormat::Prores | ExportFormat::Audio => &["-c:a", "pcm_s16le", "-ar", "48000"],
+            _ => &["-c:a", "aac", "-b:a", "192k"],
+        };
+        args.extend(["-map".into(), "[aout]".into()]);
+        args.extend(sound.iter().map(|s| s.to_string()));
+    }
+    let picture: &[&str] = match format {
+        ExportFormat::Mp4 => &["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", "-movflags", "+faststart"],
+        // ProRes 422 HQ, 10-bit.
+        ExportFormat::Prores => &["-c:v", "prores_ks", "-profile:v", "3", "-pix_fmt", "yuv422p10le"],
+        ExportFormat::Av1 => &["-c:v", "libsvtav1", "-preset", "8", "-crf", "32", "-pix_fmt", "yuv420p", "-movflags", "+faststart"],
+        ExportFormat::Audio => &[],
+    };
+    args.extend(picture.iter().map(|s| s.to_string()));
+    args.push("-t".into());
     args.push(format!("{total:.3}"));
     args.extend(["-progress".into(), "pipe:1".into(), "-nostats".into()]);
     args.push(output.to_string_lossy().into_owned());
@@ -285,6 +305,29 @@ mod tests {
         project.tracks[track].muted = true;
         let args = arguments(&project, Path::new("o.mp4")).unwrap();
         assert!(!args.contains(&"[aout]".to_string()));
+    }
+
+    #[test]
+    fn every_format_renders_a_file_ffprobe_reads() {
+        let dir = std::env::temp_dir().join(format!("streamcuts-formats-{}", new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("tone.mp4");
+        assert!(command(&ffmpeg()).args(["-v", "error", "-y", "-f", "lavfi", "-i", "color=c=red:s=64x64:r=30:d=1", "-f", "lavfi", "-i", "sine=frequency=440:duration=1", "-shortest", "-pix_fmt", "yuv420p", "-c:a", "aac"]).arg(&source).status().unwrap().success());
+        let mut project = Project::new("Formats");
+        (project.width, project.height) = (64, 64);
+        let id = project.add_media(crate::ffmpeg::probe(&source).unwrap());
+        project.place(&id, None, 0.0).unwrap();
+        for (format, video, audio) in [(ExportFormat::Prores, Some("prores"), "pcm_s16le"), (ExportFormat::Av1, Some("av1"), "aac"), (ExportFormat::Audio, None, "pcm_s16le")] {
+            project.export_format = format;
+            let output = dir.join(format!("out.{}", format.extension()));
+            let run = start(&project, &output, egui::Context::default()).unwrap();
+            assert_eq!(run.result.recv().unwrap(), Ok(()), "{format:?}");
+            let probe = command(&crate::ffmpeg::ffprobe()).args(["-v", "error", "-show_entries", "stream=codec_name", "-of", "csv=p=0"]).arg(&output).output().unwrap();
+            let codecs = String::from_utf8_lossy(&probe.stdout).split_whitespace().map(str::to_owned).collect::<Vec<_>>();
+            let expected: Vec<String> = video.into_iter().chain([audio]).map(str::to_owned).collect();
+            assert_eq!(codecs, expected, "{format:?}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
