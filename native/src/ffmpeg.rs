@@ -152,7 +152,7 @@ pub(crate) fn scale_filter(width: u32, height: u32) -> String {
 /// One frame at `at` seconds, shown as `picture` in `width`×`height`. Blocking: call it off the UI thread.
 pub fn still(path: &Path, at: f64, width: u32, height: u32, picture: Picture) -> Result<Frame, String> {
     // Pictures are read directly unless they have a color grade, which FFmpeg applies exactly as exports do.
-    if is_image(path) && picture.grade.is_neutral() {
+    if is_image(path) && picture.grade.is_neutral() && picture.effects.is_neutral() {
         let framing = picture.framing;
         let image = image::open(path).map_err(|e| e.to_string())?;
         let (iw, ih) = (image.width().max(1) as f32, image.height().max(1) as f32);
@@ -360,6 +360,12 @@ mod tests {
         let graded = still(&clip, 1.0, 160, 90, gray).unwrap();
         let spread = graded.rgba.chunks(4).map(|p| p[0].max(p[1]).max(p[2]) - p[0].min(p[1]).min(p[2])).max().unwrap();
         assert!(spread <= 6, "colors left in a gray picture: {spread}");
+        let soft = Picture { effects: crate::project::Effects { blur: 4.0, sharpen: 0.0 }, ..Default::default() };
+        let blurred = still(&clip, 1.0, 160, 90, soft).unwrap();
+        assert_ne!(blurred.rgba, frame.rgba, "blur should change the decoded picture");
+        let crisp = Picture { effects: crate::project::Effects { blur: 0.0, sharpen: 1.0 }, ..Default::default() };
+        let sharpened = still(&clip, 1.0, 160, 90, crisp).unwrap();
+        assert_ne!(sharpened.rgba, frame.rgba, "sharpen should change the decoded picture");
         // Streamed frames carry their real source time: each looks like the still at its time, not its neighbors'.
         let stream = FrameStream::start(&clip, 0.5, 30, 160, 90, Picture::default(), 1.0);
         let frames: Vec<Frame> = stream.frames.iter().take(16).collect();

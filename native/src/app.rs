@@ -7,7 +7,7 @@ use crate::captions;
 use crate::export::{self, Export};
 use crate::ffmpeg::Frame;
 use crate::preview::{Clock, Preview};
-use crate::project::{Framing, Grade, History, MediaKind, Picture, Project, SPEEDS};
+use crate::project::{Effects, Framing, Grade, History, MediaKind, Picture, Project, SPEEDS};
 use crate::storage;
 use crate::filmstrip::Strip;
 use crate::timeline::{Looks, MediaDrag, Timeline, timecode};
@@ -759,6 +759,15 @@ impl StreamCuts {
                 ui.add(egui::Slider::new(&mut changed.grade.brightness, -0.5..=0.5).show_value(false).text("Brightness"));
                 ui.add(egui::Slider::new(&mut changed.grade.contrast, 0.5..=2.0).show_value(false).text("Contrast"));
                 ui.add(egui::Slider::new(&mut changed.grade.saturation, 0.0..=2.5).show_value(false).text("Saturation"));
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Effects").font(font::ui(12.0)).color(color::INK_MUTED));
+                    if !changed.effects.is_neutral() && ui.small_button("Reset").clicked() {
+                        changed.effects = Effects::default();
+                    }
+                });
+                ui.add(egui::Slider::new(&mut changed.effects.blur, 0.0..=12.0).text("Blur"));
+                ui.add(egui::Slider::new(&mut changed.effects.sharpen, 0.0..=2.0).text("Sharpen"));
             }
         });
         if changed != clip || speed != clip.speed {

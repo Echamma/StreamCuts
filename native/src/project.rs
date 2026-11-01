@@ -72,6 +72,8 @@ pub struct Clip {
     pub framing: Framing,
     #[serde(default)]
     pub grade: Grade,
+    #[serde(default)]
+    pub effects: Effects,
     /// How fast the source plays: 2 is twice as fast (the clip covers twice the source in its length).
     #[serde(default = "normal_speed")]
     pub speed: f64,
@@ -109,20 +111,42 @@ impl Grade {
     }
 }
 
+/// Simple picture effects shared by preview frames, paused stills, and exports.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct Effects {
+    /// Gaussian blur radius in pixels at the output size.
+    pub blur: f32,
+    /// Unsharp strength; 0 leaves the picture alone.
+    pub sharpen: f32,
+}
+
+impl Effects {
+    pub fn is_neutral(self) -> bool { self.blur == 0.0 && self.sharpen == 0.0 }
+
+    pub fn filter(self) -> String {
+        let mut chain = String::new();
+        if self.blur > 0.0 { chain.push_str(&format!(",gblur=sigma={:.2}", self.blur.clamp(0.0, 20.0))); }
+        if self.sharpen > 0.0 { chain.push_str(&format!(",unsharp=5:5:{:.2}", self.sharpen.clamp(0.0, 2.0))); }
+        chain
+    }
+}
+
 /// How a clip's picture is shown: where it sits in the frame, and its color. Export, stills and playback all draw it
 /// through `filter`, so the preview is what gets exported.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Picture {
     pub framing: Framing,
     pub grade: Grade,
+    pub effects: Effects,
 }
 
 impl Picture {
     pub fn filter(self, width: u32, height: u32) -> String {
-        match self.grade.filter() {
+        let color = match self.grade.filter() {
             Some(eq) => format!("{},{eq}", self.framing.filter(width, height)),
             None => self.framing.filter(width, height),
-        }
+        };
+        format!("{color}{}", self.effects.filter())
     }
 }
 
@@ -171,7 +195,7 @@ impl Clip {
         t >= self.start && t < self.end()
     }
     pub fn picture(&self) -> Picture {
-        Picture { framing: self.framing, grade: self.grade }
+        Picture { framing: self.framing, grade: self.grade, effects: self.effects }
     }
     /// How far faded in the clip is at timeline time `t`: 0 is black (silent), 1 is full.
     pub fn fade_at(&self, t: f64) -> f64 {
@@ -514,7 +538,7 @@ impl Project {
         };
         let duration = if media.kind == MediaKind::Image { STILL_SECONDS } else { media.duration.max(MIN_CLIP) };
         let start = self.free_start(track, at, duration, None);
-        let clip = Clip { id: new_id(), media_id: media.id.clone(), start, source_in: 0.0, duration, volume: 1.0, fade_in: 0.0, fade_out: 0.0, crossfade_in: 0.0, crossfade_from: None, framing: Framing::Fit, grade: Grade::default(), speed: 1.0 };
+        let clip = Clip { id: new_id(), media_id: media.id.clone(), start, source_in: 0.0, duration, volume: 1.0, fade_in: 0.0, fade_out: 0.0, crossfade_in: 0.0, crossfade_from: None, framing: Framing::Fit, grade: Grade::default(), effects: Effects::default(), speed: 1.0 };
         let id = clip.id.clone();
         self.tracks[track].clips.push(clip);
         self.sort_track(track);
