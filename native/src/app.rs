@@ -556,7 +556,12 @@ impl StreamCuts {
         ui.painter().rect_filled(screen, 4, Color32::BLACK);
         if let (Some(texture), false) = (&self.preview.texture, self.preview.blank) {
             // A clip fading in or out shows darker (exports fade it to what's below, which is black unless tracks stack).
-            let fade = self.project.front_clip(self.playhead).map_or(1.0, |(clip, _)| clip.fade_at(self.playhead));
+            let fade = if self.project.crossfade_at(self.playhead).is_some() { 1.0 }
+                else { self.project.front_clip(self.playhead).map_or(1.0, |(clip, _)| {
+                    if self.project.crossfade_before(&clip.id).is_some() {
+                        if clip.fade_out > 0.0 { ((clip.end() - self.playhead) / clip.fade_out).clamp(0.0, 1.0) } else { 1.0 }
+                    } else { clip.fade_at(self.playhead) }
+                }) };
             let tint = Color32::from_gray((fade * 255.0).round() as u8);
             ui.painter().image(texture.id(), screen, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), tint);
             // Scrubbing: until the exact still arrives (a static FFmpeg takes half a second to start), show the nearest
@@ -697,6 +702,7 @@ impl StreamCuts {
         let id = id.clone();
         let mut changed = clip.clone();
         let longest = (clip.duration / 2.0).min(10.0);
+        let crossfade_limit = self.project.crossfade_limit(&id);
         let mut speed = clip.speed;
         ui.add_space(6.0);
         ui.menu_button(egui::RichText::new("Clip").font(font::ui(13.0)), |ui| {
@@ -708,6 +714,12 @@ impl StreamCuts {
                 ui.label("Fade out");
                 ui.add(egui::DragValue::new(&mut changed.fade_out).range(0.0..=longest).speed(0.02).fixed_decimals(2).suffix(" s"));
                 ui.end_row();
+                if kind != MediaKind::Audio {
+                    ui.label("Crossfade in");
+                    ui.add(egui::DragValue::new(&mut changed.crossfade_in).range(0.0..=crossfade_limit).speed(0.02).fixed_decimals(2).suffix(" s"))
+                        .on_hover_text("Blend from the previous clip on this track. Its unused source footage supplies the overlap.");
+                    ui.end_row();
+                }
             });
             if kind != MediaKind::Image {
                 ui.separator();
@@ -757,6 +769,10 @@ impl StreamCuts {
             }
             if let Some(target) = self.project.clip_mut(&id) {
                 *target = changed;
+            }
+            if clip.crossfade_in != self.project.clip(&id).unwrap().crossfade_in {
+                let seconds = self.project.clip(&id).unwrap().crossfade_in;
+                self.project.set_crossfade(&id, seconds);
             }
             if speed != clip.speed {
                 self.project.set_speed(&id, speed);

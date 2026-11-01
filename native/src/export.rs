@@ -32,10 +32,12 @@ pub fn arguments(project: &Project, output: &Path) -> Result<Vec<String>, String
     for track in video_tracks.iter().chain(audio_tracks.iter()) {
         for clip in &track.clips {
             let Some(media) = project.media(&clip.media_id) else { continue };
+            let crossfade_out = project.crossfade_after(&clip.id);
+            let crossfade_in = project.crossfade_before(&clip.id).map_or(0.0, |(_, d)| d);
             if media.kind == MediaKind::Image {
-                args.extend(["-loop".into(), "1".into(), "-t".into(), format!("{:.3}", clip.duration)]);
+                args.extend(["-loop".into(), "1".into(), "-t".into(), format!("{:.3}", clip.duration + crossfade_out)]);
             } else {
-                args.extend(["-ss".into(), format!("{:.3}", clip.source_in), "-t".into(), format!("{:.3}", clip.source_length())]);
+                args.extend(["-ss".into(), format!("{:.3}", clip.source_in), "-t".into(), format!("{:.3}", (clip.duration + crossfade_out) * clip.speed)]);
             }
             args.extend(["-i".into(), media.path.to_string_lossy().into_owned()]);
             let shows = track.kind == TrackKind::Video && !track.hidden && media.kind != MediaKind::Audio;
@@ -43,10 +45,11 @@ pub fn arguments(project: &Project, output: &Path) -> Result<Vec<String>, String
                 // Fades work on the picture's alpha, so a clip fades to whatever is below it (black when nothing is).
                 let pace = if (clip.speed - 1.0).abs() < 1e-6 { "PTS-STARTPTS".to_string() } else { format!("(PTS-STARTPTS)/{:.4}", clip.speed) };
                 let mut chain = format!("[{input}:v]{},fps={fps},format=yuva420p,setpts={pace}", clip.picture().filter(w, h));
-                if clip.fade_in > 0.0 {
-                    chain.push_str(&format!(",fade=t=in:st=0:d={:.3}:alpha=1", clip.fade_in));
+                let fade_in = if crossfade_in > 0.0 { crossfade_in } else { clip.fade_in };
+                if fade_in > 0.0 {
+                    chain.push_str(&format!(",fade=t=in:st=0:d={fade_in:.3}:alpha=1"));
                 }
-                if clip.fade_out > 0.0 {
+                if clip.fade_out > 0.0 && crossfade_out == 0.0 {
                     chain.push_str(&format!(",fade=t=out:st={:.3}:d={:.3}:alpha=1", (clip.duration - clip.fade_out).max(0.0), clip.fade_out));
                 }
                 filters.push(format!("{chain},setpts=PTS+{start:.3}/TB[v{input}]", start = clip.start));
@@ -60,10 +63,13 @@ pub fn arguments(project: &Project, output: &Path) -> Result<Vec<String>, String
                 if let Some(tempo) = crate::ffmpeg::atempo(clip.speed) {
                     chain.push_str(&format!(",{tempo}"));
                 }
-                if clip.fade_in > 0.0 {
-                    chain.push_str(&format!(",afade=t=in:st=0:d={:.3}", clip.fade_in));
+                let fade_in = if crossfade_in > 0.0 { crossfade_in } else { clip.fade_in };
+                if fade_in > 0.0 {
+                    chain.push_str(&format!(",afade=t=in:st=0:d={fade_in:.3}"));
                 }
-                if clip.fade_out > 0.0 {
+                if crossfade_out > 0.0 {
+                    chain.push_str(&format!(",afade=t=out:st={:.3}:d={crossfade_out:.3}", clip.duration));
+                } else if clip.fade_out > 0.0 {
                     chain.push_str(&format!(",afade=t=out:st={:.3}:d={:.3}", (clip.duration - clip.fade_out).max(0.0), clip.fade_out));
                 }
                 filters.push(format!("{chain},adelay={delay}|{delay}[a{input}]"));
@@ -279,5 +285,32 @@ mod tests {
         project.tracks[track].muted = true;
         let args = arguments(&project, Path::new("o.mp4")).unwrap();
         assert!(!args.contains(&"[aout]".to_string()));
+    }
+
+    #[test]
+    fn a_crossfade_blends_two_neighboring_clips_in_the_render() {
+        let dir = std::env::temp_dir().join(format!("streamcuts-crossfade-{}", new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let red = dir.join("red.mp4");
+        let blue = dir.join("blue.mp4");
+        for (path, color, duration) in [(&red, "red", "3"), (&blue, "blue", "2")] {
+            assert!(command(&ffmpeg()).args(["-v", "error", "-y", "-f", "lavfi", "-i", &format!("color=c={color}:s=64x64:r=30:d={duration}"), "-pix_fmt", "yuv420p"]).arg(path).status().unwrap().success());
+        }
+        let mut project = Project::new("Blend");
+        project.width = 64;
+        project.height = 64;
+        let red_id = project.add_media(crate::ffmpeg::probe(&red).unwrap());
+        let blue_id = project.add_media(crate::ffmpeg::probe(&blue).unwrap());
+        let outgoing = project.place(&red_id, None, 0.0).unwrap();
+        project.trim_end(&outgoing, 2.0);
+        let incoming = project.place(&blue_id, None, 2.0).unwrap();
+        project.set_crossfade(&incoming, 1.0);
+        let output = dir.join("blend.mp4");
+        let run = start(&project, &output, egui::Context::default()).unwrap();
+        assert_eq!(run.result.recv().unwrap(), Ok(()));
+        let frame = crate::ffmpeg::still(&output, 2.5, 64, 64, crate::project::Picture::default()).unwrap();
+        let pixel = &frame.rgba[4 * (32 * 64 + 32)..][..4];
+        assert!(pixel[0] > 45 && pixel[2] > 45, "both colors should be visible: {pixel:?}");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

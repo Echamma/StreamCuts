@@ -63,6 +63,11 @@ pub struct Clip {
     pub fade_in: f64,
     #[serde(default)]
     pub fade_out: f64,
+    /// Crossfade from the preceding clip on this track, using that clip's unused source tail.
+    #[serde(default)]
+    pub crossfade_in: f64,
+    #[serde(default)]
+    pub crossfade_from: Option<String>,
     #[serde(default)]
     pub framing: Framing,
     #[serde(default)]
@@ -388,6 +393,54 @@ impl Project {
         self.find(clip_id).map(|r| &mut self.tracks[r.track].clips[r.index])
     }
 
+    /// The most this clip can crossfade from its immediate predecessor without reaching past the old source.
+    pub fn crossfade_limit(&self, clip_id: &str) -> f64 {
+        let Some(at) = self.find(clip_id) else { return 0.0 };
+        if self.tracks[at.track].kind != TrackKind::Video || at.index == 0 { return 0.0; }
+        let incoming = &self.tracks[at.track].clips[at.index];
+        let outgoing = &self.tracks[at.track].clips[at.index - 1];
+        if (outgoing.end() - incoming.start).abs() > 0.002 { return 0.0; }
+        let Some(media) = self.media(&outgoing.media_id) else { return 0.0 };
+        if media.kind != MediaKind::Video || self.media(&incoming.media_id).is_none_or(|m| m.kind != MediaKind::Video) { return 0.0; }
+        let tail = (media.max_length() - outgoing.source_in - outgoing.source_length()) / outgoing.speed;
+        tail.max(0.0).min(incoming.duration).min(outgoing.duration).min(3.0)
+    }
+
+    pub fn crossfade_before(&self, clip_id: &str) -> Option<(&Clip, f64)> {
+        let at = self.find(clip_id)?;
+        if at.index == 0 { return None; }
+        let incoming = &self.tracks[at.track].clips[at.index];
+        let outgoing = &self.tracks[at.track].clips[at.index - 1];
+        if incoming.crossfade_from.as_deref() != Some(outgoing.id.as_str()) { return None; }
+        let duration = incoming.crossfade_in.min(self.crossfade_limit(clip_id));
+        (duration > 0.0).then_some((outgoing, duration))
+    }
+
+    pub fn set_crossfade(&mut self, clip_id: &str, seconds: f64) {
+        let Some(at) = self.find(clip_id) else { return };
+        let duration = seconds.clamp(0.0, self.crossfade_limit(clip_id));
+        let from = (duration > 0.0).then(|| self.tracks[at.track].clips[at.index - 1].id.clone());
+        let clip = &mut self.tracks[at.track].clips[at.index];
+        clip.crossfade_in = duration;
+        clip.crossfade_from = from;
+    }
+
+    pub fn crossfade_after(&self, clip_id: &str) -> f64 {
+        let Some(at) = self.find(clip_id) else { return 0.0 };
+        self.tracks[at.track].clips.get(at.index + 1)
+            .and_then(|next| self.crossfade_before(&next.id).map(|(_, d)| d))
+            .unwrap_or(0.0)
+    }
+
+    /// The two clips that should be blended at `t`, if the visible clip is entering with a crossfade.
+    pub fn crossfade_at(&self, t: f64) -> Option<(&Clip, &Media, &Clip, &Media, f64)> {
+        let (incoming, incoming_media) = self.front_clip(t)?;
+        let (outgoing, duration) = self.crossfade_before(&incoming.id)?;
+        if t >= incoming.start + duration { return None; }
+        let outgoing_media = self.media(&outgoing.media_id)?;
+        Some((outgoing, outgoing_media, incoming, incoming_media, (t - incoming.start) / duration))
+    }
+
     /// Adds media, or returns the one already added from the same file.
     pub fn add_media(&mut self, media: Media) -> String {
         if let Some(existing) = self.media.iter().find(|m| m.path == media.path) {
@@ -461,7 +514,7 @@ impl Project {
         };
         let duration = if media.kind == MediaKind::Image { STILL_SECONDS } else { media.duration.max(MIN_CLIP) };
         let start = self.free_start(track, at, duration, None);
-        let clip = Clip { id: new_id(), media_id: media.id.clone(), start, source_in: 0.0, duration, volume: 1.0, fade_in: 0.0, fade_out: 0.0, framing: Framing::Fit, grade: Grade::default(), speed: 1.0 };
+        let clip = Clip { id: new_id(), media_id: media.id.clone(), start, source_in: 0.0, duration, volume: 1.0, fade_in: 0.0, fade_out: 0.0, crossfade_in: 0.0, crossfade_from: None, framing: Framing::Fit, grade: Grade::default(), speed: 1.0 };
         let id = clip.id.clone();
         self.tracks[track].clips.push(clip);
         self.sort_track(track);
@@ -567,6 +620,8 @@ impl Project {
             source_in: if is_still { clip.source_in } else { clip.source_in + left * clip.speed },
             duration: clip.duration - left,
             fade_in: 0.0,
+            crossfade_in: 0.0,
+            crossfade_from: None,
             ..clip.clone()
         };
         let id = right.id.clone();
@@ -754,6 +809,25 @@ mod tests {
         assert!(project.trim_start(&clip, 0.0));
         assert_eq!(project.clip(&clip).unwrap().start, 0.0);
         assert_eq!(project.clip(&clip).unwrap().source_in, 0.0);
+    }
+
+    #[test]
+    fn crossfade_uses_the_previous_clips_unused_source_tail() {
+        let mut project = Project::new("Crossfade");
+        let first = project.add_media(media(MediaKind::Video, 10.0));
+        let second = project.add_media(media(MediaKind::Video, 10.0));
+        let outgoing = project.place(&first, None, 0.0).unwrap();
+        project.trim_end(&outgoing, 8.0);
+        let incoming = project.place(&second, None, 8.0).unwrap();
+        assert_eq!(project.crossfade_limit(&incoming), 2.0);
+        project.set_crossfade(&incoming, 1.0);
+        let (old, _, new, _, progress) = project.crossfade_at(8.5).unwrap();
+        assert_eq!((old.id.as_str(), new.id.as_str()), (outgoing.as_str(), incoming.as_str()));
+        assert!((progress - 0.5).abs() < 1e-9);
+        assert_eq!(project.crossfade_after(&outgoing), 1.0);
+        assert!(project.crossfade_at(9.0).is_none());
+        project.clip_mut(&outgoing).unwrap().source_in = 2.0;
+        assert_eq!(project.crossfade_after(&outgoing), 0.0, "no source handle means no transition");
     }
 
     #[test]

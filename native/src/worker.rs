@@ -14,10 +14,18 @@ use std::sync::{Arc, Mutex};
 /// Which picture a still is: media id with its framing, and frame number.
 pub type StillKey = (String, i64);
 
+/// Outgoing source and blend progress for one exact frame of a crossfade.
+pub struct StillBlend {
+    pub path: PathBuf,
+    pub at: f64,
+    pub picture: Picture,
+    pub progress: f32,
+}
+
 pub enum Job {
     Probe(PathBuf),
     Thumbnail { media_id: String, path: PathBuf, at: f64 },
-    Still { key: StillKey, path: PathBuf, at: f64, width: u32, height: u32, picture: Picture },
+    Still { key: StillKey, path: PathBuf, at: f64, width: u32, height: u32, picture: Picture, blend: Option<StillBlend> },
     /// Waveforms and filmstrips are cached in `cache`.
     Waveform { media_id: String, path: PathBuf, cache: PathBuf },
     Filmstrip { media_id: String, path: PathBuf, duration: f64, cache: PathBuf },
@@ -54,8 +62,14 @@ impl Worker {
         std::thread::spawn(move || {
             while let Ok(mut job) = still_queue.recv() {
                 while let Ok(newer) = still_queue.try_recv() { job = newer; }
-                let Job::Still { key, path, at, width, height, picture } = job else { continue };
-                let result = Done::Still(key, ffmpeg::still(&path, at, width, height, picture));
+                let Job::Still { key, path, at, width, height, picture, blend } = job else { continue };
+                let result = ffmpeg::still(&path, at, width, height, picture).and_then(|incoming| {
+                    if let Some(blend) = blend {
+                        let outgoing = ffmpeg::still(&blend.path, blend.at, width, height, blend.picture)?;
+                        Ok(ffmpeg::blend_frames(&outgoing, &incoming, blend.progress))
+                    } else { Ok(incoming) }
+                });
+                let result = Done::Still(key, result);
                 if still_finished.send(result).is_err() { break; }
                 still_ctx.request_repaint();
             }

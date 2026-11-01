@@ -177,7 +177,7 @@ fn signature(project: &Project) -> u64 {
     for (clip, media) in project.audible_clips() {
         clip.id.hash(&mut hasher);
         media.path.hash(&mut hasher);
-        for value in [clip.start, clip.source_in, clip.duration, clip.fade_in, clip.fade_out, clip.speed] {
+        for value in [clip.start, clip.source_in, clip.duration, clip.fade_in, clip.fade_out, clip.crossfade_in, clip.speed] {
             value.to_bits().hash(&mut hasher);
         }
         clip.volume.to_bits().hash(&mut hasher);
@@ -283,25 +283,28 @@ impl Audio {
         let frame = |t: f64| ((t - origin).max(0.0) * rate as f64).round() as u64;
         let mut voices = Vec::new();
         for (clip, media) in project.audible_clips() {
-            if self.started.contains(&clip.id) || clip.end() <= playhead || clip.start > playhead + LOOKAHEAD {
+            let crossfade_out = project.crossfade_after(&clip.id);
+            let crossfade_in = project.crossfade_before(&clip.id).map_or(0.0, |(_, d)| d);
+            let end = clip.end() + crossfade_out;
+            if self.started.contains(&clip.id) || end <= playhead || clip.start > playhead + LOOKAHEAD {
                 continue;
             }
             let begin = clip.start.max(playhead);
-            let mut decoder = SoundStream::start(&media.path, clip.source_time(begin), clip.end() - begin, clip.speed, rate, channels);
+            let mut decoder = SoundStream::start(&media.path, clip.source_time(begin), end - begin, clip.speed, rate, channels);
             let frames = |seconds: f64| (seconds * rate as f64).round() as u64;
             voices.push(Voice {
                 next: frame(begin),
-                end: frame(clip.end()),
+                end: frame(end),
                 volume: clip.volume,
                 clip_start: ((clip.start - origin) * rate as f64).round() as i64,
-                fade_in: frames(clip.fade_in),
-                fade_out: frames(clip.fade_out),
+                fade_in: frames(if crossfade_in > 0.0 { crossfade_in } else { clip.fade_in }),
+                fade_out: frames(clip.fade_out.max(crossfade_out)),
                 chunks: decoder.take_chunks(),
                 buffer: VecDeque::new(),
                 owed: 0,
                 done: false,
             });
-            self.decoders.push((clip.end(), decoder));
+            self.decoders.push((end, decoder));
             self.started.insert(clip.id.clone());
         }
         if !voices.is_empty() {

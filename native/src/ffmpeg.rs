@@ -106,6 +106,20 @@ pub struct Frame {
     pub rgba: Vec<u8>,
 }
 
+/// The incoming picture fades over the outgoing one at a cut. Both are decoded to the project size.
+pub fn blend_frames(outgoing: &Frame, incoming: &Frame, progress: f32) -> Frame {
+    let progress = progress.clamp(0.0, 1.0);
+    let mut rgba = incoming.rgba.clone();
+    if outgoing.size == incoming.size {
+        for (to, from) in rgba.chunks_exact_mut(4).zip(outgoing.rgba.chunks_exact(4)) {
+            for channel in 0..3 {
+                to[channel] = (from[channel] as f32 * (1.0 - progress) + to[channel] as f32 * progress).round() as u8;
+            }
+        }
+    }
+    Frame { time: incoming.time, size: incoming.size, rgba }
+}
+
 /// The `-ss` for the frame at `at`. FFmpeg starts at the first frame at or after the time it's given, and a frame's
 /// time rounded to milliseconds can land just after it (14/30 s is 0.46667: "0.467" would give frame 15), so this
 /// asks for a millisecond early.
