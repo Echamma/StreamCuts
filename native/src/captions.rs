@@ -6,9 +6,8 @@ use crate::project::{Project, Title};
 use canopy_ui::{CAPTION_FONT, font};
 use egui::{Color32, Painter, Rect, pos2, vec2};
 
-/// Text size, gap below the text, and widest line, as fractions of the frame's height (size, gap) and width.
+/// Text size and widest line, as fractions of the frame's height and width. The gap under captions is the project's.
 const SIZE: f32 = 0.055;
-const BOTTOM: f32 = 0.08;
 const WIDTH: f32 = 0.86;
 /// Outline thickness as a fraction of the text size.
 const OUTLINE: f32 = 0.09;
@@ -16,9 +15,9 @@ const OUTLINE: f32 = 0.09;
 /// against the preview, Nunito ExtraBold needs 1.385 times the size to come out the same width.
 const ASS_SIZE: f32 = 1.385;
 
-/// Draws a caption over a preview picture that fills `screen`.
-pub fn draw(painter: &Painter, screen: Rect, text: &str) {
-    outlined(painter, screen, text, SIZE, |size| pos2(screen.center().x - size.x / 2.0, screen.bottom() - screen.height() * BOTTOM - size.y));
+/// Draws a caption over a preview picture that fills `screen`, `bottom` (a fraction of its height) above the bottom.
+pub fn draw(painter: &Painter, screen: Rect, text: &str, bottom: f32) {
+    outlined(painter, screen, text, SIZE, |size| pos2(screen.center().x - size.x / 2.0, screen.bottom() - screen.height() * bottom - size.y));
 }
 
 /// Draws a title over a preview picture that fills `screen`, centered across and at its height.
@@ -69,7 +68,7 @@ pub fn ass(project: &Project) -> String {
          [Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n",
         font = CAPTION_FONT.0,
         outline = h * SIZE * OUTLINE,
-        bottom = (h * BOTTOM).round(),
+        bottom = (h * project.caption_bottom).round(),
     );
     for caption in &project.captions {
         out.push_str(&format!("Dialogue: 0,{},{},Default,,0,0,0,,{}\n", ass_time(caption.start), ass_time(caption.end), ass_text(&caption.text)));
@@ -103,6 +102,7 @@ mod tests {
         let ass = ass(&project);
         assert!(ass.contains("PlayResX: 1920\nPlayResY: 1080"));
         assert!(ass.contains("Style: Default,Nunito ExtraLight,82,"));
+        assert!(ass.contains(",2,134,134,86,1\n"), "captions sit 8 % up from the bottom");
         assert!(ass.contains("Dialogue: 0,0:00:01.50,0:00:02.76,Default,,0,0,0,,Hello (there)\n"));
         assert!(ass.contains("Dialogue: 0,1:02:05.00,1:02:06.00,Default,,0,0,0,,an hour in\n"));
         let id = project.add_title(2.0);

@@ -475,8 +475,9 @@ impl StreamCuts {
             captions::draw_title(&over_picture, screen, title);
         }
         if let Some(caption) = self.project.caption_at(self.playhead) {
-            captions::draw(&over_picture, screen, &caption.text);
+            captions::draw(&over_picture, screen, &caption.text, self.project.caption_bottom);
         }
+        self.drag_text(ui, screen);
         if self.project.duration() == 0.0 {
             ui.painter().text(screen.center(), Align2::CENTER_CENTER, "Drag media onto the timeline to start", font::ui(14.0), color::INK_MUTED);
         } else if let Some((_, media)) = self.project.front_clip(self.playhead).filter(|(_, media)| !media.path.is_file()) {
@@ -499,6 +500,33 @@ impl StreamCuts {
                 ui.label(egui::RichText::new(format!("{} / {}", timecode(self.playhead, self.project.fps), timecode(self.project.duration(), self.project.fps))).font(font::ui(13.0)).color(color::INK_SOFT));
             });
         });
+    }
+
+    /// Dragging up or down on the picture moves the selected title, or with a caption selected, where captions sit.
+    fn drag_text(&mut self, ui: &mut Ui, screen: Rect) {
+        let [id] = self.timeline.selection.as_slice() else { return };
+        let title = self.project.titles.iter().any(|t| &t.id == id);
+        if !title && !self.project.captions.iter().any(|c| &c.id == id) {
+            return;
+        }
+        let id = id.clone();
+        let response = ui.interact(screen, ui.scope_id().with("drag-text"), Sense::drag())
+            .on_hover_cursor(egui::CursorIcon::ResizeVertical)
+            .on_hover_text(if title { "Drag up or down to move the title" } else { "Drag up or down to move the captions" });
+        if response.drag_started() {
+            self.history.record(&self.project);
+        }
+        let dy = response.drag_delta().y / screen.height();
+        if response.dragged() && dy != 0.0 {
+            if title {
+                if let Some(title) = self.project.title_mut(&id) {
+                    title.y = (title.y + dy).clamp(0.05, 0.95);
+                }
+            } else {
+                self.project.caption_bottom = (self.project.caption_bottom - dy).clamp(0.02, 0.8);
+            }
+            self.edited();
+        }
     }
 
     fn timeline_bar(&mut self, ui: &mut Ui) {

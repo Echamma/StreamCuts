@@ -210,6 +210,9 @@ pub struct Project {
     /// Exports even out the loudness to what social video expects (-14 LUFS).
     #[serde(default)]
     pub even_loudness: bool,
+    /// The gap under captions, as a fraction of the frame's height (shorts often want them higher).
+    #[serde(default = "caption_gap")]
+    pub caption_bottom: f32,
     #[serde(default)]
     pub saved_at: u64,
 }
@@ -227,6 +230,10 @@ pub struct Title {
     /// Text size as a fraction of the frame's height.
     #[serde(default = "title_size")]
     pub size: f32,
+}
+
+fn caption_gap() -> f32 {
+    0.08
 }
 
 fn middle() -> f32 {
@@ -307,6 +314,7 @@ impl Project {
             captions: Vec::new(),
             titles: Vec::new(),
             even_loudness: false,
+            caption_bottom: caption_gap(),
             saved_at: 0,
         }
     }
