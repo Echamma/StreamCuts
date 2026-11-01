@@ -695,6 +695,9 @@ impl StreamCuts {
             let word = self.project.caption_words.then(|| caption.word_at(self.playhead)).flatten();
             captions::draw(&over_picture, screen, &caption.text, word, self.project.caption_bottom);
         }
+        if self.preview.scopes.on {
+            self.preview.scopes.draw(ui.painter(), Rect::from_min_size(pos2(area.right() - 268.0, area.top() + 8.0), vec2(256.0, 210.0)));
+        }
         self.drag_text(ui, screen);
         if self.project.duration() == 0.0 {
             ui.painter().text(screen.center(), Align2::CENTER_CENTER, "Drag media onto the timeline to start", font::ui(14.0), color::INK_MUTED);
@@ -716,6 +719,15 @@ impl StreamCuts {
                     self.seek(self.project.duration());
                 }
                 ui.label(egui::RichText::new(format!("{} / {}", timecode(self.playhead, self.project.fps), timecode(self.project.duration(), self.project.fps))).font(font::ui(13.0)).color(color::INK_SOFT));
+                ui.add_space(12.0);
+                let on = self.preview.scopes.on;
+                if ui.selectable_label(on, "Scopes").on_hover_text("Histogram and luma waveform of the picture").clicked() {
+                    self.preview.scopes.on = !on;
+                    // Measured from the next picture shown: ask for the one here again.
+                    if !on {
+                        self.preview.reset();
+                    }
+                }
             });
         });
     }

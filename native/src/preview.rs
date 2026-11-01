@@ -4,6 +4,7 @@
 
 use crate::ffmpeg::{self, Frame, FrameStream};
 use crate::project::{Clip, Media, MediaKind, Picture, Project, TrackKind};
+use crate::scopes::Scopes;
 use crate::worker::{Job, StillBlend, StillKey, Worker};
 use egui::{ColorImage, TextureHandle, TextureOptions};
 use std::collections::HashMap;
@@ -68,6 +69,8 @@ pub struct Preview {
     /// Editing proxies by media id: playback reads these instead of the originals. Paused stills (and exports) still
     /// come from the originals, at full quality.
     pub proxies: HashMap<String, PathBuf>,
+    /// The histogram and waveform of what's shown, while they're on.
+    pub scopes: Scopes,
 }
 
 /// What playback reads for `media`: its editing proxy when it has one.
@@ -84,7 +87,8 @@ pub fn decode_size(project: &Project) -> (u32, u32) {
 }
 
 impl Preview {
-    fn show(texture: &mut Option<TextureHandle>, ctx: &egui::Context, frame: &Frame) {
+    fn show(texture: &mut Option<TextureHandle>, scopes: &mut Scopes, ctx: &egui::Context, frame: &Frame) {
+        scopes.update(ctx, frame);
         let image = ColorImage::from_rgba_unmultiplied(frame.size, &frame.rgba);
         match texture {
             Some(texture) => texture.set(image, TextureOptions::LINEAR),
@@ -98,7 +102,7 @@ impl Preview {
         self.waiting = None;
         if let Ok(frame) = frame {
             if self.playing.is_none() {
-                Self::show(&mut self.texture, ctx, &frame);
+                Self::show(&mut self.texture, &mut self.scopes, ctx, &frame);
                 self.shown = Some(key);
             }
         }
@@ -146,14 +150,14 @@ impl Preview {
                 self.transition.as_mut().unwrap().advance(old_source, 0.5 * outgoing.speed / project.fps as f64);
                 if let (Some(old), Some(new)) = (self.transition.as_ref().and_then(|p| p.last.as_ref()), self.playing.as_ref().and_then(|p| p.last.as_ref())) {
                     let frame = ffmpeg::blend_frames(old, new, progress as f32);
-                    Self::show(&mut self.texture, ctx, &frame);
+                    Self::show(&mut self.texture, &mut self.scopes, ctx, &frame);
                     self.shown = None;
                 }
             } else {
                 let had_transition = self.transition.take().is_some();
                 if changed || had_transition {
                     if let Some(frame) = self.playing.as_ref().and_then(|p| p.last.as_ref()) {
-                        Self::show(&mut self.texture, ctx, frame);
+                        Self::show(&mut self.texture, &mut self.scopes, ctx, frame);
                         self.shown = None;
                     }
                 }

@@ -10,6 +10,7 @@ pub mod ffmpeg;
 pub mod filmstrip;
 pub mod preview;
 pub mod project;
+pub mod scopes;
 pub mod storage;
 pub mod timeline;
 pub mod transcribe;
