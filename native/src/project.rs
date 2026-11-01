@@ -696,6 +696,25 @@ impl Project {
     }
 
     /// Moves a clip's start edge to `start`, keeping its end where it is.
+    /// Slips a clip: it stays where it is on the timeline and plays a different stretch of its source, from
+    /// `source_in` (kept inside the source). Pictures have nothing to slip. Returns whether it changed.
+    pub fn slip(&mut self, clip_id: &str, source_in: f64) -> bool {
+        let Some(at) = self.find(clip_id) else { return false };
+        let clip = &self.tracks[at.track].clips[at.index];
+        let Some(media) = self.media(&clip.media_id) else { return false };
+        if media.kind == MediaKind::Image {
+            return false;
+        }
+        let latest = (media.max_length() - clip.source_length()).max(0.0);
+        let source_in = source_in.clamp(0.0, latest);
+        let clip = &mut self.tracks[at.track].clips[at.index];
+        if (clip.source_in - source_in).abs() < 1e-9 {
+            return false;
+        }
+        clip.source_in = source_in;
+        true
+    }
+
     pub fn trim_start(&mut self, clip_id: &str, start: f64) -> bool {
         let Some(at) = self.find(clip_id) else { return false };
         let clip = self.tracks[at.track].clips[at.index].clone();
@@ -965,6 +984,20 @@ mod tests {
         assert!(project.crossfade_at(9.0).is_none());
         project.clip_mut(&outgoing).unwrap().source_in = 2.0;
         assert_eq!(project.crossfade_after(&outgoing), 0.0, "no source handle means no transition");
+    }
+
+    #[test]
+    fn slipping_changes_the_source_not_the_place() {
+        let (mut project, video) = project_with(10.0);
+        let clip = project.place(&video, None, 2.0).unwrap();
+        project.trim_end(&clip, 6.0); // plays source 0..4 at 2..6
+        assert!(project.slip(&clip, 3.0));
+        let slipped = project.clip(&clip).unwrap();
+        assert_eq!((slipped.start, slipped.duration, slipped.source_in), (2.0, 4.0, 3.0));
+        project.slip(&clip, 9.0);
+        assert_eq!(project.clip(&clip).unwrap().source_in, 6.0, "the source ends at 10");
+        project.slip(&clip, -2.0);
+        assert_eq!(project.clip(&clip).unwrap().source_in, 0.0);
     }
 
     #[test]

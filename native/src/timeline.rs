@@ -31,6 +31,8 @@ enum Gesture {
     Move { clip: String, grab: f64 },
     TrimStart(String),
     TrimEnd(String),
+    /// Alt-drag: the clip stays put and plays another stretch of its source (where the drag began, from `source_in`).
+    Slip { clip: String, from: f64, source_in: f64 },
 }
 
 pub struct Timeline {
@@ -288,9 +290,13 @@ impl Timeline {
                 }
             }
             if response.drag_started() {
-                if let Some(p) = response.interact_pointer_pos() {
+                // Where the button went down: a quick drag has already left a clip's edge when the drag begins.
+                if let Some(p) = ui.input(|i| i.pointer.press_origin()).or(response.interact_pointer_pos()) {
                     history.record(project);
-                    self.gesture = Some(if (p.x - clip_rect.left()).abs() <= EDGE {
+                    let alt = ui.input(|i| i.modifiers.alt);
+                    self.gesture = Some(if alt {
+                        Gesture::Slip { clip: clip.id.clone(), from: t_of(p.x), source_in: clip.source_in }
+                    } else if (p.x - clip_rect.left()).abs() <= EDGE {
                         Gesture::TrimStart(clip.id.clone())
                     } else if (p.x - clip_rect.right()).abs() <= EDGE {
                         Gesture::TrimEnd(clip.id.clone())
@@ -415,6 +421,11 @@ impl Timeline {
                             let track = if hovered >= 0.0 && (hovered as usize) < project.tracks.len() && project.tracks[hovered as usize].kind == project.tracks[at.track].kind && !project.tracks[hovered as usize].locked { hovered as usize } else { at.track };
                             output.changed |= project.move_clip(clip, start, track);
                         }
+                    }
+                    // Dragging right shows earlier footage, as the picture follows the pointer.
+                    Gesture::Slip { clip, from, source_in } => {
+                        let speed = project.clip(clip).map_or(1.0, |c| c.speed);
+                        output.changed |= project.slip(clip, source_in - (t - from) * speed);
                     }
                     Gesture::TrimStart(clip) => output.changed |= project.trim_start(clip, self.snap(project, Some(clip), playhead, t)),
                     Gesture::TrimEnd(clip) => output.changed |= project.trim_end(clip, self.snap(project, Some(clip), playhead, t)),
