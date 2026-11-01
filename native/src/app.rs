@@ -2,6 +2,7 @@
 //! Canopy, or alone in StreamCuts' own window.
 
 use crate::audio::Audio;
+use crate::captions;
 use crate::export::{self, Export};
 use crate::ffmpeg::Frame;
 use crate::preview::{Clock, Preview};
@@ -37,6 +38,10 @@ pub struct StreamCuts {
     edited_at: Option<Instant>,
     worker: Worker,
     looks: Looks,
+    /// Transcriptions still running.
+    transcribing: usize,
+    /// Typing in a caption: one undo step for the whole edit.
+    caption_typing: bool,
     /// Media whose waveform and filmstrip have been asked for.
     looks_asked: HashSet<String>,
     pending: HashMap<PathBuf, Pending>,
@@ -66,6 +71,8 @@ impl StreamCuts {
             edited_at: None,
             worker: Worker::new(ctx.clone()),
             looks: Looks::default(),
+            transcribing: 0,
+            caption_typing: false,
             looks_asked: HashSet::new(),
             pending: HashMap::new(),
             preview: Preview::default(),
@@ -158,6 +165,19 @@ impl StreamCuts {
                     self.looks.filmstrips.insert(id, strip);
                 }
                 Done::Waveform(_, Err(_)) | Done::Filmstrip(_, Err(_)) => {}
+                Done::Captions { from, to, result } => {
+                    self.transcribing = self.transcribing.saturating_sub(1);
+                    match result {
+                        Ok(captions) => {
+                            let count = captions.len();
+                            self.history.record(&self.project);
+                            self.project.add_captions(from, to, captions);
+                            self.edited();
+                            self.toasts.push(if count == 0 { "No speech found for captions".into() } else { format!("Added {count} caption{}", if count == 1 { "" } else { "s" }) });
+                        }
+                        Err(error) => self.toasts.push(error),
+                    }
+                }
             }
         }
     }
@@ -387,6 +407,9 @@ impl StreamCuts {
         if let (Some(texture), false) = (&self.preview.texture, self.preview.blank) {
             ui.painter().image(texture.id(), screen, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
         }
+        if let Some(caption) = self.project.caption_at(self.playhead) {
+            captions::draw(&ui.painter().with_clip_rect(screen), screen, &caption.text);
+        }
         if self.project.duration() == 0.0 {
             ui.painter().text(screen.center(), Align2::CENTER_CENTER, "Drag media onto the timeline to start", font::ui(14.0), color::INK_MUTED);
         }
@@ -427,7 +450,15 @@ impl StreamCuts {
                 self.project.add_track(crate::project::TrackKind::Video);
                 self.edited();
             }
+            let label = if self.transcribing > 0 { "Making captions…" } else { "Make captions from speech (the selected clips, or every clip with sound)" };
+            if icon_button(ui, Icon::Captions, label, self.transcribing > 0).clicked() && self.transcribing == 0 {
+                self.make_captions();
+            }
+            if self.transcribing > 0 {
+                ui.label(egui::RichText::new("Making captions…").font(font::ui(12.0)).color(color::INK_MUTED));
+            }
             self.volume_control(ui);
+            self.caption_editor(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if icon_button(ui, Icon::ZoomIn, "Zoom in (Ctrl+wheel)", false).clicked() {
                     self.timeline.pps = (self.timeline.pps * 1.5).min(600.0);
@@ -437,6 +468,43 @@ impl StreamCuts {
                 }
             });
         });
+    }
+
+    /// Transcribes the selected clips with sound, or every clip with sound when none is selected.
+    fn make_captions(&mut self) {
+        let selected: Vec<_> = self.project.audible_clips().into_iter().filter(|(clip, _)| self.timeline.selection.contains(&clip.id)).collect();
+        let clips = if selected.is_empty() { self.project.audible_clips() } else { selected };
+        if clips.is_empty() {
+            self.toasts.push("Add a clip with sound to make captions".into());
+            return;
+        }
+        for (clip, media) in clips {
+            self.worker.send(Job::Transcribe { path: media.path.clone(), from: clip.source_in, length: clip.duration, at: clip.start });
+            self.transcribing += 1;
+        }
+        self.toasts.push("Making captions; the first time takes a minute while the speech model loads".into());
+    }
+
+    /// One selected caption gets its text in the timeline bar, to fix what the transcription heard.
+    fn caption_editor(&mut self, ui: &mut Ui) {
+        let [id] = self.timeline.selection.as_slice() else { return };
+        let Some(index) = self.project.captions.iter().position(|c| &c.id == id) else { return };
+        let mut text = self.project.captions[index].text.clone();
+        ui.add_space(10.0);
+        let field = ui.add(egui::TextEdit::singleline(&mut text).desired_width(ui.available_width().clamp(120.0, 420.0) - 80.0).hint_text("Caption"));
+        if field.changed() {
+            if field.gained_focus() || !self.caption_typing {
+                self.history.record(&self.project);
+                self.caption_typing = true;
+            }
+            self.project.captions[index].text = text;
+            // Word timings no longer match edited text; captions show as whole lines.
+            self.project.captions[index].words.clear();
+            self.edited();
+        }
+        if field.lost_focus() {
+            self.caption_typing = false;
+        }
     }
 
     /// One selected clip with sound gets a volume slider in the timeline bar.

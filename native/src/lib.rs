@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod audio;
+pub mod captions;
 pub mod export;
 pub mod ffmpeg;
 pub mod filmstrip;
@@ -9,6 +10,7 @@ pub mod preview;
 pub mod project;
 pub mod storage;
 pub mod timeline;
+pub mod transcribe;
 pub mod waveform;
 pub mod worker;
 

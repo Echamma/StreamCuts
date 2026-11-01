@@ -102,8 +102,31 @@ pub struct Project {
     pub media: Vec<Media>,
     /// Top to bottom as the timeline shows them: video tracks first (the top one is in front), then audio.
     pub tracks: Vec<Track>,
+    /// Captions in timeline time, in order. They stay put when clips move.
+    #[serde(default)]
+    pub captions: Vec<Caption>,
     #[serde(default)]
     pub saved_at: u64,
+}
+
+/// A line of captions: shown from `start` to `end` on the timeline, with each word's timing for styles that follow
+/// the speech.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Caption {
+    pub id: String,
+    pub start: f64,
+    pub end: f64,
+    pub text: String,
+    #[serde(default)]
+    pub words: Vec<Word>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Word {
+    pub text: String,
+    pub start: f64,
+    pub end: f64,
 }
 
 /// A clip found on the timeline, with where it lives.
@@ -131,8 +154,21 @@ impl Project {
                 Track { id: new_id(), kind: TrackKind::Video, name: "Video 1".into(), muted: false, hidden: false, clips: Vec::new() },
                 Track { id: new_id(), kind: TrackKind::Audio, name: "Audio 1".into(), muted: false, hidden: false, clips: Vec::new() },
             ],
+            captions: Vec::new(),
             saved_at: 0,
         }
+    }
+
+    /// Puts new captions for the stretch `from`..`to` of the timeline, replacing the ones there.
+    pub fn add_captions(&mut self, from: f64, to: f64, captions: Vec<Caption>) {
+        self.captions.retain(|c| c.end <= from || c.start >= to);
+        self.captions.extend(captions);
+        self.captions.sort_by(|a, b| a.start.total_cmp(&b.start));
+    }
+
+    /// The caption showing at timeline time `t`.
+    pub fn caption_at(&self, t: f64) -> Option<&Caption> {
+        self.captions.iter().find(|c| t >= c.start && t < c.end)
     }
 
     pub fn media(&self, id: &str) -> Option<&Media> {
@@ -326,8 +362,11 @@ impl Project {
         ids.iter().filter_map(|id| self.split(id, t)).collect()
     }
 
+    /// Deletes clips and captions by id.
     pub fn delete(&mut self, clip_ids: &[String]) -> usize {
-        let mut removed = 0;
+        let captions = self.captions.len();
+        self.captions.retain(|c| !clip_ids.contains(&c.id));
+        let mut removed = captions - self.captions.len();
         for track in &mut self.tracks {
             let before = track.clips.len();
             track.clips.retain(|c| !clip_ids.contains(&c.id));
@@ -507,6 +546,20 @@ mod tests {
         assert!(project.clip(&b).is_none());
         let starts: Vec<f64> = [&a, &c, &d].iter().map(|id| project.clip(id).unwrap().start).collect();
         assert_eq!(starts, vec![0.0, 15.0, 30.0], "c moves left by b's length; the other track stays");
+    }
+
+    #[test]
+    fn new_captions_replace_the_ones_in_their_stretch() {
+        let (mut project, _) = project_with(10.0);
+        let caption = |id: &str, start: f64, end: f64| Caption { id: id.into(), start, end, text: id.into(), words: Vec::new() };
+        project.add_captions(0.0, 30.0, vec![caption("a", 1.0, 2.0), caption("b", 12.0, 14.0), caption("c", 25.0, 27.0)]);
+        project.add_captions(10.0, 20.0, vec![caption("d", 11.0, 13.0)]);
+        let ids: Vec<&str> = project.captions.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "d", "c"]);
+        assert_eq!(project.caption_at(12.5).map(|c| c.id.as_str()), Some("d"));
+        assert_eq!(project.caption_at(5.0), None);
+        assert_eq!(project.delete(&["d".to_string()]), 1);
+        assert_eq!(project.captions.len(), 2);
     }
 
     #[test]

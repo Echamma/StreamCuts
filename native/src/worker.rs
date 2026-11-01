@@ -3,7 +3,8 @@
 
 use crate::ffmpeg::{self, Frame};
 use crate::filmstrip::{self, Film};
-use crate::project::Media;
+use crate::transcribe;
+use crate::project::{Caption, Media};
 use crate::waveform::{self, Waveform};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -18,6 +19,8 @@ pub enum Job {
     Still { key: StillKey, path: PathBuf, at: f64, width: u32, height: u32 },
     Waveform { media_id: String, path: PathBuf },
     Filmstrip { media_id: String, path: PathBuf, duration: f64 },
+    /// Captions for `length` seconds of `path` from `from`, for a clip that starts at `at` on the timeline.
+    Transcribe { path: PathBuf, from: f64, length: f64, at: f64 },
 }
 
 pub enum Done {
@@ -26,6 +29,8 @@ pub enum Done {
     Still(StillKey, Result<Frame, String>),
     Waveform(String, Result<Waveform, String>),
     Filmstrip(String, Result<Film, String>),
+    /// Captions for the timeline stretch `from`..`to`.
+    Captions { from: f64, to: f64, result: Result<Vec<Caption>, String> },
 }
 
 pub struct Worker {
@@ -57,6 +62,10 @@ impl Worker {
                         }
                         Job::Filmstrip { media_id, path, duration } => {
                             aside(&finished, &ctx, move || Done::Filmstrip(media_id, filmstrip::decode(&path, duration)));
+                            continue;
+                        }
+                        Job::Transcribe { path, from, length, at } => {
+                            aside(&finished, &ctx, move || Done::Captions { from: at, to: at + length, result: transcribe::captions(&path, from, length, at) });
                             continue;
                         }
                     };

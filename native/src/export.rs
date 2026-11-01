@@ -1,13 +1,18 @@
 //! Export renders the whole timeline with one FFmpeg run: every clip is an input, video clips are laid over a black
-//! canvas bottom track first, sound from every audible clip is delayed to its place and mixed.
+//! canvas bottom track first, sound from every audible clip is delayed to its place and mixed, and captions are burned
+//! in last from an ASS file (FFmpeg runs in a folder holding it and the caption font, so no paths need escaping).
 
+use crate::captions;
 use crate::ffmpeg::{command, ffmpeg};
-use crate::project::{MediaKind, Project, TrackKind};
+use crate::project::{MediaKind, Project, TrackKind, new_id};
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+/// The captions file an export's FFmpeg reads from its working folder.
+const CAPTIONS: &str = "captions.ass";
 
 /// The FFmpeg arguments that render `project` to an MP4 at `output`. Errors when there is nothing to export.
 pub fn arguments(project: &Project, output: &Path) -> Result<Vec<String>, String> {
@@ -54,7 +59,8 @@ pub fn arguments(project: &Project, output: &Path) -> Result<Vec<String>, String
             input += 1;
         }
     }
-    filters.push(format!("[base{base}]format=yuv420p[vout]"));
+    let captions = if project.captions.is_empty() { String::new() } else { format!("subtitles={CAPTIONS}:fontsdir=.,") };
+    filters.push(format!("[base{base}]{captions}format=yuv420p[vout]"));
     if !audio_labels.is_empty() {
         filters.push(format!("{}amix=inputs={}:normalize=0:duration=longest[aout]", audio_labels.join(""), audio_labels.len()));
     }
@@ -88,7 +94,23 @@ pub fn start(project: &Project, output: &Path, ctx: egui::Context) -> Result<Exp
     let progress = Arc::new(AtomicU32::new(0));
     let cancel = Arc::new(AtomicBool::new(false));
     let (send, result) = std::sync::mpsc::channel();
-    let mut child = command(&ffmpeg()).args(&args).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("FFmpeg couldn't start ({e})."))?;
+    // Captions: the ASS file and its font go in a folder of their own that FFmpeg runs in.
+    let folder = if project.captions.is_empty() {
+        None
+    } else {
+        let folder = std::env::temp_dir().join(format!("streamcuts-export-{}", new_id()));
+        std::fs::create_dir_all(&folder)
+            .and_then(|_| std::fs::write(folder.join(CAPTIONS), captions::ass(project)))
+            .and_then(|_| std::fs::write(folder.join(captions::FONT_FILE), captions::font_bytes()))
+            .map_err(|e| format!("Couldn't get the captions ready ({e})."))?;
+        Some(folder)
+    };
+    let mut ffmpeg_run = command(&ffmpeg());
+    ffmpeg_run.args(&args).stdout(Stdio::piped()).stderr(Stdio::piped());
+    if let Some(folder) = &folder {
+        ffmpeg_run.current_dir(folder);
+    }
+    let mut child = ffmpeg_run.spawn().map_err(|e| format!("FFmpeg couldn't start ({e})."))?;
     let (progress_out, cancel_in) = (progress.clone(), cancel.clone());
     let output = output.to_path_buf();
     std::thread::spawn(move || {
@@ -120,6 +142,9 @@ pub fn start(project: &Project, output: &Path, ctx: egui::Context) -> Result<Exp
                 _ => Err(format!("Export failed: {}", errors.lines().last().unwrap_or("FFmpeg stopped"))),
             }
         };
+        if let Some(folder) = folder {
+            let _ = std::fs::remove_dir_all(folder);
+        }
         let _ = send.send(outcome);
         ctx.request_repaint();
     });
@@ -185,6 +210,9 @@ mod tests {
         let upper = project.add_track(TrackKind::Video);
         let still_clip = project.place(&picture, Some(upper), 1.0).unwrap();
         project.trim_end(&still_clip, 2.5);
+        let caption = crate::project::Caption { id: new_id(), start: 0.2, end: 2.0, text: "Burned in".into(), words: Vec::new() };
+        project.add_captions(0.0, 2.5, vec![caption]);
+        assert!(arguments(&project, Path::new("o.mp4")).unwrap().iter().any(|a| a.contains("subtitles=captions.ass:fontsdir=.,format=yuv420p[vout]")));
         let output = dir.join("out.mp4");
         let run = start(&project, &output, egui::Context::default()).unwrap();
         assert_eq!(run.result.recv().unwrap(), Ok(()));

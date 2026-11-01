@@ -72,6 +72,8 @@ pub fn timecode(seconds: f64, fps: u32) -> String {
     }
 }
 
+const CAPTION_FILL: Color32 = Color32::from_rgb(0x3A, 0x3F, 0x52);
+
 fn clip_fill(kind: MediaKind) -> Color32 {
     match kind {
         MediaKind::Video => Color32::from_rgb(0x6E, 0x3A, 0x5E),
@@ -242,6 +244,32 @@ impl Timeline {
                     });
                     if !selected {
                         self.selection = vec![clip.id.clone()];
+                    }
+                }
+            }
+        }
+
+        // Captions, in a lane under the tracks: click to select (then edit or delete them like clips).
+        if !project.captions.is_empty() {
+            let lane = row(project.tracks.len() + 1);
+            painter.text(pos2(lane.left() + 10.0, lane.top() + 14.0), Align2::LEFT_CENTER, "Captions", font::ui(12.0), color::INK_SOFT);
+            for caption in &project.captions {
+                let block = Rect::from_min_max(pos2(x_of(caption.start), lane.top() + 6.0), pos2(x_of(caption.end).max(x_of(caption.start) + 3.0), lane.top() + 34.0));
+                let visible = block.intersect(lanes);
+                if visible.width() <= 0.0 {
+                    continue;
+                }
+                let selected = self.selection.contains(&caption.id);
+                lane_painter.rect_filled(block, 5, CAPTION_FILL);
+                lane_painter.rect_stroke(block, 5, Stroke::new(if selected { 2.0 } else { 1.0 }, if selected { color::SELECT_INK } else { color::HAIRLINE_STRONG }), StrokeKind::Inside);
+                lane_painter.with_clip_rect(visible.shrink(3.0)).text(pos2(block.left() + 6.0, block.center().y), Align2::LEFT_CENTER, &caption.text, font::ui(11.0), color::INK);
+                let response = ui.interact(visible, ui.scope_id().with(("caption", &caption.id)), Sense::click()).on_hover_text(&caption.text);
+                if response.clicked() {
+                    clicked_clip = true;
+                    if ui.input(|i| i.modifiers.shift) {
+                        if selected { self.selection.retain(|id| id != &caption.id) } else { self.selection.push(caption.id.clone()) }
+                    } else {
+                        self.selection = vec![caption.id.clone()];
                     }
                 }
             }
