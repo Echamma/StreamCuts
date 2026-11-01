@@ -336,6 +336,14 @@ impl StreamCuts {
                 if projects.clicked() {
                     self.show_projects = !self.show_projects;
                 }
+                let even = self.project.even_loudness;
+                let hint = "Even out the loudness when exporting, to the -14 LUFS social apps play at";
+                let toggle = if narrow { icon_button(ui, Icon::Audio, hint, even) } else { pill(ui, "Even loudness", None, even).on_hover_text(hint) };
+                if toggle.clicked() {
+                    self.history.record(&self.project);
+                    self.project.even_loudness = !even;
+                    self.edited();
+                }
             });
         });
     }

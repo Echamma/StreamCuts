@@ -75,7 +75,14 @@ pub fn arguments(project: &Project, output: &Path) -> Result<Vec<String>, String
     let captions = if project.has_text() { format!("subtitles={CAPTIONS}:fontsdir=.,") } else { String::new() };
     filters.push(format!("[base{base}]{captions}format=yuv420p[vout]"));
     if !audio_labels.is_empty() {
-        filters.push(format!("{}amix=inputs={}:normalize=0:duration=longest[aout]", audio_labels.join(""), audio_labels.len()));
+        let mix = format!("{}amix=inputs={}:normalize=0:duration=longest", audio_labels.join(""), audio_labels.len());
+        if project.even_loudness {
+            // One pass of loudnorm to -14 LUFS (what social apps play at); it works at 192 kHz, so come back to 48.
+            filters.push(format!("{mix}[mixed]"));
+            filters.push("[mixed]loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000[aout]".into());
+        } else {
+            filters.push(format!("{mix}[aout]"));
+        }
     }
     args.extend(["-filter_complex".into(), filters.join(";"), "-map".into(), "[vout]".into()]);
     if !audio_labels.is_empty() {
@@ -201,7 +208,11 @@ mod tests {
         let still_at = graph.find("setpts=PTS+3.000/TB").unwrap();
         assert!(video_at < still_at, "the lower track is laid down before the upper one");
         assert!(graph.contains("adelay=2000|2000"));
-        assert!(graph.contains("amix=inputs=2"));
+        assert!(graph.contains("amix=inputs=2:normalize=0:duration=longest[aout]"));
+        project.even_loudness = true;
+        let args = arguments(&project, Path::new("C:/out/cut.mp4")).unwrap();
+        let graph = &args[args.iter().position(|a| a == "-filter_complex").unwrap() + 1];
+        assert!(graph.contains("[mixed]loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000[aout]"));
         assert!(joined.ends_with("-t 30.000 -progress pipe:1 -nostats C:/out/cut.mp4"));
     }
 
@@ -226,6 +237,7 @@ mod tests {
         let upper = project.add_track(TrackKind::Video);
         let still_clip = project.place(&picture, Some(upper), 1.0).unwrap();
         project.trim_end(&still_clip, 2.5);
+        project.even_loudness = true;
         let caption = crate::project::Caption { id: new_id(), start: 0.2, end: 2.0, text: "Burned in".into(), words: Vec::new() };
         project.add_captions(0.0, 2.5, vec![caption]);
         assert!(arguments(&project, Path::new("o.mp4")).unwrap().iter().any(|a| a.contains("subtitles=captions.ass:fontsdir=.,format=yuv420p[vout]")));

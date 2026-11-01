@@ -207,6 +207,9 @@ pub struct Project {
     /// Text placed on the picture for a while: titles, labels, end cards.
     #[serde(default)]
     pub titles: Vec<Title>,
+    /// Exports even out the loudness to what social video expects (-14 LUFS).
+    #[serde(default)]
+    pub even_loudness: bool,
     #[serde(default)]
     pub saved_at: u64,
 }
@@ -281,6 +284,7 @@ impl Project {
             ],
             captions: Vec::new(),
             titles: Vec::new(),
+            even_loudness: false,
             saved_at: 0,
         }
     }
