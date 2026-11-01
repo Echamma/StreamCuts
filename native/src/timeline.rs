@@ -144,6 +144,7 @@ impl Timeline {
             painter.text(pos2(r.left() + 10.0, r.top() + 14.0), Align2::LEFT_CENTER, &track.name, font::ui(12.0), color::INK_SOFT);
         }
         let mut toggles = Vec::new();
+        let mut locks = Vec::new();
         for (index, track) in project.tracks.iter().enumerate() {
             let r = row(index);
             let buttons = Rect::from_min_size(pos2(r.left() + 6.0, r.top() + 22.0), vec2(HEADER - 12.0, 30.0));
@@ -156,8 +157,24 @@ impl Timeline {
                     if track.kind == TrackKind::Video && icon_button(ui, Icon::Video, if track.hidden { "Show" } else { "Hide" }, track.hidden).clicked() {
                         toggles.push((index, false));
                     }
+                    if icon_button(ui, Icon::Lock, if track.locked { "Unlock" } else { "Lock: keep its clips as they are" }, track.locked).clicked() {
+                        locks.push(index);
+                    }
                 });
             });
+        }
+        if !locks.is_empty() {
+            history.record(project);
+            for index in locks {
+                let track = &mut project.tracks[index];
+                track.locked = !track.locked;
+                // What's selected on a track that locks is let go.
+                if track.locked {
+                    let ids: Vec<String> = track.clips.iter().map(|c| c.id.clone()).collect();
+                    self.selection.retain(|id| !ids.contains(id));
+                }
+            }
+            output.changed = true;
         }
         if !toggles.is_empty() {
             history.record(project);
@@ -229,10 +246,15 @@ impl Timeline {
             lane_painter.with_clip_rect(visible.shrink(2.0)).text(pos2(clip_rect.left() + 6.0, clip_rect.top() + 8.0), Align2::LEFT_CENTER, &media.name, font::ui(11.0), color::INK);
             lane_painter.rect_stroke(clip_rect, 6, Stroke::new(if selected { 2.0 } else { 1.0 }, if selected { color::SELECT_INK } else { color::HAIRLINE_STRONG }), StrokeKind::Inside);
 
-            let response = ui.interact(visible, ui.scope_id().with(("clip", &clip.id)), Sense::click_and_drag());
+            // A locked track's clips are shown dimmed and take no clicks or drags.
+            let locked = project.tracks[track_index].locked;
+            if locked {
+                lane_painter.rect_filled(clip_rect, 6, color::VEIL_STRONG);
+            }
+            let response = ui.interact(visible, ui.scope_id().with(("clip", &clip.id)), if locked { Sense::hover() } else { Sense::click_and_drag() });
             let near_edge = |x: f32| (x - clip_rect.left()).abs() <= EDGE || (x - clip_rect.right()).abs() <= EDGE;
             if response.hovered() {
-                ui.ctx().set_cursor_icon(if pointer.map(|p| near_edge(p.x)).unwrap_or(false) { CursorIcon::ResizeHorizontal } else { CursorIcon::Grab });
+                ui.ctx().set_cursor_icon(if locked { CursorIcon::NotAllowed } else if pointer.map(|p| near_edge(p.x)).unwrap_or(false) { CursorIcon::ResizeHorizontal } else { CursorIcon::Grab });
             }
             if response.clicked() {
                 clicked_clip = true;
@@ -367,7 +389,7 @@ impl Timeline {
                             let snapped_end = self.snap(project, Some(clip), playhead, start + duration) - duration;
                             let start = if (snapped_start - start).abs() <= (snapped_end - start).abs() { snapped_start } else { snapped_end };
                             let hovered = row_at(p.y);
-                            let track = if hovered >= 0.0 && (hovered as usize) < project.tracks.len() && project.tracks[hovered as usize].kind == project.tracks[at.track].kind { hovered as usize } else { at.track };
+                            let track = if hovered >= 0.0 && (hovered as usize) < project.tracks.len() && project.tracks[hovered as usize].kind == project.tracks[at.track].kind && !project.tracks[hovered as usize].locked { hovered as usize } else { at.track };
                             output.changed |= project.move_clip(clip, start, track);
                         }
                     }
@@ -410,8 +432,10 @@ impl Timeline {
                 let at = self.snap(project, None, playhead, t_of(p.x).max(0.0));
                 let hovered = row_at(p.y);
                 let track = (hovered >= 0.0 && (hovered as usize) < project.tracks.len()).then_some(hovered as usize);
+                // Nothing lands on a locked track.
+                let locked = track.is_some_and(|t| project.tracks[t].locked);
                 // take_payload clears whatever payload there is, even one of another type: ask for the right one.
-                if let Some(drag) = DragAndDrop::has_payload_of_type::<MediaDrag>(ui.ctx()).then(|| DragAndDrop::take_payload::<MediaDrag>(ui.ctx())).flatten() {
+                if let Some(drag) = DragAndDrop::has_payload_of_type::<MediaDrag>(ui.ctx()).then(|| DragAndDrop::take_payload::<MediaDrag>(ui.ctx())).flatten().filter(|_| !locked) {
                     history.record(project);
                     if let Some(id) = project.place(&drag.0, track, at) {
                         self.selection = vec![id];

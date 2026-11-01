@@ -275,6 +275,9 @@ pub struct Track {
     pub muted: bool,
     #[serde(default)]
     pub hidden: bool,
+    /// Locked tracks keep their clips as they are: nothing on them can be picked, moved, trimmed or dropped onto.
+    #[serde(default)]
+    pub locked: bool,
     pub clips: Vec<Clip>,
 }
 
@@ -400,8 +403,8 @@ impl Project {
             fps: 30,
             media: Vec::new(),
             tracks: vec![
-                Track { id: new_id(), kind: TrackKind::Video, name: "Video 1".into(), muted: false, hidden: false, clips: Vec::new() },
-                Track { id: new_id(), kind: TrackKind::Audio, name: "Audio 1".into(), muted: false, hidden: false, clips: Vec::new() },
+                Track { id: new_id(), kind: TrackKind::Video, name: "Video 1".into(), muted: false, hidden: false, locked: false, clips: Vec::new() },
+                Track { id: new_id(), kind: TrackKind::Audio, name: "Audio 1".into(), muted: false, hidden: false, locked: false, clips: Vec::new() },
             ],
             captions: Vec::new(),
             titles: Vec::new(),
@@ -559,7 +562,7 @@ impl Project {
             TrackKind::Video => format!("Video {}", count + 1),
             TrackKind::Audio => format!("Audio {}", count + 1),
         };
-        let track = Track { id: new_id(), kind, name, muted: false, hidden: false, clips: Vec::new() };
+        let track = Track { id: new_id(), kind, name, muted: false, hidden: false, locked: false, clips: Vec::new() };
         match kind {
             TrackKind::Video => {
                 self.tracks.insert(0, track);
@@ -725,7 +728,8 @@ impl Project {
 
     /// Splits every clip under timeline time `t` (when nothing is selected, the split button cuts across all tracks).
     pub fn split_all(&mut self, t: f64) -> Vec<String> {
-        let ids: Vec<String> = self.tracks.iter().flat_map(|track| track.clips.iter().filter(|c| c.contains(t)).map(|c| c.id.clone())).collect();
+        let ids: Vec<String> = self.tracks.iter().filter(|track| !track.locked)
+            .flat_map(|track| track.clips.iter().filter(|c| c.contains(t)).map(|c| c.id.clone())).collect();
         ids.iter().filter_map(|id| self.split(id, t)).collect()
     }
 
@@ -916,6 +920,19 @@ mod tests {
         assert!(project.crossfade_at(9.0).is_none());
         project.clip_mut(&outgoing).unwrap().source_in = 2.0;
         assert_eq!(project.crossfade_after(&outgoing), 0.0, "no source handle means no transition");
+    }
+
+    #[test]
+    fn locked_tracks_keep_their_clips_whole() {
+        let (mut project, video) = project_with(10.0);
+        let clip = project.place(&video, None, 0.0).unwrap();
+        let at = project.find(&clip).unwrap().track;
+        project.tracks[at].locked = true;
+        assert!(project.split_all(5.0).is_empty());
+        project.tracks[at].locked = false;
+        assert_eq!(project.split_all(5.0).len(), 1);
+        let json = serde_json::to_string(&project).unwrap();
+        assert!(json.contains("\"locked\":false"));
     }
 
     #[test]
