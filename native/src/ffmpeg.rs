@@ -105,6 +105,23 @@ pub fn probe(path: &Path) -> Result<Media, String> {
     }
 }
 
+/// A stretch of a file's integrated loudness (EBU R128), in LUFS, at `speed` like the clip plays it. Reads the whole
+/// stretch; call it off the UI thread.
+pub fn loudness(path: &Path, from: f64, length: f64) -> Result<f64, String> {
+    let output = command(&ffmpeg())
+        .args(["-hide_banner", "-nostats", "-ss", &format!("{:.3}", seek_to(from)), "-t", &format!("{length:.3}"), "-i"])
+        .arg(path)
+        .args(["-vn", "-af", "ebur128", "-f", "null", "-"])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("FFmpeg couldn't start ({e})."))?;
+    // The summary at the end: "Integrated loudness:\n    I:         -23.0 LUFS".
+    let text = String::from_utf8_lossy(&output.stderr);
+    let summary = text.rsplit("Integrated loudness:").next().filter(|_| text.contains("Integrated loudness:")).ok_or("This clip has no sound to measure.")?;
+    summary.lines().find_map(|line| line.trim().strip_prefix("I:")?.trim().strip_suffix("LUFS")?.trim().parse::<f64>().ok())
+        .ok_or_else(|| "FFmpeg didn't report the loudness.".into())
+}
+
 /// Where the picture cuts to another scene, in source seconds: FFmpeg's scene score above `threshold` (0-1; the web
 /// StreamCuts uses 0.3). Reads the whole file at a small size; call it off the UI thread.
 pub fn scenes(path: &Path, threshold: f64) -> Result<Vec<f64>, String> {
@@ -381,6 +398,9 @@ mod tests {
         assert!((media.duration - 2.0).abs() < 0.1, "duration {}", media.duration);
         assert!(media.has_audio && media.width == 320 && media.height == 180);
         let frame = still(&clip, 1.0, 160, 90, Picture::default()).unwrap();
+        // A 440 Hz sine at FFmpeg's default amplitude measures around -21 LUFS; its loudness is a finite number.
+        let lufs = loudness(&clip, 0.0, 2.0).unwrap();
+        assert!((-40.0..-5.0).contains(&lufs), "{lufs} LUFS");
         // The generated clip is one continuous test pattern: no cuts.
         assert!(scenes(&clip, 0.3).unwrap().is_empty());
         assert_eq!(frame.rgba.len(), 160 * 90 * 4);

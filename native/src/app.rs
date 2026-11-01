@@ -194,6 +194,26 @@ impl StreamCuts {
                         Err(error) => self.toasts.push(error),
                     }
                 }
+                Done::Loudness { clip, normalize, result } => match result {
+                    Ok(lufs) => {
+                        let volume = self.project.clip(&clip).map_or(1.0, |c| c.volume as f64);
+                        // The measure is of the source; the clip plays it at its volume.
+                        let heard = lufs + 20.0 * volume.max(1e-6).log10();
+                        if normalize {
+                            // To -14 LUFS, within what the volume slider allows (0-200 %).
+                            let target = (volume * 10f64.powf((-14.0 - heard) / 20.0)).clamp(0.0, 2.0);
+                            self.history.record(&self.project);
+                            if let Some(c) = self.project.clip_mut(&clip) {
+                                c.volume = target as f32;
+                            }
+                            self.edited();
+                            self.toasts.push(format!("Was {heard:.1} LUFS; volume set to {:.0} %", target * 100.0));
+                        } else {
+                            self.toasts.push(format!("This clip plays at {heard:.1} LUFS (social apps play at -14)"));
+                        }
+                    }
+                    Err(error) => self.toasts.push(error),
+                },
                 Done::Scenes { media_id, result } => {
                     self.scene_jobs.retain(|id| id != &media_id);
                     match result {
@@ -773,9 +793,22 @@ impl StreamCuts {
         let mut speed = clip.speed;
         ui.add_space(6.0);
         let mut find_scenes = false;
+        let mut loudness = None;
         ui.menu_button(egui::RichText::new("Clip").font(font::ui(13.0)), |ui| {
             ui.set_min_width(230.0);
             // As in the web StreamCuts (right-click a clip, Detect scenes): cuts in its video become timeline markers.
+            if self.project.media(&clip.media_id).is_some_and(|m| m.has_audio) {
+                for (label, normalize, hint) in [
+                    ("Measure loudness", false, "Its integrated loudness (EBU R128), as it plays"),
+                    ("Normalize to -14 LUFS", true, "Set its volume so it plays at the loudness social apps use"),
+                ] {
+                    if ui.button(label).on_hover_text(hint).clicked() {
+                        loudness = Some(normalize);
+                        ui.close();
+                    }
+                }
+                ui.separator();
+            }
             if kind == MediaKind::Video {
                 let busy = self.scene_jobs.contains(&clip.media_id);
                 if ui.add_enabled(!busy, egui::Button::new(if busy { "Finding scenes…" } else { "Detect scenes" }))
@@ -876,6 +909,10 @@ impl StreamCuts {
         }
         if !ui.input(|i| i.pointer.any_down()) {
             self.adjusting = false;
+        }
+        if let (Some(normalize), Some(path)) = (loudness, media_path.clone()) {
+            self.worker.send(Job::Loudness { clip: clip.id.clone(), path, from: clip.source_in, length: clip.source_length(), normalize });
+            self.toasts.push("Measuring loudness…".into());
         }
         if let (true, Some(path)) = (find_scenes, media_path) {
             self.scene_jobs.push(clip.media_id.clone());
