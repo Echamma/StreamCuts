@@ -62,9 +62,8 @@ impl Preview {
 
     /// A still the worker finished.
     pub fn still_done(&mut self, ctx: &egui::Context, key: StillKey, frame: Result<Frame, String>) {
-        if self.waiting.as_ref() == Some(&key) {
-            self.waiting = None;
-        }
+        if self.waiting.as_ref() != Some(&key) { return; }
+        self.waiting = None;
         if let Ok(frame) = frame {
             if self.playing.is_none() {
                 self.show(ctx, &frame);
@@ -84,12 +83,14 @@ impl Preview {
             self.blank = true;
             self.playing = None;
             self.shown = None;
+            self.waiting = None;
             return;
         };
         self.blank = false;
         let source = clip.source_time(t);
         let (width, height) = decode_size(project);
         if playing && media.kind == MediaKind::Video {
+            self.waiting = None;
             let restart = match &self.playing {
                 Some(p) => p.clip_id != clip.id || p.picture != clip.picture() || p.speed != clip.speed || (source - p.shown).abs() > 0.75,
                 None => true,
@@ -127,7 +128,7 @@ impl Preview {
         let picture = clip.picture();
         let framed = if picture == Picture::default() { media.id.clone() } else { format!("{} {picture:?}", media.id) };
         let key: StillKey = (framed, frame_number);
-        if self.shown.as_ref() != Some(&key) && self.waiting.is_none() {
+        if self.shown.as_ref() != Some(&key) && self.waiting.as_ref() != Some(&key) {
             let at = if media.kind == MediaKind::Image { 0.0 } else { frame_number as f64 / project.fps as f64 };
             worker.send(Job::Still { key: key.clone(), path: media.path.clone(), at, width, height, picture });
             self.waiting = Some(key);
@@ -171,6 +172,7 @@ impl Preview {
     /// Forgets the picture so the next update fetches it again (after the project's shape changes).
     pub fn reset(&mut self) {
         self.shown = None;
+        self.waiting = None;
         self.playing = None;
         self.next = None;
         self.texture = None;
@@ -201,5 +203,23 @@ impl Clock {
     }
     pub fn now(&self) -> f64 {
         self.from + self.since.elapsed().as_secs_f64()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_old_still_cannot_replace_the_requested_frame() {
+        let ctx = egui::Context::default();
+        let mut preview = Preview { waiting: Some(("clip".into(), 12)), ..Default::default() };
+        let frame = || Frame { time: 0.0, size: [1, 1], rgba: vec![0, 0, 0, 255] };
+        preview.still_done(&ctx, ("clip".into(), 11), Ok(frame()));
+        assert_eq!(preview.waiting, Some(("clip".into(), 12)));
+        assert!(preview.texture.is_none());
+        preview.still_done(&ctx, ("clip".into(), 12), Ok(frame()));
+        assert!(preview.waiting.is_none());
+        assert_eq!(preview.shown, Some(("clip".into(), 12)));
     }
 }

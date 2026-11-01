@@ -36,13 +36,27 @@ pub enum Done {
 
 pub struct Worker {
     jobs: Sender<Job>,
+    stills: Sender<Job>,
     pub done: Receiver<Done>,
 }
 
 impl Worker {
     pub fn new(ctx: egui::Context) -> Self {
         let (jobs, queue) = channel::<Job>();
+        let (stills, still_queue) = channel::<Job>();
         let (finished, done) = channel();
+        // One decoder handles exact preview frames. While it works, keep only the latest requested frame;
+        // scrubbing across a long timeline must not queue every intermediate FFmpeg process.
+        let (still_finished, still_ctx) = (finished.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            while let Ok(mut job) = still_queue.recv() {
+                while let Ok(newer) = still_queue.try_recv() { job = newer; }
+                let Job::Still { key, path, at, width, height, picture } = job else { continue };
+                let result = Done::Still(key, ffmpeg::still(&path, at, width, height, picture));
+                if still_finished.send(result).is_err() { break; }
+                still_ctx.request_repaint();
+            }
+        });
         let queue = Arc::new(Mutex::new(queue));
         for _ in 0..3 {
             let (queue, finished, ctx) = (queue.clone(), finished.clone(), ctx.clone());
@@ -55,7 +69,7 @@ impl Worker {
                     let result = match job {
                         Job::Probe(path) => Done::Probed(path.clone(), ffmpeg::probe(&path)),
                         Job::Thumbnail { media_id, path, at } => Done::Thumbnail(media_id, ffmpeg::thumbnail(&path, at)),
-                        Job::Still { key, path, at, width, height, picture } => Done::Still(key, ffmpeg::still(&path, at, width, height, picture)),
+                        Job::Still { .. } => continue,
                         // Reading a long file through takes a while: it gets a thread of its own, so stills don't wait.
                         Job::Waveform { media_id, path, cache } => {
                             aside(&finished, &ctx, move || Done::Waveform(media_id, waveform::cached(&path, &cache)));
@@ -77,11 +91,14 @@ impl Worker {
                 }
             });
         }
-        Self { jobs, done }
+        Self { jobs, stills, done }
     }
 
     pub fn send(&self, job: Job) {
-        let _ = self.jobs.send(job);
+        match job {
+            job @ Job::Still { .. } => { let _ = self.stills.send(job); }
+            job => { let _ = self.jobs.send(job); }
+        }
     }
 }
 
