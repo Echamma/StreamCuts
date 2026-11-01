@@ -177,7 +177,7 @@ fn signature(project: &Project) -> u64 {
     for (clip, media) in project.audible_clips() {
         clip.id.hash(&mut hasher);
         media.path.hash(&mut hasher);
-        for value in [clip.start, clip.source_in, clip.duration, clip.fade_in, clip.fade_out] {
+        for value in [clip.start, clip.source_in, clip.duration, clip.fade_in, clip.fade_out, clip.speed] {
             value.to_bits().hash(&mut hasher);
         }
         clip.volume.to_bits().hash(&mut hasher);
@@ -287,7 +287,7 @@ impl Audio {
                 continue;
             }
             let begin = clip.start.max(playhead);
-            let mut decoder = SoundStream::start(&media.path, clip.source_time(begin), clip.end() - begin, rate, channels);
+            let mut decoder = SoundStream::start(&media.path, clip.source_time(begin), clip.end() - begin, clip.speed, rate, channels);
             let frames = |seconds: f64| (seconds * rate as f64).round() as u64;
             voices.push(Voice {
                 next: frame(begin),
@@ -453,20 +453,32 @@ mod tests {
         assert!(made.success());
         let mut project = Project::new("Tone");
         let id = project.add_media(crate::ffmpeg::probe(&tone).unwrap());
+        // Played at 1.5x: the sound clock still keeps wall time; FFmpeg just reads faster.
         project.place(&id, None, 0.0).unwrap();
         for clip in project.tracks.iter_mut().flat_map(|track| track.clips.iter_mut()) {
             clip.volume = 0.001;
+            clip.speed = 1.5;
+            clip.duration /= 1.5;
         }
         let mut audio = Audio::default();
         assert!(audio.play(&project, 0.5), "{:?}", audio.failed);
-        let started = Instant::now();
-        while started.elapsed() < Duration::from_millis(1500) {
+        let tick = |audio: &mut Audio| {
             let now = audio.now().unwrap();
             assert!(audio.update(&project, now), "the sound stopped at {now:.3}");
             std::thread::sleep(Duration::from_millis(16));
+        };
+        // The clock holds still until the first sound arrives (pre-roll), then keeps wall time.
+        let cued = Instant::now();
+        while audio.now().unwrap() <= 0.5 && cued.elapsed() < Duration::from_secs(3) {
+            tick(&mut audio);
         }
-        let (now, expected) = (audio.now().unwrap(), 0.5 + started.elapsed().as_secs_f64());
-        assert!((now - expected).abs() < 0.2, "sound clock at {now:.3}, wall clock at {expected:.3}");
+        let (started, from) = (Instant::now(), audio.now().unwrap());
+        assert!(from > 0.5, "the sound never started");
+        while started.elapsed() < Duration::from_millis(1200) {
+            tick(&mut audio);
+        }
+        let (now, expected) = (audio.now().unwrap(), from + started.elapsed().as_secs_f64());
+        assert!((now - expected).abs() < 0.1, "sound clock at {now:.3}, wall clock at {expected:.3}");
         {
             let mix = audio.mix();
             assert_eq!(mix.voices.len(), 1);

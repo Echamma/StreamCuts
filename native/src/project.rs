@@ -67,7 +67,17 @@ pub struct Clip {
     pub framing: Framing,
     #[serde(default)]
     pub grade: Grade,
+    /// How fast the source plays: 2 is twice as fast (the clip covers twice the source in its length).
+    #[serde(default = "normal_speed")]
+    pub speed: f64,
 }
+
+fn normal_speed() -> f64 {
+    1.0
+}
+
+/// The slowest and fastest a clip can play.
+pub const SPEEDS: std::ops::RangeInclusive<f64> = 0.25..=4.0;
 
 /// A clip's color, as FFmpeg's `eq` takes it: brightness from -1 to 1 (0 leaves it), contrast and saturation as
 /// multipliers (1 leaves them).
@@ -146,7 +156,11 @@ impl Clip {
     }
     /// The source time shown at timeline time `t`.
     pub fn source_time(&self, t: f64) -> f64 {
-        self.source_in + (t - self.start)
+        self.source_in + (t - self.start) * self.speed
+    }
+    /// How much of the source the clip covers, in source seconds.
+    pub fn source_length(&self) -> f64 {
+        self.duration * self.speed
     }
     pub fn contains(&self, t: f64) -> bool {
         t >= self.start && t < self.end()
@@ -397,7 +411,7 @@ impl Project {
         };
         let duration = if media.kind == MediaKind::Image { STILL_SECONDS } else { media.duration.max(MIN_CLIP) };
         let start = self.free_start(track, at, duration, None);
-        let clip = Clip { id: new_id(), media_id: media.id.clone(), start, source_in: 0.0, duration, volume: 1.0, fade_in: 0.0, fade_out: 0.0, framing: Framing::Fit, grade: Grade::default() };
+        let clip = Clip { id: new_id(), media_id: media.id.clone(), start, source_in: 0.0, duration, volume: 1.0, fade_in: 0.0, fade_out: 0.0, framing: Framing::Fit, grade: Grade::default(), speed: 1.0 };
         let id = clip.id.clone();
         self.tracks[track].clips.push(clip);
         self.sort_track(track);
@@ -442,15 +456,30 @@ impl Project {
         let clip = self.tracks[at.track].clips[at.index].clone();
         let previous_end = self.tracks[at.track].clips.iter().filter(|c| c.end() <= clip.start + 1e-9 && c.id != clip.id).map(Clip::end).fold(0.0, f64::max);
         let is_still = self.media(&clip.media_id).map(|m| m.kind == MediaKind::Image).unwrap_or(false);
-        let earliest = if is_still { previous_end } else { previous_end.max(clip.start - clip.source_in) };
+        let earliest = if is_still { previous_end } else { previous_end.max(clip.start - clip.source_in / clip.speed) };
         let start = start.clamp(earliest, clip.end() - MIN_CLIP);
         let delta = start - clip.start;
         let c = &mut self.tracks[at.track].clips[at.index];
         c.start = start;
         c.duration -= delta;
         if !is_still {
-            c.source_in += delta;
+            c.source_in += delta * c.speed;
         }
+        true
+    }
+
+    /// Changes how fast a clip plays, keeping the stretch of source it shows: it gets shorter when faster and longer
+    /// when slower, though never into the next clip on its track (then it shows less of the source).
+    pub fn set_speed(&mut self, clip_id: &str, speed: f64) -> bool {
+        let Some(at) = self.find(clip_id) else { return false };
+        let clip = self.tracks[at.track].clips[at.index].clone();
+        let speed = speed.clamp(*SPEEDS.start(), *SPEEDS.end());
+        let next_start = self.tracks[at.track].clips.iter().filter(|c| c.start >= clip.end() - 1e-9 && c.id != clip.id).map(|c| c.start).fold(f64::INFINITY, f64::min);
+        let c = &mut self.tracks[at.track].clips[at.index];
+        c.duration = (clip.source_length() / speed).min(next_start - clip.start).max(MIN_CLIP);
+        c.speed = speed;
+        c.fade_in = c.fade_in.min(c.duration / 2.0);
+        c.fade_out = c.fade_out.min(c.duration / 2.0);
         true
     }
 
@@ -459,7 +488,7 @@ impl Project {
         let Some(at) = self.find(clip_id) else { return false };
         let clip = self.tracks[at.track].clips[at.index].clone();
         let next_start = self.tracks[at.track].clips.iter().filter(|c| c.start >= clip.end() - 1e-9 && c.id != clip.id).map(|c| c.start).fold(f64::INFINITY, f64::min);
-        let source_left = self.media(&clip.media_id).map(|m| m.max_length() - clip.source_in).unwrap_or(f64::INFINITY);
+        let source_left = self.media(&clip.media_id).map(|m| (m.max_length() - clip.source_in) / clip.speed).unwrap_or(f64::INFINITY);
         let latest = next_start.min(clip.start + source_left);
         let end = end.clamp(clip.start + MIN_CLIP, latest);
         self.tracks[at.track].clips[at.index].duration = end - clip.start;
@@ -479,7 +508,7 @@ impl Project {
         let right = Clip {
             id: new_id(),
             start: t,
-            source_in: if is_still { clip.source_in } else { clip.source_in + left },
+            source_in: if is_still { clip.source_in } else { clip.source_in + left * clip.speed },
             duration: clip.duration - left,
             fade_in: 0.0,
             ..clip.clone()
@@ -707,6 +736,24 @@ mod tests {
         assert!(project.has_text());
         assert_eq!(project.delete(&[id]), 1);
         assert_eq!(project.duration(), 10.0);
+    }
+
+    #[test]
+    fn speed_keeps_the_source_and_respects_the_next_clip() {
+        let (mut project, video) = project_with(10.0);
+        let a = project.place(&video, None, 0.0).unwrap();
+        let b = project.place(&video, None, 12.0).unwrap();
+        assert!(project.set_speed(&a, 2.0));
+        let clip = project.clip(&a).unwrap().clone();
+        assert_eq!((clip.duration, clip.source_time(2.0)), (5.0, 4.0));
+        assert!(project.set_speed(&a, 0.5));
+        assert_eq!(project.clip(&a).unwrap().duration, 12.0, "slower would run into b at 12 s: it stops there");
+        // Splitting and trimming a fast clip move the source by twice the timeline.
+        project.set_speed(&b, 2.0);
+        let right = project.split(&b, 13.0).unwrap();
+        assert_eq!(project.clip(&right).unwrap().source_in, 2.0);
+        project.trim_start(&right, 13.5);
+        assert_eq!(project.clip(&right).unwrap().source_in, 3.0);
     }
 
     #[test]

@@ -14,6 +14,7 @@ const PRELOAD: f64 = 1.0;
 struct Playing {
     clip_id: String,
     picture: Picture,
+    speed: f64,
     stream: FrameStream,
     ahead: Option<Frame>,
     shown: f64,
@@ -22,8 +23,8 @@ struct Playing {
 impl Playing {
     fn start(project: &Project, clip: &Clip, media: &Media, source: f64) -> Self {
         let (width, height) = decode_size(project);
-        let stream = FrameStream::start(&media.path, source, project.fps, width, height, clip.picture());
-        Self { clip_id: clip.id.clone(), picture: clip.picture(), stream, ahead: None, shown: source }
+        let stream = FrameStream::start(&media.path, source, project.fps, width, height, clip.picture(), clip.speed);
+        Self { clip_id: clip.id.clone(), picture: clip.picture(), speed: clip.speed, stream, ahead: None, shown: source }
     }
 }
 
@@ -86,14 +87,14 @@ impl Preview {
         let (width, height) = decode_size(project);
         if playing && media.kind == MediaKind::Video {
             let restart = match &self.playing {
-                Some(p) => p.clip_id != clip.id || p.picture != clip.picture() || (source - p.shown).abs() > 0.75,
+                Some(p) => p.clip_id != clip.id || p.picture != clip.picture() || p.speed != clip.speed || (source - p.shown).abs() > 0.75,
                 None => true,
             };
             if restart {
-                let preloaded = self.next.take().filter(|next| next.clip_id == clip.id && next.picture == clip.picture() && (source - next.shown).abs() <= 0.75);
+                let preloaded = self.next.take().filter(|next| next.clip_id == clip.id && next.picture == clip.picture() && next.speed == clip.speed && (source - next.shown).abs() <= 0.75);
                 self.playing = Some(preloaded.unwrap_or_else(|| Playing::start(project, clip, media, source)));
             }
-            let half_frame = 0.5 / project.fps as f64;
+            let half_frame = 0.5 * clip.speed / project.fps as f64;
             let mut latest = None;
             if let Some(p) = &mut self.playing {
                 loop {

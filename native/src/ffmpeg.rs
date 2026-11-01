@@ -113,6 +113,24 @@ fn seek_to(at: f64) -> String {
     format!("{:.3}", (at - 0.001).max(0.0))
 }
 
+/// FFmpeg's `atempo` for a speed: one step only goes from 0.5 to 2, so bigger changes chain several.
+pub fn atempo(speed: f64) -> Option<String> {
+    if (speed - 1.0).abs() < 1e-6 {
+        return None;
+    }
+    let (mut left, mut steps) = (speed, Vec::new());
+    while left > 2.0 {
+        steps.push("atempo=2".to_string());
+        left /= 2.0;
+    }
+    while left < 0.5 {
+        steps.push("atempo=0.5".to_string());
+        left /= 0.5;
+    }
+    steps.push(format!("atempo={left:.4}"));
+    Some(steps.join(","))
+}
+
 pub(crate) fn scale_filter(width: u32, height: u32) -> String {
     Framing::Fit.filter(width, height)
 }
@@ -218,7 +236,8 @@ pub struct FrameStream {
 }
 
 impl FrameStream {
-    pub fn start(path: &Path, from: f64, fps: u32, width: u32, height: u32, picture: Picture) -> Self {
+    /// `speed` plays the source faster or slower; frame times stay in source seconds.
+    pub fn start(path: &Path, from: f64, fps: u32, width: u32, height: u32, picture: Picture, speed: f64) -> Self {
         // Start on a frame, so each frame's time is exactly the source time it shows.
         let from = (from * fps as f64 - 1e-6).ceil().max(0.0) / fps as f64;
         let mut command = command(&ffmpeg());
@@ -226,7 +245,7 @@ impl FrameStream {
             .args(["-v", "error", "-ss", &seek_to(from)])
             .arg("-i")
             .arg(path)
-            .args(["-an", "-vf", &format!("fps={fps},{}", picture.filter(width, height)), "-pix_fmt", "rgba", "-f", "rawvideo", "pipe:1"]);
+            .args(["-an", "-vf", &format!("setpts=(PTS-STARTPTS)/{speed:.4},fps={fps},{}", picture.filter(width, height)), "-pix_fmt", "rgba", "-f", "rawvideo", "pipe:1"]);
         let frame_bytes = (width * height * 4) as usize;
         let (ffmpeg, frames) = Background::start(command, 6, move |mut stdout, sender| {
             for index in 0.. {
@@ -234,7 +253,7 @@ impl FrameStream {
                 if stdout.read_exact(&mut rgba).is_err() {
                     break;
                 }
-                let frame = Frame { time: from + index as f64 / fps as f64, size: [width as usize, height as usize], rgba };
+                let frame = Frame { time: from + index as f64 * speed / fps as f64, size: [width as usize, height as usize], rgba };
                 if sender.send(frame).is_err() {
                     break;
                 }
@@ -244,21 +263,25 @@ impl FrameStream {
     }
 }
 
-/// Sound decoded from a source time for `length` seconds, as interleaved f32 samples at the output's rate and channel
-/// count, for playback. Dropping it stops FFmpeg.
+/// Sound decoded from a source time for `length` seconds of playback at `speed`, as interleaved f32 samples at the
+/// output's rate and channel count. Dropping it stops FFmpeg.
 pub struct SoundStream {
     _ffmpeg: Background,
     pub chunks: Receiver<Vec<f32>>,
 }
 
 impl SoundStream {
-    pub fn start(path: &Path, from: f64, length: f64, rate: u32, channels: u16) -> Self {
+    pub fn start(path: &Path, from: f64, length: f64, speed: f64, rate: u32, channels: u16) -> Self {
         let mut command = command(&ffmpeg());
         command
             .args(["-v", "error", "-ss", &format!("{from:.3}")])
             .arg("-i")
             .arg(path)
-            .args(["-t", &format!("{length:.3}"), "-vn", "-ac", &channels.to_string(), "-ar", &rate.to_string(), "-f", "f32le", "pipe:1"]);
+            .args(["-t", &format!("{:.3}", length * speed), "-vn"]);
+        if let Some(tempo) = atempo(speed) {
+            command.args(["-af", &tempo]);
+        }
+        command.args(["-ac", &channels.to_string(), "-ar", &rate.to_string(), "-f", "f32le", "pipe:1"]);
         let (ffmpeg, chunks) = Background::start(command, 32, |mut stdout, sender| {
             let mut bytes = vec![0u8; 4096 * 4];
             // A read can end partway through a sample: those bytes wait at the front for the rest.
@@ -292,6 +315,14 @@ impl SoundStream {
 mod tests {
     use super::*;
 
+    #[test]
+    fn big_speed_changes_chain_atempo() {
+        assert_eq!(atempo(1.0), None);
+        assert_eq!(atempo(1.5).as_deref(), Some("atempo=1.5000"));
+        assert_eq!(atempo(4.0).as_deref(), Some("atempo=2,atempo=2.0000"));
+        assert_eq!(atempo(0.25).as_deref(), Some("atempo=0.5,atempo=0.5000"));
+    }
+
     /// Needs FFmpeg on PATH: makes a 2-second clip with sound, then reads it back.
     #[test]
     fn probes_and_decodes_a_generated_clip() {
@@ -316,7 +347,7 @@ mod tests {
         let spread = graded.rgba.chunks(4).map(|p| p[0].max(p[1]).max(p[2]) - p[0].min(p[1]).min(p[2])).max().unwrap();
         assert!(spread <= 6, "colors left in a gray picture: {spread}");
         // Streamed frames carry their real source time: each looks like the still at its time, not its neighbors'.
-        let stream = FrameStream::start(&clip, 0.5, 30, 160, 90, Picture::default());
+        let stream = FrameStream::start(&clip, 0.5, 30, 160, 90, Picture::default(), 1.0);
         let frames: Vec<Frame> = stream.frames.iter().take(16).collect();
         assert!((frames[0].time - 0.5).abs() < 1e-9 && frames[0].rgba.len() == 160 * 90 * 4);
         for frame in [&frames[0], &frames[15]] {
@@ -329,7 +360,7 @@ mod tests {
         }
         drop(stream);
         // 1.5 s of stereo at 48 kHz from 0.25 s in, give or take a packet.
-        let mut sound = SoundStream::start(&clip, 0.25, 1.5, 48_000, 2);
+        let mut sound = SoundStream::start(&clip, 0.25, 1.5, 1.0, 48_000, 2);
         let samples: usize = sound.take_chunks().iter().map(|chunk| chunk.len()).sum();
         assert!(samples % 2 == 0 && (samples as i64 - 144_000).abs() < 4_000, "{samples} samples");
         drop(sound);

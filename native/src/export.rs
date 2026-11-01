@@ -35,13 +35,14 @@ pub fn arguments(project: &Project, output: &Path) -> Result<Vec<String>, String
             if media.kind == MediaKind::Image {
                 args.extend(["-loop".into(), "1".into(), "-t".into(), format!("{:.3}", clip.duration)]);
             } else {
-                args.extend(["-ss".into(), format!("{:.3}", clip.source_in), "-t".into(), format!("{:.3}", clip.duration)]);
+                args.extend(["-ss".into(), format!("{:.3}", clip.source_in), "-t".into(), format!("{:.3}", clip.source_length())]);
             }
             args.extend(["-i".into(), media.path.to_string_lossy().into_owned()]);
             let shows = track.kind == TrackKind::Video && !track.hidden && media.kind != MediaKind::Audio;
             if shows {
                 // Fades work on the picture's alpha, so a clip fades to whatever is below it (black when nothing is).
-                let mut chain = format!("[{input}:v]{},fps={fps},format=yuva420p,setpts=PTS-STARTPTS", clip.picture().filter(w, h));
+                let pace = if (clip.speed - 1.0).abs() < 1e-6 { "PTS-STARTPTS".to_string() } else { format!("(PTS-STARTPTS)/{:.4}", clip.speed) };
+                let mut chain = format!("[{input}:v]{},fps={fps},format=yuva420p,setpts={pace}", clip.picture().filter(w, h));
                 if clip.fade_in > 0.0 {
                     chain.push_str(&format!(",fade=t=in:st=0:d={:.3}:alpha=1", clip.fade_in));
                 }
@@ -56,6 +57,9 @@ pub fn arguments(project: &Project, output: &Path) -> Result<Vec<String>, String
             if media.has_audio && !track.muted && !hidden_video && clip.volume > 0.0 {
                 let delay = (clip.start * 1000.0).round() as u64;
                 let mut chain = format!("[{input}:a]asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo,volume={:.3}", clip.volume);
+                if let Some(tempo) = crate::ffmpeg::atempo(clip.speed) {
+                    chain.push_str(&format!(",{tempo}"));
+                }
                 if clip.fade_in > 0.0 {
                     chain.push_str(&format!(",afade=t=in:st=0:d={:.3}", clip.fade_in));
                 }
@@ -217,6 +221,8 @@ mod tests {
         let picture = project.add_media(crate::ffmpeg::probe(&still).unwrap());
         let first = project.place(&video, None, 0.0).unwrap();
         (project.clip_mut(&first).unwrap().fade_in, project.clip_mut(&first).unwrap().fade_out) = (0.5, 0.5);
+        // Twice as fast: the 2-second clip covers 1 second, and FFmpeg has to take setpts and atempo.
+        project.set_speed(&first, 2.0);
         let upper = project.add_track(TrackKind::Video);
         let still_clip = project.place(&picture, Some(upper), 1.0).unwrap();
         project.trim_end(&still_clip, 2.5);
@@ -242,12 +248,14 @@ mod tests {
         (clip.fade_in, clip.fade_out) = (0.5, 1.0);
         clip.framing = crate::project::Framing::Fill { x: 0.25, y: 0.5 };
         clip.grade.saturation = 1.5;
+        project.set_speed(&id, 2.0);
         let args = arguments(&project, Path::new("o.mp4")).unwrap();
         let graph = &args[args.iter().position(|a| a == "-filter_complex").unwrap() + 1];
         assert!(graph.contains("force_original_aspect_ratio=increase,crop=1080:1920:(iw-ow)*0.250:(ih-oh)*0.500"), "{graph}");
         assert!(graph.contains("crop=1080:1920:(iw-ow)*0.250:(ih-oh)*0.500,eq=brightness=0.000:contrast=1.000:saturation=1.500,fps="));
-        assert!(graph.contains("fade=t=in:st=0:d=0.500:alpha=1,fade=t=out:st=9.000:d=1.000:alpha=1"));
-        assert!(graph.contains("afade=t=in:st=0:d=0.500,afade=t=out:st=9.000:d=1.000,adelay=0|0"));
+        assert!(graph.contains("setpts=(PTS-STARTPTS)/2.0000,fade=t=in:st=0:d=0.500:alpha=1,fade=t=out:st=4.000:d=1.000:alpha=1"), "{graph}");
+        assert!(graph.contains("atempo=2.0000,afade=t=in:st=0:d=0.500,afade=t=out:st=4.000:d=1.000,adelay=0|0"));
+        assert!(args.join(" ").contains("-ss 0.000 -t 10.000 -i"), "the whole source still goes in");
     }
 
     #[test]

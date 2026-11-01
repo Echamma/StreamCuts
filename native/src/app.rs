@@ -6,7 +6,7 @@ use crate::captions;
 use crate::export::{self, Export};
 use crate::ffmpeg::Frame;
 use crate::preview::{Clock, Preview};
-use crate::project::{Framing, Grade, History, MediaKind, Project};
+use crate::project::{Framing, Grade, History, MediaKind, Project, SPEEDS};
 use crate::storage;
 use crate::filmstrip::Strip;
 use crate::timeline::{Looks, MediaDrag, Timeline, timecode};
@@ -497,13 +497,13 @@ impl StreamCuts {
             return;
         }
         for (clip, media) in clips {
-            self.worker.send(Job::Transcribe { path: media.path.clone(), from: clip.source_in, length: clip.duration, at: clip.start });
+            self.worker.send(Job::Transcribe { path: media.path.clone(), from: clip.source_in, length: clip.source_length(), speed: clip.speed, at: clip.start });
             self.transcribing += 1;
         }
         self.toasts.push("Making captions; the first time takes a minute while the speech model loads".into());
     }
 
-    /// One selected clip gets a menu for its fades and, for pictures, how it sits in the frame and its color.
+    /// One selected clip gets a menu for its fades, speed and, for pictures, how it sits in the frame and its color.
     fn clip_settings(&mut self, ui: &mut Ui) {
         let [id] = self.timeline.selection.as_slice() else { return };
         let Some(clip) = self.project.clip(id).cloned() else { return };
@@ -511,8 +511,9 @@ impl StreamCuts {
         let id = id.clone();
         let mut changed = clip.clone();
         let longest = (clip.duration / 2.0).min(10.0);
+        let mut speed = clip.speed;
         ui.add_space(6.0);
-        ui.menu_button(egui::RichText::new("Fades, framing & color").font(font::ui(13.0)), |ui| {
+        ui.menu_button(egui::RichText::new("Clip").font(font::ui(13.0)), |ui| {
             ui.set_min_width(230.0);
             egui::Grid::new("clip-settings").num_columns(2).spacing(vec2(10.0, 8.0)).show(ui, |ui| {
                 ui.label("Fade in");
@@ -522,6 +523,18 @@ impl StreamCuts {
                 ui.add(egui::DragValue::new(&mut changed.fade_out).range(0.0..=longest).speed(0.02).fixed_decimals(2).suffix(" s"));
                 ui.end_row();
             });
+            if kind != MediaKind::Image {
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label("Speed");
+                    ui.add(egui::DragValue::new(&mut speed).range(SPEEDS).speed(0.01).fixed_decimals(2).suffix("×"));
+                    for preset in [0.5, 1.0, 2.0] {
+                        if ui.selectable_label((speed - preset).abs() < 1e-6, format!("{preset}×")).clicked() {
+                            speed = preset;
+                        }
+                    }
+                });
+            }
             if kind != MediaKind::Audio {
                 ui.separator();
                 ui.label(egui::RichText::new("In the frame").font(font::ui(12.0)).color(color::INK_MUTED));
@@ -550,7 +563,7 @@ impl StreamCuts {
                 ui.add(egui::Slider::new(&mut changed.grade.saturation, 0.0..=2.5).show_value(false).text("Saturation"));
             }
         });
-        if changed != clip {
+        if changed != clip || speed != clip.speed {
             // One undo step per drag or click.
             if !self.adjusting {
                 self.history.record(&self.project);
@@ -558,6 +571,9 @@ impl StreamCuts {
             }
             if let Some(target) = self.project.clip_mut(&id) {
                 *target = changed;
+            }
+            if speed != clip.speed {
+                self.project.set_speed(&id, speed);
             }
             self.edited();
         }
