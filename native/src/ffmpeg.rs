@@ -1,6 +1,6 @@
 //! FFmpeg and FFprobe run as child processes: StreamCuts probes, decodes and exports through them, with nothing linked.
 
-use crate::project::{Media, MediaKind, new_id};
+use crate::project::{Framing, Media, MediaKind, new_id};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
@@ -114,24 +114,32 @@ fn seek_to(at: f64) -> String {
 }
 
 pub(crate) fn scale_filter(width: u32, height: u32) -> String {
-    format!("scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black")
+    Framing::Fit.filter(width, height)
 }
 
-/// One frame at `at` seconds, letterboxed into `width`×`height`. Blocking: call it off the UI thread.
-pub fn still(path: &Path, at: f64, width: u32, height: u32) -> Result<Frame, String> {
+/// One frame at `at` seconds, put into `width`×`height` by `framing`. Blocking: call it off the UI thread.
+pub fn still(path: &Path, at: f64, width: u32, height: u32, framing: Framing) -> Result<Frame, String> {
     if is_image(path) {
         let image = image::open(path).map_err(|e| e.to_string())?;
-        let fitted = image.resize(width, height, image::imageops::FilterType::Triangle).to_rgba8();
+        let (iw, ih) = (image.width().max(1) as f32, image.height().max(1) as f32);
+        // Scale to fit (or fill), then place the picture: centered with bars, or cropped around the focus.
+        let (scale, focus) = match framing {
+            Framing::Fit => ((width as f32 / iw).min(height as f32 / ih), (0.5, 0.5)),
+            Framing::Fill { x, y } => ((width as f32 / iw).max(height as f32 / ih), (x.clamp(0.0, 1.0), y.clamp(0.0, 1.0))),
+        };
+        let (sw, sh) = (((iw * scale).round() as u32).max(1), ((ih * scale).round() as u32).max(1));
+        let scaled = image.resize_exact(sw, sh, image::imageops::FilterType::Triangle).to_rgba8();
         let mut canvas = image::RgbaImage::from_pixel(width, height, image::Rgba([0, 0, 0, 255]));
-        let (x, y) = ((width - fitted.width()) / 2, (height - fitted.height()) / 2);
-        image::imageops::overlay(&mut canvas, &fitted, x as i64, y as i64);
+        let x = ((width as f32 - sw as f32) * focus.0).round() as i64;
+        let y = ((height as f32 - sh as f32) * focus.1).round() as i64;
+        image::imageops::overlay(&mut canvas, &scaled, x, y);
         return Ok(Frame { time: at, size: [width as usize, height as usize], rgba: canvas.into_raw() });
     }
     let output = command(&ffmpeg())
         .args(["-v", "error", "-ss", &seek_to(at)])
         .arg("-i")
         .arg(path)
-        .args(["-frames:v", "1", "-an", "-vf", &scale_filter(width, height), "-pix_fmt", "rgba", "-f", "rawvideo", "pipe:1"])
+        .args(["-frames:v", "1", "-an", "-vf", &framing.filter(width, height), "-pix_fmt", "rgba", "-f", "rawvideo", "pipe:1"])
         .stderr(Stdio::null())
         .output()
         .map_err(|e| format!("FFmpeg couldn't start ({e})."))?;
@@ -144,7 +152,7 @@ pub fn still(path: &Path, at: f64, width: u32, height: u32) -> Result<Frame, Str
 
 /// A small PNG-sized thumbnail for the media bin and clips.
 pub fn thumbnail(path: &Path, at: f64) -> Result<Frame, String> {
-    still(path, at, 192, 108)
+    still(path, at, 192, 108, Framing::Fit)
 }
 
 /// FFmpeg started on a thread of its own, reading its output there: a static build can take half a second to start,
@@ -208,7 +216,7 @@ pub struct FrameStream {
 }
 
 impl FrameStream {
-    pub fn start(path: &Path, from: f64, fps: u32, width: u32, height: u32) -> Self {
+    pub fn start(path: &Path, from: f64, fps: u32, width: u32, height: u32, framing: Framing) -> Self {
         // Start on a frame, so each frame's time is exactly the source time it shows.
         let from = (from * fps as f64 - 1e-6).ceil().max(0.0) / fps as f64;
         let mut command = command(&ffmpeg());
@@ -216,7 +224,7 @@ impl FrameStream {
             .args(["-v", "error", "-ss", &seek_to(from)])
             .arg("-i")
             .arg(path)
-            .args(["-an", "-vf", &format!("fps={fps},{}", scale_filter(width, height)), "-pix_fmt", "rgba", "-f", "rawvideo", "pipe:1"]);
+            .args(["-an", "-vf", &format!("fps={fps},{}", framing.filter(width, height)), "-pix_fmt", "rgba", "-f", "rawvideo", "pipe:1"]);
         let frame_bytes = (width * height * 4) as usize;
         let (ffmpeg, frames) = Background::start(command, 6, move |mut stdout, sender| {
             for index in 0.. {
@@ -298,15 +306,15 @@ mod tests {
         assert_eq!(media.kind, MediaKind::Video);
         assert!((media.duration - 2.0).abs() < 0.1, "duration {}", media.duration);
         assert!(media.has_audio && media.width == 320 && media.height == 180);
-        let frame = still(&clip, 1.0, 160, 90).unwrap();
+        let frame = still(&clip, 1.0, 160, 90, Framing::Fit).unwrap();
         assert_eq!(frame.rgba.len(), 160 * 90 * 4);
         // Streamed frames carry their real source time: each looks like the still at its time, not its neighbors'.
-        let stream = FrameStream::start(&clip, 0.5, 30, 160, 90);
+        let stream = FrameStream::start(&clip, 0.5, 30, 160, 90, Framing::Fit);
         let frames: Vec<Frame> = stream.frames.iter().take(16).collect();
         assert!((frames[0].time - 0.5).abs() < 1e-9 && frames[0].rgba.len() == 160 * 90 * 4);
         for frame in [&frames[0], &frames[15]] {
             let unlike = |t: f64| {
-                let other = still(&clip, t, 160, 90).unwrap();
+                let other = still(&clip, t, 160, 90, Framing::Fit).unwrap();
                 frame.rgba.iter().zip(&other.rgba).map(|(a, b)| a.abs_diff(*b) as u64).sum::<u64>()
             };
             let (here, before, after) = (unlike(frame.time), unlike(frame.time - 1.0 / 30.0), unlike(frame.time + 1.0 / 30.0));

@@ -25,6 +25,10 @@ struct Voice {
     next: u64,
     end: u64,
     volume: f32,
+    /// Where the clip starts (before playback did, if negative) and its fades, in frames, for the fade envelope.
+    clip_start: i64,
+    fade_in: u64,
+    fade_out: u64,
     chunks: Receiver<Vec<f32>>,
     buffer: VecDeque<f32>,
     /// Samples that came due before FFmpeg delivered them: dropped as they arrive, so the voice stays in time.
@@ -55,6 +59,18 @@ impl Voice {
         self.buffer.drain(..buffered);
         self.owed += samples - buffered;
     }
+}
+
+/// A clip's fade envelope at mix frame `frame`: 0 silent, 1 full.
+fn fade_gain(clip_start: i64, end: u64, fade_in: u64, fade_out: u64, frame: u64) -> f32 {
+    let mut gain = 1.0f32;
+    if fade_in > 0 {
+        gain = gain.min((frame as i64 - clip_start) as f32 / fade_in as f32);
+    }
+    if fade_out > 0 {
+        gain = gain.min((end as i64 - frame as i64) as f32 / fade_out as f32);
+    }
+    gain.clamp(0.0, 1.0)
 }
 
 /// What the output thread and the editor share.
@@ -114,8 +130,11 @@ impl Mix {
             voice.pull(wanted);
             let offset = (voice.next - from) as usize * channels;
             let have = wanted.min(voice.buffer.len());
-            for (slot, sample) in out[offset..offset + have].iter_mut().zip(voice.buffer.drain(..have)) {
-                *slot += sample * voice.volume;
+            let (first, volume) = (voice.next, voice.volume);
+            let (clip_start, end, fade_in, fade_out) = (voice.clip_start, voice.end, voice.fade_in, voice.fade_out);
+            for (index, (slot, sample)) in out[offset..offset + have].iter_mut().zip(voice.buffer.drain(..have)).enumerate() {
+                let gain = if fade_in > 0 || fade_out > 0 { fade_gain(clip_start, end, fade_in, fade_out, first + (index / channels) as u64) } else { 1.0 };
+                *slot += sample * volume * gain;
             }
             voice.owed += wanted - have;
             voice.next = last;
@@ -158,7 +177,7 @@ fn signature(project: &Project) -> u64 {
     for (clip, media) in project.audible_clips() {
         clip.id.hash(&mut hasher);
         media.path.hash(&mut hasher);
-        for value in [clip.start, clip.source_in, clip.duration] {
+        for value in [clip.start, clip.source_in, clip.duration, clip.fade_in, clip.fade_out] {
             value.to_bits().hash(&mut hasher);
         }
         clip.volume.to_bits().hash(&mut hasher);
@@ -269,7 +288,19 @@ impl Audio {
             }
             let begin = clip.start.max(playhead);
             let mut decoder = SoundStream::start(&media.path, clip.source_time(begin), clip.end() - begin, rate, channels);
-            voices.push(Voice { next: frame(begin), end: frame(clip.end()), volume: clip.volume, chunks: decoder.take_chunks(), buffer: VecDeque::new(), owed: 0, done: false });
+            let frames = |seconds: f64| (seconds * rate as f64).round() as u64;
+            voices.push(Voice {
+                next: frame(begin),
+                end: frame(clip.end()),
+                volume: clip.volume,
+                clip_start: ((clip.start - origin) * rate as f64).round() as i64,
+                fade_in: frames(clip.fade_in),
+                fade_out: frames(clip.fade_out),
+                chunks: decoder.take_chunks(),
+                buffer: VecDeque::new(),
+                owed: 0,
+                done: false,
+            });
             self.decoders.push((clip.end(), decoder));
             self.started.insert(clip.id.clone());
         }
@@ -322,7 +353,7 @@ mod tests {
 
     fn voice(next: u64, end: u64, volume: f32) -> (Voice, SyncSender<Vec<f32>>) {
         let (sender, chunks) = sync_channel(8);
-        (Voice { next, end, volume, chunks, buffer: VecDeque::new(), owed: 0, done: false }, sender)
+        (Voice { next, end, volume, clip_start: next as i64, fade_in: 0, fade_out: 0, chunks, buffer: VecDeque::new(), owed: 0, done: false }, sender)
     }
 
     fn mix(channels: usize, voices: Vec<Voice>) -> Mix {
@@ -445,6 +476,17 @@ mod tests {
         assert!(audio.now().is_none());
         drop(audio);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn fades_shape_the_sound() {
+        let (mut v, input) = voice(0, 8, 1.0);
+        (v.fade_in, v.fade_out) = (4, 2);
+        input.send(vec![1.0; 8]).unwrap();
+        let mut mix = mix(1, vec![v]);
+        let mut out = [0.0; 8];
+        mix.fill(&mut out);
+        assert_eq!(out, [0.0, 0.25, 0.5, 0.75, 1.0, 1.0, 1.0, 0.5]);
     }
 
     #[test]

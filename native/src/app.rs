@@ -6,7 +6,7 @@ use crate::captions;
 use crate::export::{self, Export};
 use crate::ffmpeg::Frame;
 use crate::preview::{Clock, Preview};
-use crate::project::{History, MediaKind, Project};
+use crate::project::{Framing, History, MediaKind, Project};
 use crate::storage;
 use crate::filmstrip::Strip;
 use crate::timeline::{Looks, MediaDrag, Timeline, timecode};
@@ -42,6 +42,8 @@ pub struct StreamCuts {
     transcribing: usize,
     /// Typing in a caption: one undo step for the whole edit.
     caption_typing: bool,
+    /// Dragging a clip setting: one undo step for the whole drag.
+    adjusting: bool,
     /// Media whose waveform and filmstrip have been asked for.
     looks_asked: HashSet<String>,
     pending: HashMap<PathBuf, Pending>,
@@ -73,6 +75,7 @@ impl StreamCuts {
             looks: Looks::default(),
             transcribing: 0,
             caption_typing: false,
+            adjusting: false,
             looks_asked: HashSet::new(),
             pending: HashMap::new(),
             preview: Preview::default(),
@@ -405,7 +408,10 @@ impl StreamCuts {
         let screen = Rect::from_center_size(area.center(), size);
         ui.painter().rect_filled(screen, 4, Color32::BLACK);
         if let (Some(texture), false) = (&self.preview.texture, self.preview.blank) {
-            ui.painter().image(texture.id(), screen, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+            // A clip fading in or out shows darker (exports fade it to what's below, which is black unless tracks stack).
+            let fade = self.project.front_clip(self.playhead).map_or(1.0, |(clip, _)| clip.fade_at(self.playhead));
+            let tint = Color32::from_gray((fade * 255.0).round() as u8);
+            ui.painter().image(texture.id(), screen, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), tint);
         }
         if let Some(caption) = self.project.caption_at(self.playhead) {
             captions::draw(&ui.painter().with_clip_rect(screen), screen, &caption.text);
@@ -458,6 +464,7 @@ impl StreamCuts {
                 ui.label(egui::RichText::new("Making captions…").font(font::ui(12.0)).color(color::INK_MUTED));
             }
             self.volume_control(ui);
+            self.clip_settings(ui);
             self.caption_editor(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if icon_button(ui, Icon::ZoomIn, "Zoom in (Ctrl+wheel)", false).clicked() {
@@ -483,6 +490,59 @@ impl StreamCuts {
             self.transcribing += 1;
         }
         self.toasts.push("Making captions; the first time takes a minute while the speech model loads".into());
+    }
+
+    /// One selected clip gets a menu for its fades and, for pictures, how it sits in the frame.
+    fn clip_settings(&mut self, ui: &mut Ui) {
+        let [id] = self.timeline.selection.as_slice() else { return };
+        let Some(clip) = self.project.clip(id).cloned() else { return };
+        let Some(kind) = self.project.media(&clip.media_id).map(|media| media.kind) else { return };
+        let id = id.clone();
+        let mut changed = clip.clone();
+        let longest = (clip.duration / 2.0).min(10.0);
+        ui.add_space(6.0);
+        ui.menu_button(egui::RichText::new("Fades & framing").font(font::ui(13.0)), |ui| {
+            ui.set_min_width(230.0);
+            egui::Grid::new("clip-settings").num_columns(2).spacing(vec2(10.0, 8.0)).show(ui, |ui| {
+                ui.label("Fade in");
+                ui.add(egui::DragValue::new(&mut changed.fade_in).range(0.0..=longest).speed(0.02).fixed_decimals(2).suffix(" s"));
+                ui.end_row();
+                ui.label("Fade out");
+                ui.add(egui::DragValue::new(&mut changed.fade_out).range(0.0..=longest).speed(0.02).fixed_decimals(2).suffix(" s"));
+                ui.end_row();
+            });
+            if kind != MediaKind::Audio {
+                ui.separator();
+                ui.label(egui::RichText::new("In the frame").font(font::ui(12.0)).color(color::INK_MUTED));
+                ui.horizontal(|ui| {
+                    let fill = matches!(changed.framing, Framing::Fill { .. });
+                    if ui.selectable_label(!fill, "Fit: all of it").clicked() {
+                        changed.framing = Framing::Fit;
+                    }
+                    if ui.selectable_label(fill, "Fill: crop to the frame").clicked() && !fill {
+                        changed.framing = Framing::Fill { x: 0.5, y: 0.5 };
+                    }
+                });
+                if let Framing::Fill { x, y } = &mut changed.framing {
+                    ui.add(egui::Slider::new(x, 0.0..=1.0).show_value(false).text("Left to right"));
+                    ui.add(egui::Slider::new(y, 0.0..=1.0).show_value(false).text("Top to bottom"));
+                }
+            }
+        });
+        if changed != clip {
+            // One undo step per drag or click.
+            if !self.adjusting {
+                self.history.record(&self.project);
+                self.adjusting = true;
+            }
+            if let Some(target) = self.project.clip_mut(&id) {
+                *target = changed;
+            }
+            self.edited();
+        }
+        if !ui.input(|i| i.pointer.any_down()) {
+            self.adjusting = false;
+        }
     }
 
     /// One selected caption gets its text in the timeline bar, to fix what the transcription heard.

@@ -58,6 +58,38 @@ pub struct Clip {
     pub duration: f64,
     #[serde(default = "full_volume")]
     pub volume: f32,
+    /// Seconds the clip takes to fade in at its start and out at its end, picture and sound.
+    #[serde(default)]
+    pub fade_in: f64,
+    #[serde(default)]
+    pub fade_out: f64,
+    #[serde(default)]
+    pub framing: Framing,
+}
+
+/// How a picture sits in the frame when their shapes differ (16:9 footage in a 9:16 short).
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "camelCase")]
+pub enum Framing {
+    /// All of it, with black bars.
+    #[default]
+    Fit,
+    /// Filling the frame, cropped. `x` and `y` pick the part that stays: 0 is the left (top) edge, 1 the right (bottom).
+    Fill { x: f32, y: f32 },
+}
+
+impl Framing {
+    /// The FFmpeg filters that put a picture into a `width`x`height` frame this way.
+    pub fn filter(self, width: u32, height: u32) -> String {
+        match self {
+            Framing::Fit => format!("scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black"),
+            Framing::Fill { x, y } => format!(
+                "scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height}:(iw-ow)*{:.3}:(ih-oh)*{:.3}",
+                x.clamp(0.0, 1.0),
+                y.clamp(0.0, 1.0)
+            ),
+        }
+    }
 }
 
 fn full_volume() -> f32 {
@@ -74,6 +106,12 @@ impl Clip {
     }
     pub fn contains(&self, t: f64) -> bool {
         t >= self.start && t < self.end()
+    }
+    /// How far faded in the clip is at timeline time `t`: 0 is black (silent), 1 is full.
+    pub fn fade_at(&self, t: f64) -> f64 {
+        let fade_in = if self.fade_in > 0.0 { (t - self.start) / self.fade_in } else { 1.0 };
+        let fade_out = if self.fade_out > 0.0 { (self.end() - t) / self.fade_out } else { 1.0 };
+        fade_in.min(fade_out).clamp(0.0, 1.0)
     }
 }
 
@@ -265,7 +303,7 @@ impl Project {
         };
         let duration = if media.kind == MediaKind::Image { STILL_SECONDS } else { media.duration.max(MIN_CLIP) };
         let start = self.free_start(track, at, duration, None);
-        let clip = Clip { id: new_id(), media_id: media.id.clone(), start, source_in: 0.0, duration, volume: 1.0 };
+        let clip = Clip { id: new_id(), media_id: media.id.clone(), start, source_in: 0.0, duration, volume: 1.0, fade_in: 0.0, fade_out: 0.0, framing: Framing::Fit };
         let id = clip.id.clone();
         self.tracks[track].clips.push(clip);
         self.sort_track(track);
@@ -343,15 +381,18 @@ impl Project {
         }
         let is_still = self.media(&clip.media_id).map(|m| m.kind == MediaKind::Image).unwrap_or(false);
         let left = t - clip.start;
+        // The left half keeps the fade in, the right half the fade out.
         let right = Clip {
             id: new_id(),
             start: t,
             source_in: if is_still { clip.source_in } else { clip.source_in + left },
             duration: clip.duration - left,
+            fade_in: 0.0,
             ..clip.clone()
         };
         let id = right.id.clone();
         self.tracks[at.track].clips[at.index].duration = left;
+        self.tracks[at.track].clips[at.index].fade_out = 0.0;
         self.tracks[at.track].clips.insert(at.index + 1, right);
         Some(id)
     }

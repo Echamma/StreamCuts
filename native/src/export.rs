@@ -40,20 +40,29 @@ pub fn arguments(project: &Project, output: &Path) -> Result<Vec<String>, String
             args.extend(["-i".into(), media.path.to_string_lossy().into_owned()]);
             let shows = track.kind == TrackKind::Video && !track.hidden && media.kind != MediaKind::Audio;
             if shows {
-                filters.push(format!(
-                    "[{input}:v]scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black,fps={fps},format=yuv420p,setpts=PTS-STARTPTS+{start:.3}/TB[v{input}]",
-                    start = clip.start
-                ));
+                // Fades work on the picture's alpha, so a clip fades to whatever is below it (black when nothing is).
+                let mut chain = format!("[{input}:v]{},fps={fps},format=yuva420p,setpts=PTS-STARTPTS", clip.framing.filter(w, h));
+                if clip.fade_in > 0.0 {
+                    chain.push_str(&format!(",fade=t=in:st=0:d={:.3}:alpha=1", clip.fade_in));
+                }
+                if clip.fade_out > 0.0 {
+                    chain.push_str(&format!(",fade=t=out:st={:.3}:d={:.3}:alpha=1", (clip.duration - clip.fade_out).max(0.0), clip.fade_out));
+                }
+                filters.push(format!("{chain},setpts=PTS+{start:.3}/TB[v{input}]", start = clip.start));
                 filters.push(format!("[base{base}][v{input}]overlay=eof_action=pass[base{}]", base + 1));
                 base += 1;
             }
             let hidden_video = track.kind == TrackKind::Video && track.hidden;
             if media.has_audio && !track.muted && !hidden_video && clip.volume > 0.0 {
                 let delay = (clip.start * 1000.0).round() as u64;
-                filters.push(format!(
-                    "[{input}:a]asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo,volume={:.3},adelay={delay}|{delay}[a{input}]",
-                    clip.volume
-                ));
+                let mut chain = format!("[{input}:a]asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo,volume={:.3}", clip.volume);
+                if clip.fade_in > 0.0 {
+                    chain.push_str(&format!(",afade=t=in:st=0:d={:.3}", clip.fade_in));
+                }
+                if clip.fade_out > 0.0 {
+                    chain.push_str(&format!(",afade=t=out:st={:.3}:d={:.3}", (clip.duration - clip.fade_out).max(0.0), clip.fade_out));
+                }
+                filters.push(format!("{chain},adelay={delay}|{delay}[a{input}]"));
                 audio_labels.push(format!("[a{input}]"));
             }
             input += 1;
@@ -184,8 +193,8 @@ mod tests {
         assert!(joined.contains("-loop 1 -t 5.000 -i"), "stills loop for their length");
         let graph = &args[args.iter().position(|a| a == "-filter_complex").unwrap() + 1];
         assert!(graph.starts_with("color=c=black:s=1920x1080:r=30:d=30.000[base0]"));
-        let video_at = graph.find("setpts=PTS-STARTPTS+2.000/TB").unwrap();
-        let still_at = graph.find("setpts=PTS-STARTPTS+3.000/TB").unwrap();
+        let video_at = graph.find("setpts=PTS+2.000/TB").unwrap();
+        let still_at = graph.find("setpts=PTS+3.000/TB").unwrap();
         assert!(video_at < still_at, "the lower track is laid down before the upper one");
         assert!(graph.contains("adelay=2000|2000"));
         assert!(graph.contains("amix=inputs=2"));
@@ -206,7 +215,8 @@ mod tests {
         project.height = 180;
         let video = project.add_media(crate::ffmpeg::probe(&clip).unwrap());
         let picture = project.add_media(crate::ffmpeg::probe(&still).unwrap());
-        project.place(&video, None, 0.0);
+        let first = project.place(&video, None, 0.0).unwrap();
+        (project.clip_mut(&first).unwrap().fade_in, project.clip_mut(&first).unwrap().fade_out) = (0.5, 0.5);
         let upper = project.add_track(TrackKind::Video);
         let still_clip = project.place(&picture, Some(upper), 1.0).unwrap();
         project.trim_end(&still_clip, 2.5);
@@ -220,6 +230,22 @@ mod tests {
         assert!((rendered.duration - 2.5).abs() < 0.15, "rendered {}", rendered.duration);
         assert!(rendered.has_audio && rendered.width == 320);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn fades_and_fill_reach_the_graph() {
+        let mut project = Project::new("Short");
+        (project.width, project.height) = (1080, 1920);
+        let video = project.add_media(media(MediaKind::Video, 10.0, true));
+        let id = project.place(&video, None, 0.0).unwrap();
+        let clip = project.clip_mut(&id).unwrap();
+        (clip.fade_in, clip.fade_out) = (0.5, 1.0);
+        clip.framing = crate::project::Framing::Fill { x: 0.25, y: 0.5 };
+        let args = arguments(&project, Path::new("o.mp4")).unwrap();
+        let graph = &args[args.iter().position(|a| a == "-filter_complex").unwrap() + 1];
+        assert!(graph.contains("force_original_aspect_ratio=increase,crop=1080:1920:(iw-ow)*0.250:(ih-oh)*0.500"), "{graph}");
+        assert!(graph.contains("fade=t=in:st=0:d=0.500:alpha=1,fade=t=out:st=9.000:d=1.000:alpha=1"));
+        assert!(graph.contains("afade=t=in:st=0:d=0.500,afade=t=out:st=9.000:d=1.000,adelay=0|0"));
     }
 
     #[test]
