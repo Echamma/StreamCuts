@@ -93,7 +93,7 @@ impl StreamCuts {
     }
 
     fn request_looks(&mut self) {
-        for media in &self.project.media {
+        for media in self.project.media.iter().filter(|m| m.path.is_file()) {
             if self.looks_asked.insert(media.id.clone()) {
                 if media.has_audio {
                     self.worker.send(Job::Waveform { media_id: media.id.clone(), path: media.path.clone() });
@@ -348,7 +348,31 @@ impl StreamCuts {
         });
     }
 
+    /// Asks where a missing file went and points the project there. The clips keep their place and trims.
+    fn find_media(&mut self, id: &str) {
+        let Some(media) = self.project.media(id).cloned() else { return };
+        let mut dialog = rfd::FileDialog::new().set_title(format!("Where is {}?", media.name));
+        if let Some(folder) = media.path.parent().filter(|f| f.is_dir()) {
+            dialog = dialog.set_directory(folder);
+        }
+        let Some(path) = dialog.pick_file() else { return };
+        self.history.record(&self.project);
+        if let Some(target) = self.project.media.iter_mut().find(|m| m.id == id) {
+            target.name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or(target.name.clone());
+            target.path = path;
+        }
+        self.looks.thumbnails.remove(id);
+        self.looks_asked.remove(id);
+        self.preview.reset();
+        self.request_looks();
+        self.edited();
+    }
+
     fn start_export(&mut self, ctx: &egui::Context) {
+        if let Some(media) = self.project.missing_media().first() {
+            self.toasts.push(format!("Can't export: {} is missing. Click it in Media to find it.", media.name));
+            return;
+        }
         let _ = std::fs::create_dir_all(&self.place.exports_dir);
         let name = canopy_ui::canopy_core::files::unique_name(&self.place.exports_dir, &format!("{}.mp4", self.project.name));
         let output = self.place.exports_dir.join(name);
@@ -369,11 +393,14 @@ impl StreamCuts {
             return;
         }
         let mut place_now = None;
+        let mut find = None;
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             for media in &self.project.media {
+                let missing = !media.path.is_file();
                 let id = ui.scope_id().with(("media", &media.id));
                 let response = ui.dnd_drag_source(id, MediaDrag(media.id.clone()), |ui| {
-                    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 46.0), Sense::hover());
+                    // Clicks go to the row (click to find a missing file, double-click to place it); drags go to the drag source.
+                    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 46.0), Sense::click());
                     let painter = ui.painter();
                     painter.rect_filled(rect, 8, color::VEIL);
                     let thumb = Rect::from_min_size(rect.min + vec2(4.0, 4.0), vec2(68.0, 38.0));
@@ -389,15 +416,24 @@ impl StreamCuts {
                     }
                     let text = painter.with_clip_rect(Rect::from_min_max(pos2(thumb.right() + 8.0, rect.top()), rect.max - vec2(6.0, 0.0)));
                     text.text(pos2(thumb.right() + 8.0, rect.top() + 8.0), Align2::LEFT_TOP, &media.name, font::ui(13.0), color::INK);
-                    let detail = match media.kind { MediaKind::Image => format!("Picture · {}×{}", media.width, media.height), _ => timecode(media.duration, self.project.fps) };
-                    text.text(pos2(thumb.right() + 8.0, rect.bottom() - 7.0), Align2::LEFT_BOTTOM, detail, font::ui(11.0), color::INK_MUTED);
+                    if missing {
+                        text.text(pos2(thumb.right() + 8.0, rect.bottom() - 7.0), Align2::LEFT_BOTTOM, "Missing: click to find it", font::ui(11.0), color::SUN);
+                    } else {
+                        let detail = match media.kind { MediaKind::Image => format!("Picture · {}×{}", media.width, media.height), _ => timecode(media.duration, self.project.fps) };
+                        text.text(pos2(thumb.right() + 8.0, rect.bottom() - 7.0), Align2::LEFT_BOTTOM, detail, font::ui(11.0), color::INK_MUTED);
+                    }
                 });
-                if response.response.double_clicked() {
+                if missing && response.response.clicked() {
+                    find = Some(media.id.clone());
+                } else if response.response.double_clicked() {
                     place_now = Some(media.id.clone());
                 }
                 ui.add_space(2.0);
             }
         });
+        if let Some(id) = find {
+            self.find_media(&id);
+        }
         if let Some(id) = place_now {
             self.history.record(&self.project);
             if let Some(clip) = self.project.place(&id, None, self.playhead) {
@@ -430,6 +466,8 @@ impl StreamCuts {
         }
         if self.project.duration() == 0.0 {
             ui.painter().text(screen.center(), Align2::CENTER_CENTER, "Drag media onto the timeline to start", font::ui(14.0), color::INK_MUTED);
+        } else if let Some((_, media)) = self.project.front_clip(self.playhead).filter(|(_, media)| !media.path.is_file()) {
+            ui.painter().text(screen.center(), Align2::CENTER_CENTER, format!("{} is missing: find it in Media", media.name), font::ui(14.0), color::INK_MUTED);
         }
         let bar = Rect::from_min_max(pos2(full.left(), full.bottom() - transport + 6.0), full.max);
         ui.scope_builder(UiBuilder::new().max_rect(bar), |ui| {

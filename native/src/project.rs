@@ -319,6 +319,12 @@ impl Project {
         self.captions.iter().find(|c| t >= c.start && t < c.end)
     }
 
+    /// Media the timeline uses whose file isn't where the project says it is.
+    pub fn missing_media(&self) -> Vec<&Media> {
+        let used: Vec<&str> = self.tracks.iter().flat_map(|t| t.clips.iter().map(|c| c.media_id.as_str())).collect();
+        self.media.iter().filter(|m| used.contains(&m.id.as_str()) && !m.path.is_file()).collect()
+    }
+
     pub fn media(&self, id: &str) -> Option<&Media> {
         self.media.iter().find(|m| m.id == id)
     }
@@ -758,6 +764,16 @@ mod tests {
         assert_eq!(project.clip(&right).unwrap().source_in, 2.0);
         project.trim_start(&right, 13.5);
         assert_eq!(project.clip(&right).unwrap().source_in, 3.0);
+    }
+
+    #[test]
+    fn missing_media_is_only_what_the_timeline_uses() {
+        let (mut project, video) = project_with(10.0);
+        let unused = project.add_media(media(MediaKind::Video, 5.0));
+        assert!(project.missing_media().is_empty(), "nothing on the timeline yet");
+        project.place(&video, None, 0.0).unwrap();
+        let missing: Vec<&str> = project.missing_media().iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(missing, vec![video.as_str()], "C:/m/... doesn't exist; the unused {unused} doesn't count");
     }
 
     #[test]
