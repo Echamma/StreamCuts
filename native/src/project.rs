@@ -248,6 +248,28 @@ pub struct Caption {
     pub text: String,
     #[serde(default)]
     pub words: Vec<Word>,
+    /// The clip whose speech it is; it moves with that clip. Without one, it goes with whatever clip it sits inside.
+    #[serde(default)]
+    pub clip: Option<String>,
+}
+
+impl Caption {
+    /// Whether this caption goes with `clip_id`, a clip that covered `from`..`to`.
+    fn belongs_to(&self, clip_id: &str, from: f64, to: f64) -> bool {
+        match &self.clip {
+            Some(clip) => clip == clip_id,
+            None => self.start >= from - 1e-6 && self.end <= to + 1e-6,
+        }
+    }
+
+    fn shift(&mut self, by: f64) {
+        self.start += by;
+        self.end += by;
+        for word in &mut self.words {
+            word.start += by;
+            word.end += by;
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -455,8 +477,14 @@ impl Project {
             }
         }
         self.tracks[from.track].clips.remove(from.index);
-        self.tracks[track].clips.push(Clip { start, ..clip });
+        self.tracks[track].clips.push(Clip { start, ..clip.clone() });
         self.sort_track(track);
+        // The clip's captions go with it.
+        let by = start - clip.start;
+        if by != 0.0 {
+            self.captions.iter_mut().filter(|c| c.belongs_to(&clip.id, clip.start, clip.end())).for_each(|c| c.shift(by));
+            self.captions.sort_by(|a, b| a.start.total_cmp(&b.start));
+        }
         true
     }
 
@@ -526,6 +554,10 @@ impl Project {
         let id = right.id.clone();
         self.tracks[at.track].clips[at.index].duration = left;
         self.tracks[at.track].clips[at.index].fade_out = 0.0;
+        // Captions of the right half's speech now belong to the right half.
+        for caption in self.captions.iter_mut().filter(|c| c.clip.as_deref() == Some(clip.id.as_str()) && c.start >= t - 1e-6) {
+            caption.clip = Some(id.clone());
+        }
         self.tracks[at.track].clips.insert(at.index + 1, right);
         Some(id)
     }
@@ -554,15 +586,24 @@ impl Project {
     pub fn ripple_delete(&mut self, clip_ids: &[String]) -> usize {
         let mut removed = 0;
         for track in &mut self.tracks {
-            let gone: Vec<(f64, f64)> = track.clips.iter().filter(|c| clip_ids.contains(&c.id)).map(|c| (c.start, c.duration)).collect();
+            let gone: Vec<(String, f64, f64)> = track.clips.iter().filter(|c| clip_ids.contains(&c.id)).map(|c| (c.id.clone(), c.start, c.duration)).collect();
             if gone.is_empty() {
                 continue;
             }
             track.clips.retain(|c| !clip_ids.contains(&c.id));
             removed += gone.len();
+            // Captions of what's left move with their clips: those of a clip that moves by `shift` move by it too.
+            let mut moves = Vec::new();
             for clip in &mut track.clips {
-                let shift: f64 = gone.iter().filter(|(start, _)| *start < clip.start).map(|(_, duration)| duration).sum();
-                clip.start = (clip.start - shift).max(0.0);
+                let shift: f64 = gone.iter().filter(|(_, start, _)| *start < clip.start).map(|(_, _, duration)| duration).sum();
+                let start = (clip.start - shift).max(0.0);
+                moves.push((clip.id.clone(), clip.start, clip.end(), start - clip.start));
+                clip.start = start;
+            }
+            // The deleted clips' own captions go with them.
+            self.captions.retain(|c| !gone.iter().any(|(id, start, duration)| c.belongs_to(id, *start, start + duration)));
+            for (id, from, to, by) in moves.into_iter().filter(|m| m.3 != 0.0) {
+                self.captions.iter_mut().filter(|c| c.belongs_to(&id, from, to)).for_each(|c| c.shift(by));
             }
         }
         removed
@@ -726,7 +767,7 @@ mod tests {
     #[test]
     fn new_captions_replace_the_ones_in_their_stretch() {
         let (mut project, _) = project_with(10.0);
-        let caption = |id: &str, start: f64, end: f64| Caption { id: id.into(), start, end, text: id.into(), words: Vec::new() };
+        let caption = |id: &str, start: f64, end: f64| Caption { id: id.into(), start, end, text: id.into(), words: Vec::new(), clip: None };
         project.add_captions(0.0, 30.0, vec![caption("a", 1.0, 2.0), caption("b", 12.0, 14.0), caption("c", 25.0, 27.0)]);
         project.add_captions(10.0, 20.0, vec![caption("d", 11.0, 13.0)]);
         let ids: Vec<&str> = project.captions.iter().map(|c| c.id.as_str()).collect();
@@ -774,6 +815,29 @@ mod tests {
         project.place(&video, None, 0.0).unwrap();
         let missing: Vec<&str> = project.missing_media().iter().map(|m| m.id.as_str()).collect();
         assert_eq!(missing, vec![video.as_str()], "C:/m/... doesn't exist; the unused {unused} doesn't count");
+    }
+
+    #[test]
+    fn captions_go_with_their_clip() {
+        let (mut project, video) = project_with(10.0);
+        let a = project.place(&video, None, 0.0).unwrap();
+        let b = project.place(&video, None, 10.0).unwrap();
+        let caption = |id: &str, start: f64, end: f64, clip: Option<&String>| Caption { id: id.into(), start, end, text: id.into(), words: vec![Word { text: id.into(), start, end }], clip: clip.cloned() };
+        // a's caption knows its clip; b's is from an older project and goes by where it sits.
+        project.add_captions(0.0, 20.0, vec![caption("in a", 1.0, 2.0, Some(&a)), caption("in b", 12.0, 13.0, None)]);
+        // A clip on another track over the same time doesn't take a's caption with it.
+        let other = project.add_track(TrackKind::Video);
+        let c = project.place(&video, Some(other), 0.0).unwrap();
+        project.move_clip(&c, 40.0, other);
+        assert_eq!(project.captions[0].start, 1.0);
+        let track = project.find(&b).unwrap().track;
+        project.move_clip(&b, 30.0, track);
+        assert_eq!((project.captions[1].start, project.captions[1].words[0].end), (32.0, 33.0), "b's caption moved with b");
+        assert_eq!(project.captions[0].start, 1.0, "a's stayed");
+        // Ripple-deleting a takes its caption and pulls b's caption left with b.
+        project.ripple_delete(&[a]);
+        assert_eq!(project.captions.len(), 1);
+        assert_eq!((project.clip(&b).unwrap().start, project.captions[0].start), (20.0, 22.0));
     }
 
     #[test]

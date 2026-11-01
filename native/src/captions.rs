@@ -97,8 +97,8 @@ mod tests {
     fn ass_holds_each_caption_with_its_times() {
         let mut project = Project::new("Captions");
         project.add_captions(0.0, 100.0, vec![
-            Caption { id: "a".into(), start: 1.5, end: 2.756, text: "Hello {there}".into(), words: Vec::new() },
-            Caption { id: "b".into(), start: 3725.0, end: 3726.0, text: "an hour in".into(), words: Vec::new() },
+            Caption { id: "a".into(), start: 1.5, end: 2.756, text: "Hello {there}".into(), words: Vec::new(), clip: None },
+            Caption { id: "b".into(), start: 3725.0, end: 3726.0, text: "an hour in".into(), words: Vec::new(), clip: None },
         ]);
         let ass = ass(&project);
         assert!(ass.contains("PlayResX: 1920\nPlayResY: 1080"));

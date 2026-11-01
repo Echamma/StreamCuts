@@ -48,13 +48,17 @@ pub fn python() -> PathBuf {
 
 /// Captions for `length` seconds of `media` from source time `from`, played at `speed` on the timeline from `at`.
 /// Blocking and slow (the speech model loads first): run it on a thread of its own.
-pub fn captions(media: &Path, from: f64, length: f64, speed: f64, at: f64) -> Result<Vec<Caption>, String> {
+pub fn captions(clip: &str, media: &Path, from: f64, length: f64, speed: f64, at: f64) -> Result<Vec<Caption>, String> {
     let script = script().ok_or("Captions need StreamCuts' transcription script (set STREAMCUTS_TRANSCRIBE to transcribe.py).")?;
     let dir = std::env::temp_dir().join(format!("streamcuts-captions-{}", new_id()));
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let result = transcribe_in(&dir, &script, media, from, length);
     let _ = std::fs::remove_dir_all(&dir);
-    Ok(place(result?, at, length, speed))
+    let mut captions = place(result?, at, length, speed);
+    for caption in &mut captions {
+        caption.clip = Some(clip.to_owned());
+    }
+    Ok(captions)
 }
 
 fn transcribe_in(dir: &Path, script: &Path, media: &Path, from: f64, length: f64) -> Result<Transcript, String> {
@@ -98,6 +102,7 @@ fn place(transcript: Transcript, at: f64, length: f64, speed: f64) -> Vec<Captio
             end: timeline(segment.end.max(segment.start)),
             text: segment.text.trim().to_owned(),
             words: segment.words.into_iter().map(|w| Word { text: w.word, start: timeline(w.start), end: timeline(w.end) }).collect(),
+            clip: None,
         })
         .collect()
 }

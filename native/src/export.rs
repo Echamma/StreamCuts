@@ -238,7 +238,7 @@ mod tests {
         let still_clip = project.place(&picture, Some(upper), 1.0).unwrap();
         project.trim_end(&still_clip, 2.5);
         project.even_loudness = true;
-        let caption = crate::project::Caption { id: new_id(), start: 0.2, end: 2.0, text: "Burned in".into(), words: Vec::new() };
+        let caption = crate::project::Caption { id: new_id(), start: 0.2, end: 2.0, text: "Burned in".into(), words: Vec::new(), clip: None };
         project.add_captions(0.0, 2.5, vec![caption]);
         assert!(arguments(&project, Path::new("o.mp4")).unwrap().iter().any(|a| a.contains("subtitles=captions.ass:fontsdir=.,format=yuv420p[vout]")));
         let output = dir.join("out.mp4");

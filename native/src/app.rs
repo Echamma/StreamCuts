@@ -543,7 +543,7 @@ impl StreamCuts {
             return;
         }
         for (clip, media) in clips {
-            self.worker.send(Job::Transcribe { path: media.path.clone(), from: clip.source_in, length: clip.source_length(), speed: clip.speed, at: clip.start });
+            self.worker.send(Job::Transcribe { clip: clip.id.clone(), path: media.path.clone(), from: clip.source_in, length: clip.source_length(), speed: clip.speed, at: clip.start });
             self.transcribing += 1;
         }
         self.toasts.push("Making captions; the first time takes a minute while the speech model loads".into());

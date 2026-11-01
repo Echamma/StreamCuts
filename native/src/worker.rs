@@ -20,7 +20,7 @@ pub enum Job {
     Waveform { media_id: String, path: PathBuf },
     Filmstrip { media_id: String, path: PathBuf, duration: f64 },
     /// Captions for `length` source seconds of `path` from `from`, for a clip at `speed` that starts at `at`.
-    Transcribe { path: PathBuf, from: f64, length: f64, speed: f64, at: f64 },
+    Transcribe { clip: String, path: PathBuf, from: f64, length: f64, speed: f64, at: f64 },
 }
 
 pub enum Done {
@@ -64,8 +64,8 @@ impl Worker {
                             aside(&finished, &ctx, move || Done::Filmstrip(media_id, filmstrip::decode(&path, duration)));
                             continue;
                         }
-                        Job::Transcribe { path, from, length, speed, at } => {
-                            aside(&finished, &ctx, move || Done::Captions { from: at, to: at + length / speed, result: transcribe::captions(&path, from, length, speed, at) });
+                        Job::Transcribe { clip, path, from, length, speed, at } => {
+                            aside(&finished, &ctx, move || Done::Captions { from: at, to: at + length / speed, result: transcribe::captions(&clip, &path, from, length, speed, at) });
                             continue;
                         }
                     };
