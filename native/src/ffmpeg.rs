@@ -3,7 +3,8 @@
 use crate::project::{Media, MediaKind, new_id};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdout, Command, Stdio};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 
 const IMAGE_EXTENSIONS: [&str; 6] = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
@@ -13,22 +14,36 @@ fn find(name: &str, env: &str) -> PathBuf {
         return path;
     }
     let exe = format!("{name}.exe");
-    std::env::var_os("PATH")
+    let found: Vec<PathBuf> = std::env::var_os("PATH")
         .into_iter()
         .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
         .map(|dir| dir.join(&exe))
-        .find(|candidate| candidate.is_file())
-        .unwrap_or_else(|| PathBuf::from(name))
+        .filter(|candidate| candidate.is_file())
+        .collect();
+    // A static build (one 240 MB exe) takes about half a second just to start on Windows; a shared build (a small exe
+    // and DLLs) takes a few dozen milliseconds. StreamCuts starts FFmpeg for every still, so when PATH has both, use
+    // the shared one.
+    found.iter().find(|path| is_shared_build(path)).or(found.first()).cloned().unwrap_or_else(|| PathBuf::from(name))
+}
+
+fn is_shared_build(exe: &Path) -> bool {
+    let Some(entries) = exe.parent().and_then(|dir| std::fs::read_dir(dir).ok()) else { return false };
+    entries.flatten().any(|entry| {
+        let name = entry.file_name().to_string_lossy().to_lowercase();
+        name.starts_with("avcodec-") && name.ends_with(".dll")
+    })
 }
 
 /// `STREAMCUTS_FFMPEG`, else `ffmpeg` on PATH.
 pub fn ffmpeg() -> PathBuf {
-    find("ffmpeg", "STREAMCUTS_FFMPEG")
+    static FOUND: OnceLock<PathBuf> = OnceLock::new();
+    FOUND.get_or_init(|| find("ffmpeg", "STREAMCUTS_FFMPEG")).clone()
 }
 
 /// `STREAMCUTS_FFPROBE`, else `ffprobe` on PATH.
 pub fn ffprobe() -> PathBuf {
-    find("ffprobe", "STREAMCUTS_FFPROBE")
+    static FOUND: OnceLock<PathBuf> = OnceLock::new();
+    FOUND.get_or_init(|| find("ffprobe", "STREAMCUTS_FFPROBE")).clone()
 }
 
 /// A command that never flashes a console window.
@@ -91,6 +106,13 @@ pub struct Frame {
     pub rgba: Vec<u8>,
 }
 
+/// The `-ss` for the frame at `at`. FFmpeg starts at the first frame at or after the time it's given, and a frame's
+/// time rounded to milliseconds can land just after it (14/30 s is 0.46667: "0.467" would give frame 15), so this
+/// asks for a millisecond early.
+fn seek_to(at: f64) -> String {
+    format!("{:.3}", (at - 0.001).max(0.0))
+}
+
 fn scale_filter(width: u32, height: u32) -> String {
     format!("scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black")
 }
@@ -106,7 +128,7 @@ pub fn still(path: &Path, at: f64, width: u32, height: u32) -> Result<Frame, Str
         return Ok(Frame { time: at, size: [width as usize, height as usize], rgba: canvas.into_raw() });
     }
     let output = command(&ffmpeg())
-        .args(["-v", "error", "-ss", &format!("{at:.3}")])
+        .args(["-v", "error", "-ss", &seek_to(at)])
         .arg("-i")
         .arg(path)
         .args(["-frames:v", "1", "-an", "-vf", &scale_filter(width, height), "-pix_fmt", "rgba", "-f", "rawvideo", "pipe:1"])
@@ -125,28 +147,78 @@ pub fn thumbnail(path: &Path, at: f64) -> Result<Frame, String> {
     still(path, at, 192, 108)
 }
 
+/// FFmpeg started on a thread of its own, reading its output there: a static build can take half a second to start,
+/// and the editor mustn't stop for it. Dropping this stops FFmpeg, whether it has got going yet or not.
+struct Background {
+    state: Arc<Mutex<Started>>,
+}
+
+enum Started {
+    Pending,
+    Running(Child),
+    Stopped,
+}
+
+impl Background {
+    /// Starts `command` and runs `read` on its output, sending what it reads to the returned receiver.
+    fn start<T: Send + 'static>(
+        mut command: Command,
+        capacity: usize,
+        read: impl FnOnce(ChildStdout, SyncSender<T>) + Send + 'static,
+    ) -> (Self, Receiver<T>) {
+        let state = Arc::new(Mutex::new(Started::Pending));
+        let (sender, receiver) = sync_channel(capacity);
+        let shared = state.clone();
+        std::thread::spawn(move || {
+            let Ok(mut child) = command.stdout(Stdio::piped()).stderr(Stdio::null()).spawn() else { return };
+            let stdout = child.stdout.take().expect("piped");
+            {
+                let mut state = shared.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                if matches!(*state, Started::Stopped) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return;
+                }
+                *state = Started::Running(child);
+            }
+            read(stdout, sender);
+        });
+        (Self { state }, receiver)
+    }
+}
+
+impl Drop for Background {
+    fn drop(&mut self) {
+        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Started::Running(mut child) = std::mem::replace(&mut *state, Started::Stopped) {
+            let _ = child.kill();
+            // Waiting for the process to go can take a moment; it needn't hold up the caller.
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
+    }
+}
+
 /// Frames decoded continuously from a source time onwards, for playback. Dropping it stops FFmpeg.
 pub struct FrameStream {
-    child: Child,
+    _ffmpeg: Background,
     pub frames: Receiver<Frame>,
     pub from: f64,
 }
 
 impl FrameStream {
-    pub fn start(path: &Path, from: f64, fps: u32, width: u32, height: u32) -> Result<Self, String> {
-        let mut child = command(&ffmpeg())
-            .args(["-v", "error", "-ss", &format!("{from:.3}")])
+    pub fn start(path: &Path, from: f64, fps: u32, width: u32, height: u32) -> Self {
+        // Start on a frame, so each frame's time is exactly the source time it shows.
+        let from = (from * fps as f64 - 1e-6).ceil().max(0.0) / fps as f64;
+        let mut command = command(&ffmpeg());
+        command
+            .args(["-v", "error", "-ss", &seek_to(from)])
             .arg("-i")
             .arg(path)
-            .args(["-an", "-vf", &format!("fps={fps},{}", scale_filter(width, height)), "-pix_fmt", "rgba", "-f", "rawvideo", "pipe:1"])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| format!("FFmpeg couldn't start ({e})."))?;
-        let mut stdout = child.stdout.take().expect("piped");
-        let (sender, frames): (SyncSender<Frame>, Receiver<Frame>) = sync_channel(6);
+            .args(["-an", "-vf", &format!("fps={fps},{}", scale_filter(width, height)), "-pix_fmt", "rgba", "-f", "rawvideo", "pipe:1"]);
         let frame_bytes = (width * height * 4) as usize;
-        std::thread::spawn(move || {
+        let (ffmpeg, frames) = Background::start(command, 6, move |mut stdout, sender| {
             for index in 0.. {
                 let mut rgba = vec![0u8; frame_bytes];
                 if stdout.read_exact(&mut rgba).is_err() {
@@ -158,59 +230,51 @@ impl FrameStream {
                 }
             }
         });
-        Ok(Self { child, frames, from })
+        Self { _ffmpeg: ffmpeg, frames, from }
     }
 }
 
-impl Drop for FrameStream {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-/// Sound decoded from a source time onwards as interleaved f32 samples at the output's rate and channel count.
+/// Sound decoded from a source time for `length` seconds, as interleaved f32 samples at the output's rate and channel
+/// count, for playback. Dropping it stops FFmpeg.
 pub struct SoundStream {
-    child: Child,
+    _ffmpeg: Background,
     pub chunks: Receiver<Vec<f32>>,
 }
 
 impl SoundStream {
-    pub fn start(path: &Path, from: f64, rate: u32, channels: u16) -> Result<Self, String> {
-        let mut child = command(&ffmpeg())
+    pub fn start(path: &Path, from: f64, length: f64, rate: u32, channels: u16) -> Self {
+        let mut command = command(&ffmpeg());
+        command
             .args(["-v", "error", "-ss", &format!("{from:.3}")])
             .arg("-i")
             .arg(path)
-            .args(["-vn", "-ac", &channels.to_string(), "-ar", &rate.to_string(), "-f", "f32le", "pipe:1"])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| format!("FFmpeg couldn't start ({e})."))?;
-        let mut stdout = child.stdout.take().expect("piped");
-        let (sender, chunks) = sync_channel(32);
-        std::thread::spawn(move || {
+            .args(["-t", &format!("{length:.3}"), "-vn", "-ac", &channels.to_string(), "-ar", &rate.to_string(), "-f", "f32le", "pipe:1"]);
+        let (ffmpeg, chunks) = Background::start(command, 32, |mut stdout, sender| {
             let mut bytes = vec![0u8; 4096 * 4];
+            // A read can end partway through a sample: those bytes wait at the front for the rest.
+            let mut filled = 0;
             loop {
-                match stdout.read(&mut bytes) {
+                match stdout.read(&mut bytes[filled..]) {
                     Ok(0) | Err(_) => break,
                     Ok(read) => {
-                        let read = read - read % 4;
-                        let samples: Vec<f32> = bytes[..read].chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
-                        if sender.send(samples).is_err() {
+                        filled += read;
+                        let whole = filled - filled % 4;
+                        let samples: Vec<f32> = bytes[..whole].chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+                        bytes.copy_within(whole..filled, 0);
+                        filled -= whole;
+                        if !samples.is_empty() && sender.send(samples).is_err() {
                             break;
                         }
                     }
                 }
             }
         });
-        Ok(Self { child, chunks })
+        Self { _ffmpeg: ffmpeg, chunks }
     }
-}
 
-impl Drop for SoundStream {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+    /// Hands the samples to whoever plays them (the output thread) while FFmpeg's lifetime stays with this.
+    pub fn take_chunks(&mut self) -> Receiver<Vec<f32>> {
+        std::mem::replace(&mut self.chunks, sync_channel(0).1)
     }
 }
 
@@ -236,10 +300,25 @@ mod tests {
         assert!(media.has_audio && media.width == 320 && media.height == 180);
         let frame = still(&clip, 1.0, 160, 90).unwrap();
         assert_eq!(frame.rgba.len(), 160 * 90 * 4);
-        let stream = FrameStream::start(&clip, 0.5, 10, 64, 36).unwrap();
-        let first = stream.frames.recv().unwrap();
-        assert!((first.time - 0.5).abs() < 1e-9 && first.rgba.len() == 64 * 36 * 4);
+        // Streamed frames carry their real source time: each looks like the still at its time, not its neighbors'.
+        let stream = FrameStream::start(&clip, 0.5, 30, 160, 90);
+        let frames: Vec<Frame> = stream.frames.iter().take(16).collect();
+        assert!((frames[0].time - 0.5).abs() < 1e-9 && frames[0].rgba.len() == 160 * 90 * 4);
+        for frame in [&frames[0], &frames[15]] {
+            let unlike = |t: f64| {
+                let other = still(&clip, t, 160, 90).unwrap();
+                frame.rgba.iter().zip(&other.rgba).map(|(a, b)| a.abs_diff(*b) as u64).sum::<u64>()
+            };
+            let (here, before, after) = (unlike(frame.time), unlike(frame.time - 1.0 / 30.0), unlike(frame.time + 1.0 / 30.0));
+            assert!(here < before && here < after, "frame at {:.3}: {here} vs {before} before, {after} after", frame.time);
+        }
         drop(stream);
+        // 1.5 s of stereo at 48 kHz from 0.25 s in, give or take a packet.
+        let mut sound = SoundStream::start(&clip, 0.25, 1.5, 48_000, 2);
+        let samples: usize = sound.take_chunks().iter().map(|chunk| chunk.len()).sum();
+        assert!(samples % 2 == 0 && (samples as i64 - 144_000).abs() < 4_000, "{samples} samples");
+        drop(sound);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
+

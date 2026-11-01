@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 canopy-ui = { path = "../../canopy/native/crates/canopy-ui" }
+cpal = "0.18.2"
 egui = "0.37.0"
 image = "0.25.10"
 rfd = "0.17.2"

@@ -1,11 +1,15 @@
 //! The preview: the picture in front at the playhead. Paused, it asks the worker for exact stills as you scrub; playing,
-//! it reads a continuous `FrameStream` for the clip in front and shows the newest frame that is due.
+//! it reads a continuous `FrameStream` for the clip in front and shows the newest frame that is due. The next clip's
+//! stream starts a second early, so a cut doesn't wait for FFmpeg to start.
 
 use crate::ffmpeg::{Frame, FrameStream};
-use crate::project::{MediaKind, Project};
+use crate::project::{Clip, Media, MediaKind, Project, TrackKind};
 use crate::worker::{Job, StillKey, Worker};
 use egui::{ColorImage, TextureHandle, TextureOptions};
 use std::time::Instant;
+
+/// How far ahead of a cut the next clip's picture starts decoding.
+const PRELOAD: f64 = 1.0;
 
 struct Playing {
     clip_id: String,
@@ -14,12 +18,21 @@ struct Playing {
     shown: f64,
 }
 
+impl Playing {
+    fn start(project: &Project, clip: &Clip, media: &Media, source: f64) -> Self {
+        let (width, height) = decode_size(project);
+        let stream = FrameStream::start(&media.path, source, project.fps, width, height);
+        Self { clip_id: clip.id.clone(), stream, ahead: None, shown: source }
+    }
+}
+
 #[derive(Default)]
 pub struct Preview {
     pub texture: Option<TextureHandle>,
     shown: Option<StillKey>,
     waiting: Option<StillKey>,
     playing: Option<Playing>,
+    next: Option<Playing>,
     /// Nothing is in front at the playhead.
     pub blank: bool,
 }
@@ -56,6 +69,11 @@ impl Preview {
 
     /// Brings the preview to timeline time `t`.
     pub fn update(&mut self, ctx: &egui::Context, project: &Project, t: f64, playing: bool, worker: &Worker) {
+        if playing {
+            self.preload(project, t);
+        } else {
+            self.next = None;
+        }
         let Some((clip, media)) = project.front_clip(t) else {
             self.blank = true;
             self.playing = None;
@@ -71,9 +89,8 @@ impl Preview {
                 None => true,
             };
             if restart {
-                self.playing = FrameStream::start(&media.path, source, project.fps, width, height)
-                    .ok()
-                    .map(|stream| Playing { clip_id: clip.id.clone(), stream, ahead: None, shown: source });
+                let preloaded = self.next.take().filter(|next| next.clip_id == clip.id && (source - next.shown).abs() <= 0.75);
+                self.playing = Some(preloaded.unwrap_or_else(|| Playing::start(project, clip, media, source)));
             }
             let half_frame = 0.5 / project.fps as f64;
             let mut latest = None;
@@ -108,10 +125,31 @@ impl Preview {
         }
     }
 
+    /// Starts decoding the clip that comes in front next, if that happens within `PRELOAD` seconds.
+    fn preload(&mut self, project: &Project, t: f64) {
+        let current = project.front_clip(t).map(|(clip, _)| clip.id.clone());
+        // What's in front changes only where a video clip starts or ends.
+        let mut changes: Vec<f64> = project.tracks.iter()
+            .filter(|track| track.kind == TrackKind::Video)
+            .flat_map(|track| track.clips.iter().flat_map(|clip| [clip.start, clip.end()]))
+            .filter(|&at| at > t && at <= t + PRELOAD)
+            .collect();
+        changes.sort_by(f64::total_cmp);
+        let upcoming = changes.into_iter().find_map(|at| {
+            project.front_clip(at).filter(|(clip, _)| Some(&clip.id) != current.as_ref()).map(|(clip, media)| (at, clip, media))
+        });
+        let Some((at, clip, media)) = upcoming else { return };
+        if media.kind != MediaKind::Video || self.next.as_ref().is_some_and(|next| next.clip_id == clip.id) {
+            return;
+        }
+        self.next = Some(Playing::start(project, clip, media, clip.source_time(at)));
+    }
+
     /// Forgets the picture so the next update fetches it again (after the project's shape changes).
     pub fn reset(&mut self) {
         self.shown = None;
         self.playing = None;
+        self.next = None;
         self.texture = None;
     }
 }

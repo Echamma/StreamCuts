@@ -1,6 +1,7 @@
 //! The StreamCuts editor: toolbar, media bin, preview with transport, and the timeline. One instance runs per space in
 //! Canopy, or alone in StreamCuts' own window.
 
+use crate::audio::Audio;
 use crate::export::{self, Export};
 use crate::ffmpeg::Frame;
 use crate::preview::{Clock, Preview};
@@ -34,6 +35,7 @@ pub struct StreamCuts {
     pending: HashMap<PathBuf, Pending>,
     preview: Preview,
     clock: Clock,
+    audio: Audio,
     playhead: f64,
     timeline: Timeline,
     export: Option<Export>,
@@ -60,6 +62,7 @@ impl StreamCuts {
             pending: HashMap::new(),
             preview: Preview::default(),
             clock: Clock::default(),
+            audio: Audio::default(),
             playhead: 0.0,
             timeline: Timeline::default(),
             export: None,
@@ -89,7 +92,7 @@ impl StreamCuts {
         self.history.clear();
         self.timeline = Timeline::default();
         self.playhead = 0.0;
-        self.clock.pause();
+        self.pause();
         self.preview.reset();
         self.request_thumbnails();
     }
@@ -138,18 +141,34 @@ impl StreamCuts {
     fn seek(&mut self, t: f64) {
         self.playhead = t.clamp(0.0, self.project.duration().max(0.0));
         if self.clock.playing {
-            self.clock.play(self.playhead);
+            self.play_from(self.playhead);
         }
+    }
+
+    /// Plays from `t`: with sound when there's an output, which then sets the pace; else silently on the wall clock.
+    fn play_from(&mut self, t: f64) {
+        self.clock.play(t);
+        let had_output = self.audio.failed.is_none();
+        if !self.audio.play(&self.project, t) && had_output {
+            if let Some(error) = &self.audio.failed {
+                self.toasts.push(format!("Playing without sound: {error}"));
+            }
+        }
+    }
+
+    fn pause(&mut self) {
+        self.clock.pause();
+        self.audio.pause();
     }
 
     fn toggle_play(&mut self) {
         if self.clock.playing {
-            self.clock.pause();
+            self.pause();
         } else {
             if self.playhead >= self.project.duration() - 0.05 {
                 self.playhead = 0.0;
             }
-            self.clock.play(self.playhead);
+            self.play_from(self.playhead);
         }
     }
 
@@ -447,10 +466,16 @@ impl CanopyApp for StreamCuts {
         }
         self.shortcuts(ui);
         if self.clock.playing {
-            self.playhead = self.clock.now();
-            if self.playhead >= self.project.duration() {
-                self.playhead = self.project.duration();
-                self.clock.pause();
+            if self.audio.update(&self.project, self.playhead) {
+                self.playhead = self.audio.now().unwrap_or_else(|| self.clock.now());
+                if self.playhead >= self.project.duration() {
+                    self.playhead = self.project.duration();
+                    self.pause();
+                }
+            } else {
+                // The sound stopped while StreamCuts was out of sight: stop the picture where the sound stopped.
+                self.playhead = self.audio.now().unwrap_or(self.playhead).min(self.project.duration());
+                self.pause();
             }
             ctx.request_repaint();
         }
