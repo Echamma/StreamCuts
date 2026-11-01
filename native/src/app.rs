@@ -18,6 +18,9 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 const BIN_WIDTH: f32 = 250.0;
+/// Below this width (half of a split Canopy window) the toolbar folds its text buttons into icons.
+const NARROW: f32 = 780.0;
+const SHAPES: [(&str, u32, u32); 3] = [("16:9", 1920, 1080), ("9:16", 1080, 1920), ("1:1", 1080, 1080)];
 
 /// Where a file being imported goes once it has been probed.
 struct Pending {
@@ -232,9 +235,10 @@ impl StreamCuts {
     }
 
     fn toolbar(&mut self, ui: &mut Ui) {
+        let narrow = ui.available_width() < NARROW;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
-            let name = ui.add(egui::TextEdit::singleline(&mut self.project.name).font(font::bold(15.0)).desired_width(220.0).margin(vec2(8.0, 6.0)));
+            let name = ui.add(egui::TextEdit::singleline(&mut self.project.name).font(font::bold(15.0)).desired_width(if narrow { 130.0 } else { 220.0 }).margin(vec2(8.0, 6.0)));
             if name.changed() {
                 self.edited();
             }
@@ -244,26 +248,40 @@ impl StreamCuts {
             if icon_button(ui, Icon::Redo, "Redo (Ctrl+Shift+Z)", false).clicked() && self.history.redo(&mut self.project) {
                 self.edited();
             }
-            if quiet_button(ui, "Import", Some(Icon::Plus)).clicked() {
+            let import = if narrow { icon_button(ui, Icon::Plus, "Import", false) } else { quiet_button(ui, "Import", Some(Icon::Plus)) };
+            if import.clicked() {
                 if let Some(files) = rfd::FileDialog::new().set_title("Import media").add_filter("Video, pictures and sound", &["mp4", "mov", "mkv", "webm", "avi", "m4v", "png", "jpg", "jpeg", "webp", "gif", "mp3", "wav", "m4a", "aac", "flac", "ogg"]).pick_files() {
                     let at = self.project.duration();
                     self.import(files, at, None);
                 }
             }
-            for (label, w, h) in [("16:9", 1920, 1080), ("9:16", 1080, 1920), ("1:1", 1080, 1080)] {
-                if pill(ui, label, None, (self.project.width, self.project.height) == (w, h)).clicked() && (self.project.width, self.project.height) != (w, h) {
-                    self.history.record(&self.project);
-                    self.project.width = w;
-                    self.project.height = h;
-                    self.preview.reset();
-                    self.edited();
+            let current = SHAPES.iter().position(|&(_, w, h)| (self.project.width, self.project.height) == (w, h));
+            let mut shape = None;
+            if narrow {
+                // One pill that steps through the shapes.
+                let label = current.map_or("Shape", |i| SHAPES[i].0);
+                if pill(ui, label, None, false).on_hover_text("Change the shape: 16:9, 9:16 or 1:1").clicked() {
+                    shape = Some(current.map_or(0, |i| (i + 1) % SHAPES.len()));
                 }
+            } else {
+                for (i, (label, _, _)) in SHAPES.iter().enumerate() {
+                    if pill(ui, label, None, current == Some(i)).clicked() && current != Some(i) {
+                        shape = Some(i);
+                    }
+                }
+            }
+            if let Some(i) = shape {
+                self.history.record(&self.project);
+                (_, self.project.width, self.project.height) = SHAPES[i];
+                self.preview.reset();
+                self.edited();
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if primary_button(ui, "Export", Mood::Ember).clicked() && self.export.is_none() {
                     self.start_export(ui.ctx());
                 }
-                if quiet_button(ui, "Projects", Some(Icon::Project)).clicked() {
+                let projects = if narrow { icon_button(ui, Icon::Project, "Projects", self.show_projects) } else { quiet_button(ui, "Projects", Some(Icon::Project)) };
+                if projects.clicked() {
                     self.show_projects = !self.show_projects;
                 }
             });
@@ -494,7 +512,7 @@ impl CanopyApp for StreamCuts {
         let body_top = toolbar.bottom() + 4.0;
         let timeline_height = ((rect.height() - 44.0) * 0.42).max(160.0);
         let upper = Rect::from_min_max(pos2(rect.left(), body_top), pos2(rect.right(), rect.bottom() - timeline_height - 6.0));
-        let bin = Rect::from_min_size(upper.min, vec2(BIN_WIDTH, upper.height()));
+        let bin = Rect::from_min_size(upper.min, vec2((rect.width() * 0.2).clamp(150.0, BIN_WIDTH), upper.height()));
         let preview = Rect::from_min_max(pos2(bin.right() + 6.0, upper.top()), upper.max);
         ui.painter().add(pane_frame(Mood::Ember).paint(bin));
         ui.scope_builder(UiBuilder::new().max_rect(bin.shrink(8.0)), |ui| self.media_bin(ui));

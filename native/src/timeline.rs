@@ -250,7 +250,8 @@ impl Timeline {
                 let at = self.snap(project, None, playhead, t_of(p.x).max(0.0));
                 let hovered = row_at(p.y);
                 let track = (hovered >= 0.0 && (hovered as usize) < project.tracks.len()).then_some(hovered as usize);
-                if let Some(drag) = DragAndDrop::take_payload::<MediaDrag>(ui.ctx()) {
+                // take_payload clears whatever payload there is, even one of another type: ask for the right one.
+                if let Some(drag) = DragAndDrop::has_payload_of_type::<MediaDrag>(ui.ctx()).then(|| DragAndDrop::take_payload::<MediaDrag>(ui.ctx())).flatten() {
                     history.record(project);
                     if let Some(id) = project.place(&drag.0, track, at) {
                         self.selection = vec![id];
