@@ -2,6 +2,7 @@
 //! Canopy, or alone in StreamCuts' own window.
 
 use crate::audio::Audio;
+use crate::boss::Suggestion;
 use crate::captions;
 use crate::export::{self, Export};
 use crate::ffmpeg::Frame;
@@ -31,6 +32,11 @@ struct Pending {
     track: Option<usize>,
 }
 
+struct BossPlan {
+    media_id: String,
+    suggestions: Vec<Suggestion>,
+}
+
 pub struct StreamCuts {
     place: Place,
     project: Project,
@@ -40,6 +46,8 @@ pub struct StreamCuts {
     looks: Looks,
     /// Transcriptions still running.
     transcribing: usize,
+    boss_running: Option<String>,
+    boss_plan: Option<BossPlan>,
     /// Typing in a caption: one undo step for the whole edit.
     caption_typing: bool,
     /// Dragging a clip setting: one undo step for the whole drag.
@@ -74,6 +82,8 @@ impl StreamCuts {
             worker: Worker::new(ctx.clone()),
             looks: Looks::default(),
             transcribing: 0,
+            boss_running: None,
+            boss_plan: None,
             caption_typing: false,
             adjusting: false,
             looks_asked: HashSet::new(),
@@ -178,6 +188,14 @@ impl StreamCuts {
                             self.edited();
                             self.toasts.push(if count == 0 { "No speech found for captions".into() } else { format!("Added {count} caption{}", if count == 1 { "" } else { "s" }) });
                         }
+                        Err(error) => self.toasts.push(error),
+                    }
+                }
+                Done::Boss { media_id, result } => {
+                    self.boss_running = None;
+                    match result {
+                        Ok(suggestions) if !suggestions.is_empty() => self.boss_plan = Some(BossPlan { media_id, suggestions }),
+                        Ok(_) => self.toasts.push("Boss AI found no shorts in this video".into()),
                         Err(error) => self.toasts.push(error),
                     }
                 }
@@ -307,6 +325,10 @@ impl StreamCuts {
                     self.import(files, at, None);
                 }
             }
+            let boss = if narrow { icon_button(ui, Icon::Scissors, "Boss AI: find shorts in a video", self.boss_running.is_some()) } else { quiet_button(ui, "Boss AI", Some(Icon::Scissors)) };
+            if boss.clicked() && self.boss_running.is_none() {
+                self.start_boss();
+            }
             let current = SHAPES.iter().position(|&(_, w, h)| (self.project.width, self.project.height) == (w, h));
             let mut shape = None;
             if narrow {
@@ -346,6 +368,74 @@ impl StreamCuts {
                 }
             });
         });
+    }
+
+    fn start_boss(&mut self) {
+        if std::env::var_os("GEMINI_API_KEY").is_none() && std::env::var_os("STREAMCUTS_BOSS_RESPONSE").is_none() {
+            self.toasts.push("Set GEMINI_API_KEY to use Boss AI".into());
+            return;
+        }
+        let selected = self.timeline.selection.iter().find_map(|id| self.project.clip(id)).map(|clip| clip.media_id.as_str());
+        let media = selected.and_then(|id| self.project.media(id)).filter(|m| m.kind == MediaKind::Video)
+            .or_else(|| self.project.media.iter().find(|m| m.kind == MediaKind::Video));
+        let Some(media) = media else { self.toasts.push("Import a video to find shorts".into()); return };
+        if !media.path.is_file() { self.toasts.push(format!("{} is missing", media.name)); return; }
+        self.boss_running = Some(media.id.clone());
+        self.worker.send(Job::Boss { media_id: media.id.clone(), path: media.path.clone(), duration: media.duration });
+        self.toasts.push("Boss AI is transcribing and finding shorts; long videos can take a while".into());
+    }
+
+    fn boss_window(&mut self, ui: &mut Ui) {
+        let Some(plan) = &self.boss_plan else { return };
+        let mut selected = None;
+        let modal = egui::Modal::new(ui.scope_id().with("boss-plan")).show(ui.ctx(), |ui| {
+            ui.set_width(440.0);
+            ui.label(egui::RichText::new("Shorts Boss found").font(font::display(20.0)));
+            ui.label("Pick a moment to open it as a 9:16 project with a title and captions.");
+            ui.add_space(8.0);
+            egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                for (index, short) in plan.suggestions.iter().enumerate() {
+                    let label = format!("{}  ·  {}–{}", short.title, timecode(short.start_seconds, self.project.fps), timecode(short.end_seconds, self.project.fps));
+                    if quiet_button(ui, &label, Some(Icon::Scissors)).clicked() { selected = Some(index); }
+                    if !short.description.is_empty() { ui.label(&short.description); }
+                    ui.add_space(6.0);
+                }
+            });
+        });
+        if let Some(index) = selected {
+            let short = self.boss_plan.as_ref().unwrap().suggestions[index].clone();
+            let media_id = self.boss_plan.as_ref().unwrap().media_id.clone();
+            self.open_boss_short(&media_id, &short);
+            self.boss_plan = None;
+        } else if modal.should_close() {
+            self.boss_plan = None;
+        }
+    }
+
+    fn open_boss_short(&mut self, media_id: &str, short: &Suggestion) {
+        let Some(media) = self.project.media(media_id).cloned() else { return };
+        let mut project = Project::new(&short.title);
+        project.width = 1080;
+        project.height = 1920;
+        let id = project.add_media(media.clone());
+        let Some(clip_id) = project.place(&id, None, 0.0) else { return };
+        if let Some(clip) = project.clip_mut(&clip_id) {
+            clip.source_in = short.start_seconds;
+            clip.duration = short.end_seconds - short.start_seconds;
+            clip.framing = Framing::Fill { x: 0.5, y: 0.5 };
+        }
+        let title_id = project.add_title(0.0);
+        if let Some(title) = project.title_mut(&title_id) {
+            title.text = short.title.clone();
+            title.end = 3.0_f64.min(short.end_seconds - short.start_seconds);
+            title.y = 0.22;
+        }
+        self.open(project);
+        self.edited();
+        if media.has_audio {
+            self.worker.send(Job::Transcribe { clip: clip_id, path: media.path, from: short.start_seconds, length: short.end_seconds - short.start_seconds, speed: 1.0, at: 0.0 });
+            self.transcribing += 1;
+        }
     }
 
     /// Asks where a missing file went and points the project there. The clips keep their place and trims.
@@ -895,6 +985,7 @@ impl CanopyApp for StreamCuts {
             self.import(files.into_iter().filter(|f| accepts(f)).map(|f| f.path).collect(), at, track);
         }
         self.projects_window(ui);
+        self.boss_window(ui);
         self.export_window(ui, host);
     }
 

@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod audio;
+pub mod boss;
 pub mod cache;
 pub mod captions;
 pub mod export;

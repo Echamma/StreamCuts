@@ -9,6 +9,14 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 const SCRIPT: &str = "backend/long-to-short/python/transcribe.py";
+const BOSS_CHUNK_SECONDS: f64 = 600.0;
+
+/// Speech from the source file, with absolute source timestamps for long-video planning.
+pub struct SourceSegment {
+    pub start: f64,
+    pub end: f64,
+    pub text: String,
+}
 
 #[derive(Deserialize)]
 struct Transcript {
@@ -59,6 +67,40 @@ pub fn captions(clip: &str, media: &Path, from: f64, length: f64, speed: f64, at
         caption.clip = Some(clip.to_owned());
     }
     Ok(captions)
+}
+
+/// Transcribes a full source in ten-minute pieces, keeping timestamps absolute. Run off the UI thread.
+pub fn source_transcript(media: &Path, duration: f64) -> Result<Vec<SourceSegment>, String> {
+    let script = script().ok_or("Boss AI needs StreamCuts' transcription script (set STREAMCUTS_TRANSCRIBE).")?;
+    let dir = std::env::temp_dir().join(format!("streamcuts-boss-{}", new_id()));
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let result = (|| {
+        let mut segments = Vec::new();
+        for (from, length) in chunks(duration) {
+            let transcript = transcribe_in(&dir, &script, media, from, length)?;
+            segments.extend(transcript.segments.into_iter()
+                .filter(|segment| !segment.text.trim().is_empty())
+                .map(|segment| SourceSegment {
+                    start: from + segment.start.clamp(0.0, length),
+                    end: from + segment.end.clamp(0.0, length),
+                    text: segment.text.trim().to_owned(),
+                }));
+        }
+        Ok(segments)
+    })();
+    let _ = std::fs::remove_dir_all(&dir);
+    result
+}
+
+fn chunks(duration: f64) -> Vec<(f64, f64)> {
+    let mut chunks = Vec::new();
+    let mut from = 0.0;
+    while from < duration {
+        let length = (duration - from).min(BOSS_CHUNK_SECONDS);
+        chunks.push((from, length));
+        from += length;
+    }
+    chunks
 }
 
 fn transcribe_in(dir: &Path, script: &Path, media: &Path, from: f64, length: f64) -> Result<Transcript, String> {
@@ -130,5 +172,10 @@ mod tests {
     fn finds_the_script_in_the_checkout() {
         // Test binaries live in native/target/debug/deps, inside the StreamCuts checkout.
         assert!(script().is_some_and(|path| path.ends_with("transcribe.py")));
+    }
+
+    #[test]
+    fn long_sources_are_cut_without_gaps_or_overrun() {
+        assert_eq!(chunks(1205.0), vec![(0.0, 600.0), (600.0, 600.0), (1200.0, 5.0)]);
     }
 }
