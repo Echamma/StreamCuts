@@ -4,6 +4,7 @@ pub mod app;
 pub mod audio;
 pub mod export;
 pub mod ffmpeg;
+pub mod filmstrip;
 pub mod preview;
 pub mod project;
 pub mod storage;

@@ -7,8 +7,8 @@ use crate::ffmpeg::Frame;
 use crate::preview::{Clock, Preview};
 use crate::project::{History, MediaKind, Project};
 use crate::storage;
-use crate::timeline::{MediaDrag, Timeline, timecode};
-use crate::waveform::Waveform;
+use crate::filmstrip::Strip;
+use crate::timeline::{Looks, MediaDrag, Timeline, timecode};
 use crate::worker::{Done, Job, Worker};
 use canopy_ui::canopy_core::files::Kind;
 use canopy_ui::{CanopyApp, Host, Icon, Mood, Place, Receipt, SharedFile, color, font, icon, icon_button, pane_frame, pill, primary_button, quiet_button};
@@ -36,9 +36,9 @@ pub struct StreamCuts {
     history: History,
     edited_at: Option<Instant>,
     worker: Worker,
-    thumbnails: HashMap<String, TextureHandle>,
-    waveforms: HashMap<String, Arc<Waveform>>,
-    waveforms_asked: HashSet<String>,
+    looks: Looks,
+    /// Media whose waveform and filmstrip have been asked for.
+    looks_asked: HashSet<String>,
     pending: HashMap<PathBuf, Pending>,
     preview: Preview,
     clock: Clock,
@@ -65,9 +65,8 @@ impl StreamCuts {
             history: History::default(),
             edited_at: None,
             worker: Worker::new(ctx.clone()),
-            thumbnails: HashMap::new(),
-            waveforms: HashMap::new(),
-            waveforms_asked: HashSet::new(),
+            looks: Looks::default(),
+            looks_asked: HashSet::new(),
             pending: HashMap::new(),
             preview: Preview::default(),
             clock: Clock::default(),
@@ -79,16 +78,21 @@ impl StreamCuts {
             toasts: Vec::new(),
             exported: Vec::new(),
         };
-        app.request_thumbnails();
+        app.request_looks();
         app
     }
 
-    fn request_thumbnails(&mut self) {
+    fn request_looks(&mut self) {
         for media in &self.project.media {
-            if media.has_audio && self.waveforms_asked.insert(media.id.clone()) {
-                self.worker.send(Job::Waveform { media_id: media.id.clone(), path: media.path.clone() });
+            if self.looks_asked.insert(media.id.clone()) {
+                if media.has_audio {
+                    self.worker.send(Job::Waveform { media_id: media.id.clone(), path: media.path.clone() });
+                }
+                if media.kind == MediaKind::Video {
+                    self.worker.send(Job::Filmstrip { media_id: media.id.clone(), path: media.path.clone(), duration: media.duration });
+                }
             }
-            if !self.thumbnails.contains_key(&media.id) && media.kind != MediaKind::Audio {
+            if !self.looks.thumbnails.contains_key(&media.id) && media.kind != MediaKind::Audio {
                 self.worker.send(Job::Thumbnail { media_id: media.id.clone(), path: media.path.clone(), at: (media.duration * 0.1).min(1.0) });
             }
         }
@@ -106,7 +110,7 @@ impl StreamCuts {
         self.playhead = 0.0;
         self.pause();
         self.preview.reset();
-        self.request_thumbnails();
+        self.request_looks();
     }
 
     fn import(&mut self, files: Vec<PathBuf>, at: f64, track: Option<usize>) {
@@ -134,7 +138,7 @@ impl StreamCuts {
                                     self.timeline.selection = vec![clip];
                                 }
                             }
-                            self.request_thumbnails();
+                            self.request_looks();
                             self.edited();
                         }
                         Err(error) => self.toasts.push(error),
@@ -142,14 +146,18 @@ impl StreamCuts {
                 }
                 Done::Thumbnail(id, Ok(frame)) => {
                     let texture = Self::texture(ctx, &format!("thumb-{id}"), &frame);
-                    self.thumbnails.insert(id, texture);
+                    self.looks.thumbnails.insert(id, texture);
                 }
                 Done::Thumbnail(_, Err(_)) => {}
                 Done::Still(key, frame) => self.preview.still_done(ctx, key, frame),
                 Done::Waveform(id, Ok(wave)) => {
-                    self.waveforms.insert(id, Arc::new(wave));
+                    self.looks.waveforms.insert(id, Arc::new(wave));
                 }
-                Done::Waveform(_, Err(_)) => {}
+                Done::Filmstrip(id, Ok(film)) => {
+                    let strip = Strip::new(ctx, &format!("strip-{id}"), film);
+                    self.looks.filmstrips.insert(id, strip);
+                }
+                Done::Waveform(_, Err(_)) | Done::Filmstrip(_, Err(_)) => {}
             }
         }
     }
@@ -338,7 +346,7 @@ impl StreamCuts {
                     let painter = ui.painter();
                     painter.rect_filled(rect, 8, color::VEIL);
                     let thumb = Rect::from_min_size(rect.min + vec2(4.0, 4.0), vec2(68.0, 38.0));
-                    match self.thumbnails.get(&media.id) {
+                    match self.looks.thumbnails.get(&media.id) {
                         Some(texture) => {
                             painter.image(texture.id(), thumb, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
                         }
@@ -572,7 +580,7 @@ impl CanopyApp for StreamCuts {
         let bar = Rect::from_min_size(lower.min + vec2(8.0, 4.0), vec2(lower.width() - 16.0, 32.0));
         ui.scope_builder(UiBuilder::new().max_rect(bar), |ui| self.timeline_bar(ui));
         let lanes = Rect::from_min_max(pos2(lower.left() + 4.0, bar.bottom() + 4.0), lower.max - vec2(4.0, 4.0));
-        let output = ui.scope_builder(UiBuilder::new().max_rect(lanes), |ui| self.timeline.ui(ui, &mut self.project, &mut self.history, self.playhead, &self.thumbnails, &self.waveforms)).inner;
+        let output = ui.scope_builder(UiBuilder::new().max_rect(lanes), |ui| self.timeline.ui(ui, &mut self.project, &mut self.history, self.playhead, &self.looks)).inner;
         if self.clock.playing {
             self.timeline.follow(self.playhead, lanes.width());
         }

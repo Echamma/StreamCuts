@@ -113,7 +113,7 @@ fn seek_to(at: f64) -> String {
     format!("{:.3}", (at - 0.001).max(0.0))
 }
 
-fn scale_filter(width: u32, height: u32) -> String {
+pub(crate) fn scale_filter(width: u32, height: u32) -> String {
     format!("scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black")
 }
 

@@ -1,6 +1,7 @@
 //! The timeline: a ruler, one row per track, clips you can move, trim and select, and the playhead.
 //! It edits the project through `Project`'s methods and reports seeks and drops back to the editor.
 
+use crate::filmstrip::Strip;
 use crate::project::{History, MediaKind, Project, TrackKind};
 use crate::waveform::Waveform;
 use canopy_ui::{DraggedFiles, Icon, SharedFile, color, font, icon_button};
@@ -9,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 pub const RULER: f32 = 26.0;
-pub const ROW: f32 = 54.0;
+pub const ROW: f32 = 64.0;
 pub const HEADER: f32 = 112.0;
 const EDGE: f32 = 7.0;
 const SNAP_PX: f32 = 8.0;
@@ -17,6 +18,14 @@ const SNAP_PX: f32 = 8.0;
 /// A medium dragged from the media bin.
 #[derive(Clone, Debug)]
 pub struct MediaDrag(pub String);
+
+/// How media looks on the timeline, made in the background: a thumbnail, a filmstrip and a waveform per media id.
+#[derive(Default)]
+pub struct Looks {
+    pub thumbnails: HashMap<String, TextureHandle>,
+    pub filmstrips: HashMap<String, Strip>,
+    pub waveforms: HashMap<String, Arc<Waveform>>,
+}
 
 enum Gesture {
     Move { clip: String, grab: f64 },
@@ -88,8 +97,7 @@ impl Timeline {
         project: &mut Project,
         history: &mut History,
         playhead: f64,
-        thumbnails: &HashMap<String, TextureHandle>,
-        waveforms: &HashMap<String, Arc<Waveform>>,
+        looks: &Looks,
     ) -> Output {
         let mut output = Output::default();
         let rect = ui.available_rect_before_wrap();
@@ -164,11 +172,39 @@ impl Timeline {
             }
             let selected = self.selection.contains(&clip.id);
             lane_painter.rect_filled(clip_rect, 6, clip_fill(media.kind));
-            if let Some(wave) = waveforms.get(&media.id) {
-                // The sound, mirrored about the middle of the clip's body, under the thumbnail.
-                let area = Rect::from_min_max(pos2(clip_rect.left(), clip_rect.top() + 16.0), clip_rect.max - vec2(0.0, 3.0));
-                let ink = color::INK.gamma_multiply(if media.kind == MediaKind::Audio { 0.55 } else { 0.3 });
-                let (step, half) = (2.0, area.height() / 2.0);
+            // Pictures across the top of the clip's body and its sound mirrored along the bottom; a sound clip is all sound.
+            let body = Rect::from_min_max(pos2(clip_rect.left() + 2.0, clip_rect.top() + 16.0), clip_rect.max - vec2(2.0, 2.0));
+            let wave = looks.waveforms.get(&media.id);
+            let (pictures, sound) = match (media.kind, wave.is_some()) {
+                (MediaKind::Audio, _) => (None, Some(body)),
+                (_, true) => {
+                    let split = body.top() + body.height() * 0.62;
+                    (Some(Rect::from_min_max(body.min, pos2(body.right(), split))), Some(Rect::from_min_max(pos2(body.left(), split), body.max)))
+                }
+                (_, false) => (Some(body), None),
+            };
+            if let Some(area) = pictures {
+                if let Some(strip) = looks.filmstrips.get(&media.id) {
+                    let width = area.height() * 16.0 / 9.0;
+                    let mut x = area.left() + ((visible.left() - area.left()) / width).floor().max(0.0) * width;
+                    while x < visible.right().min(area.right()) {
+                        let shown = Rect::from_min_size(pos2(x, area.top()), vec2(width, area.height())).intersect(area);
+                        let mut uv = strip.uv(clip.source_time(t_of(x + width / 2.0)));
+                        // A tile cut off at the clip's end shows the left part of its frame.
+                        uv.max.x = uv.min.x + uv.width() * shown.width() / width;
+                        lane_painter.image(strip.texture.id(), shown, uv, Color32::WHITE);
+                        x += width;
+                    }
+                } else if let Some(texture) = looks.thumbnails.get(&media.id) {
+                    let thumb = Rect::from_min_size(area.min, vec2((area.height() * 16.0 / 9.0).min(area.width()), area.height()));
+                    if thumb.width() > 8.0 {
+                        lane_painter.image(texture.id(), thumb, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                    }
+                }
+            }
+            if let (Some(area), Some(wave)) = (sound, wave) {
+                let ink = color::INK.gamma_multiply(0.55);
+                let (step, half) = (2.0, area.height() / 2.0 - 1.0);
                 let mut x = visible.left().max(area.left());
                 while x < visible.right().min(area.right()) {
                     // Square root, so quiet sound (speech sits around a tenth of full scale) still shows.
@@ -176,13 +212,6 @@ impl Timeline {
                     let h = (loud * half).max(0.5);
                     lane_painter.line_segment([pos2(x, area.center().y - h), pos2(x, area.center().y + h)], Stroke::new(1.2, ink));
                     x += step;
-                }
-            }
-            if let Some(texture) = thumbnails.get(&media.id).filter(|_| media.kind != MediaKind::Audio) {
-                let height = clip_rect.height() - 18.0;
-                let thumb = Rect::from_min_size(pos2(clip_rect.left() + 2.0, clip_rect.top() + 16.0), vec2((height * 16.0 / 9.0).min(clip_rect.width() - 4.0), height));
-                if thumb.width() > 8.0 {
-                    lane_painter.image(texture.id(), thumb, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
                 }
             }
             lane_painter.with_clip_rect(visible.shrink(2.0)).text(pos2(clip_rect.left() + 6.0, clip_rect.top() + 8.0), Align2::LEFT_CENTER, &media.name, font::ui(11.0), color::INK);
