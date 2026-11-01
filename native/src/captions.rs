@@ -2,7 +2,7 @@
 //! frame and titles wherever they're placed. The preview draws them with egui and exports burn them in from an ASS file
 //! through FFmpeg's `subtitles` filter, both from the same proportions so what you see is what you get.
 
-use crate::project::{Project, Title};
+use crate::project::{Project, Title, word_spans};
 use canopy_ui::{CAPTION_FONT, font};
 use egui::{Color32, Painter, Rect, pos2, vec2};
 
@@ -15,21 +15,38 @@ const OUTLINE: f32 = 0.09;
 /// against the preview, Nunito ExtraBold needs 1.385 times the size to come out the same width.
 const ASS_SIZE: f32 = 1.385;
 
-/// Draws a caption over a preview picture that fills `screen`, `bottom` (a fraction of its height) above the bottom.
-pub fn draw(painter: &Painter, screen: Rect, text: &str, bottom: f32) {
-    outlined(painter, screen, text, SIZE, |size| pos2(screen.center().x - size.x / 2.0, screen.bottom() - screen.height() * bottom - size.y));
+/// The color of the word being said, in word-by-word captions (`HIGHLIGHT_ASS` is the same in ASS's blue-green-red).
+const HIGHLIGHT: Color32 = Color32::from_rgb(255, 212, 0);
+const HIGHLIGHT_ASS: &str = "&H00D4FF&";
+
+/// Draws a caption over a preview picture that fills `screen`, `bottom` (a fraction of its height) above the bottom,
+/// with its `word`th word lit up if given.
+pub fn draw(painter: &Painter, screen: Rect, text: &str, word: Option<usize>, bottom: f32) {
+    let lit = word.and_then(|i| word_spans(text).get(i).cloned());
+    outlined(painter, screen, text, lit, SIZE, |size| pos2(screen.center().x - size.x / 2.0, screen.bottom() - screen.height() * bottom - size.y));
 }
 
 /// Draws a title over a preview picture that fills `screen`, centered across and at its height.
 pub fn draw_title(painter: &Painter, screen: Rect, title: &Title) {
     let y = screen.top() + screen.height() * title.y;
-    outlined(painter, screen, &title.text, title.size, |size| pos2(screen.center().x - size.x / 2.0, y - size.y / 2.0));
+    outlined(painter, screen, &title.text, None, title.size, |size| pos2(screen.center().x - size.x / 2.0, y - size.y / 2.0));
 }
 
-/// White text with a black outline, `size` a fraction of the picture's height, placed by `origin` from its size.
-fn outlined(painter: &Painter, screen: Rect, text: &str, size: f32, origin: impl Fn(egui::Vec2) -> egui::Pos2) {
+/// White text with a black outline (the `lit` part of it highlighted), `size` a fraction of the picture's height, placed
+/// by `origin` from its size.
+fn outlined(painter: &Painter, screen: Rect, text: &str, lit: Option<std::ops::Range<usize>>, size: f32, origin: impl Fn(egui::Vec2) -> egui::Pos2) {
     let size = (screen.height() * size).max(8.0);
-    let galley = painter.layout(text.to_owned(), font::display(size), Color32::WHITE, screen.width() * WIDTH);
+    let galley = match lit {
+        Some(lit) => {
+            let mut job = egui::text::LayoutJob::default();
+            job.wrap.max_width = screen.width() * WIDTH;
+            for (part, color) in [(0..lit.start, Color32::WHITE), (lit.clone(), HIGHLIGHT), (lit.end..text.len(), Color32::WHITE)] {
+                job.append(&text[part], 0.0, egui::TextFormat::simple(font::display(size), color));
+            }
+            painter.layout_job(job)
+        }
+        None => painter.layout(text.to_owned(), font::display(size), Color32::WHITE, screen.width() * WIDTH),
+    };
     let origin = origin(galley.size());
     let outline = (size * OUTLINE).max(1.0);
     for (dx, dy) in [(-1.0, -1.0), (0.0, -1.0), (1.0, -1.0), (-1.0, 0.0), (1.0, 0.0), (-1.0, 1.0), (0.0, 1.0), (1.0, 1.0)] {
@@ -70,8 +87,27 @@ pub fn ass(project: &Project) -> String {
         outline = h * SIZE * OUTLINE,
         bottom = (h * project.caption_bottom).round(),
     );
+    let line = |from: f64, to: f64, text: String| format!("Dialogue: 0,{},{},Default,,0,0,0,,{text}\n", ass_time(from), ass_time(to));
     for caption in &project.captions {
-        out.push_str(&format!("Dialogue: 0,{},{},Default,,0,0,0,,{}\n", ass_time(caption.start), ass_time(caption.end), ass_text(&caption.text)));
+        let spans = word_spans(&caption.text);
+        if !project.caption_words || caption.words.is_empty() || caption.words.len() != spans.len() {
+            out.push_str(&line(caption.start, caption.end, ass_text(&caption.text)));
+            continue;
+        }
+        // Word by word, as `Caption::word_at` has it: plain until the first word, then a line per word with it lit.
+        let text = &caption.text;
+        let first = caption.words[0].start.clamp(caption.start, caption.end);
+        if first > caption.start {
+            out.push_str(&line(caption.start, first, ass_text(text)));
+        }
+        for (i, (word, span)) in caption.words.iter().zip(&spans).enumerate() {
+            let from = word.start.clamp(caption.start, caption.end);
+            let to = caption.words.get(i + 1).map_or(caption.end, |next| next.start).min(caption.end);
+            if to > from {
+                let lit = format!("{}{{\\c{HIGHLIGHT_ASS}}}{}{{\\c&HFFFFFF&}}{}", ass_text(&text[..span.start]), ass_text(&text[span.clone()]), ass_text(&text[span.end..]));
+                out.push_str(&line(from, to, lit));
+            }
+        }
     }
     for title in &project.titles {
         // Placed and sized one by one: the middle of the text at the title's height, centered across.
@@ -91,6 +127,20 @@ pub fn ass(project: &Project) -> String {
 mod tests {
     use super::*;
     use crate::project::Caption;
+
+    #[test]
+    fn word_by_word_captions_light_each_word_in_turn() {
+        use crate::project::{Caption, Word};
+        let mut project = Project::new("Words");
+        let word = |text: &str, start: f64, end: f64| Word { text: text.into(), start, end };
+        project.captions = vec![Caption { id: "a".into(), start: 1.0, end: 3.0, text: "Hi there".into(), words: vec![word("Hi", 1.5, 1.8), word("there", 2.0, 2.5)], clip: None }];
+        assert!(super::ass(&project).contains("Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,Hi there\n"), "plain unless asked");
+        project.caption_words = true;
+        let ass = super::ass(&project);
+        assert!(ass.contains("Dialogue: 0,0:00:01.00,0:00:01.50,Default,,0,0,0,,Hi there\n"), "{ass}");
+        assert!(ass.contains("Dialogue: 0,0:00:01.50,0:00:02.00,Default,,0,0,0,,{\\c&H00D4FF&}Hi{\\c&HFFFFFF&} there\n"), "{ass}");
+        assert!(ass.contains("Dialogue: 0,0:00:02.00,0:00:03.00,Default,,0,0,0,,Hi {\\c&H00D4FF&}there{\\c&HFFFFFF&}\n"), "{ass}");
+    }
 
     #[test]
     fn ass_holds_each_caption_with_its_times() {

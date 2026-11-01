@@ -692,7 +692,8 @@ impl StreamCuts {
             captions::draw_title(&over_picture, screen, title);
         }
         if let Some(caption) = self.project.caption_at(self.playhead) {
-            captions::draw(&over_picture, screen, &caption.text, self.project.caption_bottom);
+            let word = self.project.caption_words.then(|| caption.word_at(self.playhead)).flatten();
+            captions::draw(&over_picture, screen, &caption.text, word, self.project.caption_bottom);
         }
         self.drag_text(ui, screen);
         if self.project.duration() == 0.0 {
@@ -1061,6 +1062,12 @@ impl StreamCuts {
         }
         if field.lost_focus() {
             self.caption_typing = false;
+        }
+        let mut words = self.project.caption_words;
+        if ui.checkbox(&mut words, "Word by word").on_hover_text("Light up each word as it's said (captions made from speech)").changed() {
+            self.history.record(&self.project);
+            self.project.caption_words = words;
+            self.edited();
         }
     }
 

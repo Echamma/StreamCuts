@@ -485,6 +485,9 @@ pub struct Project {
     /// The gap under captions, as a fraction of the frame's height (shorts often want them higher).
     #[serde(default = "caption_gap")]
     pub caption_bottom: f32,
+    /// Captions light up each word as it's said (the web StreamCuts' word-by-word captions), where they have word times.
+    #[serde(default)]
+    pub caption_words: bool,
     #[serde(default)]
     pub saved_at: u64,
 }
@@ -532,7 +535,34 @@ pub struct Caption {
     pub clip: Option<String>,
 }
 
+/// Where each word of `text` is (each run of anything but whitespace), as byte ranges.
+pub fn word_spans(text: &str) -> Vec<std::ops::Range<usize>> {
+    let mut spans = Vec::new();
+    let mut start = None;
+    for (i, c) in text.char_indices() {
+        match (c.is_whitespace(), start) {
+            (false, None) => start = Some(i),
+            (true, Some(from)) => {
+                spans.push(from..i);
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    spans.extend(start.map(|from| from..text.len()));
+    spans
+}
+
 impl Caption {
+    /// Which of its words is being said at `t`: each from its start until the next one's, the last until the caption
+    /// ends. `None` before the first, or when its word times don't match its text word for word.
+    pub fn word_at(&self, t: f64) -> Option<usize> {
+        if self.words.is_empty() || self.words.len() != word_spans(&self.text).len() || t >= self.end {
+            return None;
+        }
+        self.words.iter().rposition(|w| w.start <= t)
+    }
+
     /// Whether this caption goes with `clip_id`, a clip that covered `from`..`to`.
     fn belongs_to(&self, clip_id: &str, from: f64, to: f64) -> bool {
         match &self.clip {
@@ -589,6 +619,7 @@ impl Project {
             even_loudness: false,
             export_format: ExportFormat::default(),
             caption_bottom: caption_gap(),
+            caption_words: false,
             saved_at: 0,
         }
     }
@@ -1212,6 +1243,16 @@ mod tests {
         assert!(project.crossfade_at(9.0).is_none());
         project.clip_mut(&outgoing).unwrap().source_in = 2.0;
         assert_eq!(project.crossfade_after(&outgoing), 0.0, "no source handle means no transition");
+    }
+
+    #[test]
+    fn captions_know_which_word_is_said() {
+        assert_eq!(word_spans(" Hi  there\nyou"), vec![1..3, 5..10, 11..14]);
+        let word = |text: &str, start: f64, end: f64| Word { text: text.into(), start, end };
+        let mut caption = Caption { id: "c".into(), start: 1.0, end: 3.0, text: "Hi there".into(), words: vec![word("Hi", 1.2, 1.5), word(" there", 2.0, 2.4)], clip: None };
+        assert_eq!([1.1, 1.2, 1.9, 2.0, 2.9, 3.0].map(|t| caption.word_at(t)), [None, Some(0), Some(0), Some(1), Some(1), None]);
+        caption.text = "Hi there you".into();
+        assert_eq!(caption.word_at(2.0), None, "edited text no longer matches its word times");
     }
 
     #[test]
