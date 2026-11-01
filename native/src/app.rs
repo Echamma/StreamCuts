@@ -49,6 +49,8 @@ pub struct StreamCuts {
     boss_running: Option<String>,
     /// Media whose scenes are being found.
     scene_jobs: Vec<String>,
+    /// Media whose editing proxy is being made.
+    proxy_jobs: Vec<String>,
     boss_plan: Option<BossPlan>,
     /// Typing in a caption: one undo step for the whole edit.
     caption_typing: bool,
@@ -86,6 +88,7 @@ impl StreamCuts {
             transcribing: 0,
             boss_running: None,
             scene_jobs: Vec::new(),
+            proxy_jobs: Vec::new(),
             boss_plan: None,
             caption_typing: false,
             adjusting: false,
@@ -105,9 +108,18 @@ impl StreamCuts {
         app
     }
 
+    /// Where `path`'s editing proxy lives, in the app's data folder.
+    fn proxy_entry(&self, path: &std::path::Path) -> Option<PathBuf> {
+        crate::cache::entry(&self.place.data_dir, path, "proxy.mp4")
+    }
+
     fn request_looks(&mut self) {
         for media in self.project.media.iter().filter(|m| m.path.is_file()) {
             if self.looks_asked.insert(media.id.clone()) {
+                // A proxy made earlier (it's named after the file, like the other looks).
+                if let Some(proxy) = self.proxy_entry(&media.path).filter(|p| p.is_file()) {
+                    self.preview.proxies.insert(media.id.clone(), proxy);
+                }
                 if media.has_audio {
                     self.worker.send(Job::Waveform { media_id: media.id.clone(), path: media.path.clone(), cache: self.place.data_dir.clone() });
                 }
@@ -214,6 +226,16 @@ impl StreamCuts {
                     }
                     Err(error) => self.toasts.push(error),
                 },
+                Done::Proxy { media_id, result } => {
+                    self.proxy_jobs.retain(|id| id != &media_id);
+                    match result {
+                        Ok(proxy) => {
+                            self.preview.proxies.insert(media_id, proxy);
+                            self.toasts.push("Proxy ready: playback reads it; paused frames and exports use the original".into());
+                        }
+                        Err(error) => self.toasts.push(error),
+                    }
+                }
                 Done::Scenes { media_id, result } => {
                     self.scene_jobs.retain(|id| id != &media_id);
                     match result {
@@ -578,7 +600,12 @@ impl StreamCuts {
                     if missing {
                         text.text(pos2(thumb.right() + 8.0, rect.bottom() - 7.0), Align2::LEFT_BOTTOM, "Missing: click to find it", font::ui(11.0), color::SUN);
                     } else {
-                        let detail = match media.kind { MediaKind::Image => format!("Picture · {}×{}", media.width, media.height), _ => timecode(media.duration, self.project.fps) };
+                        let mut detail = match media.kind { MediaKind::Image => format!("Picture · {}×{}", media.width, media.height), _ => timecode(media.duration, self.project.fps) };
+                        if self.proxy_jobs.contains(&media.id) {
+                            detail.push_str(" · making proxy…");
+                        } else if self.preview.proxies.contains_key(&media.id) {
+                            detail.push_str(" · proxy");
+                        }
                         text.text(pos2(thumb.right() + 8.0, rect.bottom() - 7.0), Align2::LEFT_BOTTOM, detail, font::ui(11.0), color::INK_MUTED);
                     }
                     row
@@ -794,9 +821,10 @@ impl StreamCuts {
         ui.add_space(6.0);
         let mut find_scenes = false;
         let mut loudness = None;
+        // Some(true) makes (or remakes) the clip's media's editing proxy, Some(false) deletes it.
+        let mut proxy = None;
         ui.menu_button(egui::RichText::new("Clip").font(font::ui(13.0)), |ui| {
             ui.set_min_width(230.0);
-            // As in the web StreamCuts (right-click a clip, Detect scenes): cuts in its video become timeline markers.
             if self.project.media(&clip.media_id).is_some_and(|m| m.has_audio) {
                 for (label, normalize, hint) in [
                     ("Measure loudness", false, "Its integrated loudness (EBU R128), as it plays"),
@@ -810,6 +838,21 @@ impl StreamCuts {
                 ui.separator();
             }
             if kind == MediaKind::Video {
+                // As in the web StreamCuts' media menu: a small H.264 copy for smooth playback of heavy footage.
+                let (making, has) = (self.proxy_jobs.contains(&clip.media_id), self.preview.proxies.contains_key(&clip.media_id));
+                let label = if making { "Making proxy…" } else if has { "Rebuild editing proxy" } else { "Use editing proxy (smooth playback)" };
+                if ui.add_enabled(!making, egui::Button::new(label))
+                    .on_hover_text("Play this video from a 540p copy (made once, kept in the app's data folder); paused frames and exports use the original")
+                    .clicked()
+                {
+                    proxy = Some(true);
+                    ui.close();
+                }
+                if has && !making && ui.button("Delete editing proxy").on_hover_text("Play from the original again, and free the disk space").clicked() {
+                    proxy = Some(false);
+                    ui.close();
+                }
+                // As in the web StreamCuts (right-click a clip, Detect scenes): cuts in its video become timeline markers.
                 let busy = self.scene_jobs.contains(&clip.media_id);
                 if ui.add_enabled(!busy, egui::Button::new(if busy { "Finding scenes…" } else { "Detect scenes" }))
                     .on_hover_text("Mark where the picture cuts to another scene")
@@ -909,6 +952,26 @@ impl StreamCuts {
         }
         if !ui.input(|i| i.pointer.any_down()) {
             self.adjusting = false;
+        }
+        match (proxy, media_path.clone()) {
+            (Some(true), Some(path)) => match self.proxy_entry(&path) {
+                Some(output) => {
+                    self.proxy_jobs.push(clip.media_id.clone());
+                    self.worker.send(Job::Proxy { media_id: clip.media_id.clone(), path, output });
+                    self.toasts.push("Making an editing proxy; long videos take a while".into());
+                }
+                None => self.toasts.push("Couldn't read the video to make a proxy".into()),
+            },
+            (Some(false), _) => {
+                if let Some(file) = self.preview.proxies.remove(&clip.media_id) {
+                    // Stop playing from it before deleting it.
+                    self.preview.reset();
+                    if std::fs::remove_file(&file).is_err() {
+                        self.toasts.push(format!("Couldn't delete the proxy; it's at {}", file.display()));
+                    }
+                }
+            }
+            _ => {}
         }
         if let (Some(normalize), Some(path)) = (loudness, media_path.clone()) {
             self.worker.send(Job::Loudness { clip: clip.id.clone(), path, from: clip.source_in, length: clip.source_length(), normalize });

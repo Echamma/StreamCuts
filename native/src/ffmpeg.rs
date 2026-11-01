@@ -105,8 +105,7 @@ pub fn probe(path: &Path) -> Result<Media, String> {
     }
 }
 
-/// A stretch of a file's integrated loudness (EBU R128), in LUFS, at `speed` like the clip plays it. Reads the whole
-/// stretch; call it off the UI thread.
+/// A stretch of a file's integrated loudness (EBU R128), in LUFS. Reads the whole stretch; call it off the UI thread.
 pub fn loudness(path: &Path, from: f64, length: f64) -> Result<f64, String> {
     let output = command(&ffmpeg())
         .args(["-hide_banner", "-nostats", "-ss", &format!("{:.3}", seek_to(from)), "-t", &format!("{length:.3}"), "-i"])
@@ -120,6 +119,31 @@ pub fn loudness(path: &Path, from: f64, length: f64) -> Result<f64, String> {
     let summary = text.rsplit("Integrated loudness:").next().filter(|_| text.contains("Integrated loudness:")).ok_or("This clip has no sound to measure.")?;
     summary.lines().find_map(|line| line.trim().strip_prefix("I:")?.trim().strip_suffix("LUFS")?.trim().parse::<f64>().ok())
         .ok_or_else(|| "FFmpeg didn't report the loudness.".into())
+}
+
+/// Makes an editing proxy of a video at `output`, for smooth playback (the web StreamCuts' H.264 proxy): its picture
+/// at most 540 lines tall, H.264 with a keyframe every 15 frames so playback starts quickly anywhere, and no sound
+/// (playback reads sound from the original). It appears at `output` only once it's whole. Reads the whole file; call
+/// it off the UI thread.
+pub fn proxy(path: &Path, output: &Path) -> Result<(), String> {
+    if let Some(dir) = output.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("Couldn't make the proxy folder ({e})."))?;
+    }
+    let partial = output.with_extension("partial.mp4");
+    let result = command(&ffmpeg())
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+        .arg(path)
+        .args(["-map", "0:v:0", "-an", "-sn", "-vf", "scale=-2:'min(540,ih)'", "-c:v", "libx264", "-preset", "veryfast", "-crf", "26"])
+        .args(["-g", "15", "-pix_fmt", "yuv420p", "-movflags", "+faststart"])
+        .arg(&partial)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("FFmpeg couldn't start ({e})."))?;
+    if !result.status.success() {
+        let _ = std::fs::remove_file(&partial);
+        return Err(format!("FFmpeg couldn't make a proxy: {}", String::from_utf8_lossy(&result.stderr).lines().last().unwrap_or("no reason given")));
+    }
+    std::fs::rename(&partial, output).map_err(|e| format!("Couldn't keep the proxy ({e})."))
 }
 
 /// Where the picture cuts to another scene, in source seconds: FFmpeg's scene score above `threshold` (0-1; the web
@@ -401,6 +425,12 @@ mod tests {
         // A 440 Hz sine at FFmpeg's default amplitude measures around -21 LUFS; its loudness is a finite number.
         let lufs = loudness(&clip, 0.0, 2.0).unwrap();
         assert!((-40.0..-5.0).contains(&lufs), "{lufs} LUFS");
+        // Its proxy is the same picture, as long, without sound.
+        let made = dir.join("clip.proxy.mp4");
+        proxy(&clip, &made).unwrap();
+        let proxied = probe(&made).unwrap();
+        assert!(proxied.kind == MediaKind::Video && !proxied.has_audio && (proxied.width, proxied.height) == (320, 180), "{}", proxied.info());
+        assert!((proxied.duration - 2.0).abs() < 0.1, "proxy duration {}", proxied.duration);
         // The generated clip is one continuous test pattern: no cuts.
         assert!(scenes(&clip, 0.3).unwrap().is_empty());
         assert_eq!(frame.rgba.len(), 160 * 90 * 4);

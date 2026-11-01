@@ -6,6 +6,8 @@ use crate::ffmpeg::{self, Frame, FrameStream};
 use crate::project::{Clip, Media, MediaKind, Picture, Project, TrackKind};
 use crate::worker::{Job, StillBlend, StillKey, Worker};
 use egui::{ColorImage, TextureHandle, TextureOptions};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 /// A still that takes longer than this gets a stand-in from the filmstrip.
@@ -25,9 +27,10 @@ struct Playing {
 }
 
 impl Playing {
-    fn start(project: &Project, clip: &Clip, media: &Media, source: f64) -> Self {
+    /// Plays `clip` from `path`: its media, or that media's editing proxy.
+    fn start(project: &Project, clip: &Clip, path: &Path, source: f64) -> Self {
         let (width, height) = decode_size(project);
-        let stream = FrameStream::start(&media.path, source, project.fps, width, height, clip.picture(), clip.speed);
+        let stream = FrameStream::start(path, source, project.fps, width, height, clip.picture(), clip.speed);
         Self { clip_id: clip.id.clone(), picture: clip.picture(), speed: clip.speed, stream, ahead: None, last: None, shown: source }
     }
 
@@ -62,6 +65,14 @@ pub struct Preview {
     next: Option<Playing>,
     /// Nothing is in front at the playhead.
     pub blank: bool,
+    /// Editing proxies by media id: playback reads these instead of the originals. Paused stills (and exports) still
+    /// come from the originals, at full quality.
+    pub proxies: HashMap<String, PathBuf>,
+}
+
+/// What playback reads for `media`: its editing proxy when it has one.
+fn playback_path<'a>(proxies: &'a HashMap<String, PathBuf>, media: &'a Media) -> &'a Path {
+    proxies.get(&media.id).map_or(&media.path, |proxy| proxy)
 }
 
 /// The size previews are decoded at: the project's shape, fitted in 960×540 (or 540×960 for vertical).
@@ -123,14 +134,14 @@ impl Preview {
                 if let Some((outgoing, _, _, _, _)) = transition {
                     self.transition = self.playing.take().filter(|p| p.clip_id == outgoing.id);
                 }
-                self.playing = Some(preloaded.unwrap_or_else(|| Playing::start(project, clip, media, source)));
+                self.playing = Some(preloaded.unwrap_or_else(|| Playing::start(project, clip, playback_path(&self.proxies, media), source)));
             }
             let half_frame = 0.5 * clip.speed / project.fps as f64;
             let changed = self.playing.as_mut().is_some_and(|p| p.advance(source, half_frame));
             if let Some((outgoing, outgoing_media, _, _, progress)) = transition {
                 let old_source = outgoing.source_time(t);
                 if self.transition.as_ref().is_none_or(|p| p.clip_id != outgoing.id) {
-                    self.transition = Some(Playing::start(project, outgoing, outgoing_media, old_source));
+                    self.transition = Some(Playing::start(project, outgoing, playback_path(&self.proxies, outgoing_media), old_source));
                 }
                 self.transition.as_mut().unwrap().advance(old_source, 0.5 * outgoing.speed / project.fps as f64);
                 if let (Some(old), Some(new)) = (self.transition.as_ref().and_then(|p| p.last.as_ref()), self.playing.as_ref().and_then(|p| p.last.as_ref())) {
@@ -192,7 +203,7 @@ impl Preview {
         if media.kind != MediaKind::Video || self.next.as_ref().is_some_and(|next| next.clip_id == clip.id) {
             return;
         }
-        self.next = Some(Playing::start(project, clip, media, clip.source_time(at)));
+        self.next = Some(Playing::start(project, clip, playback_path(&self.proxies, media), clip.source_time(at)));
     }
 
     /// Whether a still has been on its way for a while (the picture shown is from somewhere else). Quick stills don't

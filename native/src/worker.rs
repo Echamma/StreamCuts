@@ -34,6 +34,8 @@ pub enum Job {
     Boss { media_id: String, path: PathBuf, duration: f64 },
     /// Where a video cuts to another scene.
     Scenes { media_id: String, path: PathBuf },
+    /// An editing proxy of a video, made at `output`.
+    Proxy { media_id: String, path: PathBuf, output: PathBuf },
     /// A clip's loudness; with `normalize`, its volume is then set to reach -14 LUFS.
     Loudness { clip: String, path: PathBuf, from: f64, length: f64, normalize: bool },
 }
@@ -49,6 +51,7 @@ pub enum Done {
     Boss { media_id: String, result: Result<Vec<Suggestion>, String> },
     Scenes { media_id: String, result: Result<Vec<f64>, String> },
     Loudness { clip: String, normalize: bool, result: Result<f64, String> },
+    Proxy { media_id: String, result: Result<PathBuf, String> },
 }
 
 pub struct Worker {
@@ -104,6 +107,10 @@ impl Worker {
                         }
                         Job::Transcribe { clip, path, from, length, speed, at } => {
                             aside(&finished, &ctx, move || Done::Captions { from: at, to: at + length / speed, result: transcribe::captions(&clip, &path, from, length, speed, at) });
+                            continue;
+                        }
+                        Job::Proxy { media_id, path, output } => {
+                            aside(&finished, &ctx, move || Done::Proxy { media_id, result: ffmpeg::proxy(&path, &output).map(|()| output) });
                             continue;
                         }
                         Job::Loudness { clip, path, from, length, normalize } => {
