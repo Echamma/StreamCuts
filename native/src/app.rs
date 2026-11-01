@@ -6,7 +6,7 @@ use crate::captions;
 use crate::export::{self, Export};
 use crate::ffmpeg::Frame;
 use crate::preview::{Clock, Preview};
-use crate::project::{Framing, History, MediaKind, Project};
+use crate::project::{Framing, Grade, History, MediaKind, Project};
 use crate::storage;
 use crate::filmstrip::Strip;
 use crate::timeline::{Looks, MediaDrag, Timeline, timecode};
@@ -503,7 +503,7 @@ impl StreamCuts {
         self.toasts.push("Making captions; the first time takes a minute while the speech model loads".into());
     }
 
-    /// One selected clip gets a menu for its fades and, for pictures, how it sits in the frame.
+    /// One selected clip gets a menu for its fades and, for pictures, how it sits in the frame and its color.
     fn clip_settings(&mut self, ui: &mut Ui) {
         let [id] = self.timeline.selection.as_slice() else { return };
         let Some(clip) = self.project.clip(id).cloned() else { return };
@@ -512,7 +512,7 @@ impl StreamCuts {
         let mut changed = clip.clone();
         let longest = (clip.duration / 2.0).min(10.0);
         ui.add_space(6.0);
-        ui.menu_button(egui::RichText::new("Fades & framing").font(font::ui(13.0)), |ui| {
+        ui.menu_button(egui::RichText::new("Fades, framing & color").font(font::ui(13.0)), |ui| {
             ui.set_min_width(230.0);
             egui::Grid::new("clip-settings").num_columns(2).spacing(vec2(10.0, 8.0)).show(ui, |ui| {
                 ui.label("Fade in");
@@ -538,6 +538,16 @@ impl StreamCuts {
                     ui.add(egui::Slider::new(x, 0.0..=1.0).show_value(false).text("Left to right"));
                     ui.add(egui::Slider::new(y, 0.0..=1.0).show_value(false).text("Top to bottom"));
                 }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Color").font(font::ui(12.0)).color(color::INK_MUTED));
+                    if !changed.grade.is_neutral() && ui.small_button("Reset").clicked() {
+                        changed.grade = Grade::default();
+                    }
+                });
+                ui.add(egui::Slider::new(&mut changed.grade.brightness, -0.5..=0.5).show_value(false).text("Brightness"));
+                ui.add(egui::Slider::new(&mut changed.grade.contrast, 0.5..=2.0).show_value(false).text("Contrast"));
+                ui.add(egui::Slider::new(&mut changed.grade.saturation, 0.0..=2.5).show_value(false).text("Saturation"));
             }
         });
         if changed != clip {

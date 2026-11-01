@@ -3,7 +3,7 @@
 //! stream starts a second early, so a cut doesn't wait for FFmpeg to start.
 
 use crate::ffmpeg::{Frame, FrameStream};
-use crate::project::{Clip, Framing, Media, MediaKind, Project, TrackKind};
+use crate::project::{Clip, Media, MediaKind, Picture, Project, TrackKind};
 use crate::worker::{Job, StillKey, Worker};
 use egui::{ColorImage, TextureHandle, TextureOptions};
 use std::time::Instant;
@@ -13,7 +13,7 @@ const PRELOAD: f64 = 1.0;
 
 struct Playing {
     clip_id: String,
-    framing: Framing,
+    picture: Picture,
     stream: FrameStream,
     ahead: Option<Frame>,
     shown: f64,
@@ -22,8 +22,8 @@ struct Playing {
 impl Playing {
     fn start(project: &Project, clip: &Clip, media: &Media, source: f64) -> Self {
         let (width, height) = decode_size(project);
-        let stream = FrameStream::start(&media.path, source, project.fps, width, height, clip.framing);
-        Self { clip_id: clip.id.clone(), framing: clip.framing, stream, ahead: None, shown: source }
+        let stream = FrameStream::start(&media.path, source, project.fps, width, height, clip.picture());
+        Self { clip_id: clip.id.clone(), picture: clip.picture(), stream, ahead: None, shown: source }
     }
 }
 
@@ -86,11 +86,11 @@ impl Preview {
         let (width, height) = decode_size(project);
         if playing && media.kind == MediaKind::Video {
             let restart = match &self.playing {
-                Some(p) => p.clip_id != clip.id || p.framing != clip.framing || (source - p.shown).abs() > 0.75,
+                Some(p) => p.clip_id != clip.id || p.picture != clip.picture() || (source - p.shown).abs() > 0.75,
                 None => true,
             };
             if restart {
-                let preloaded = self.next.take().filter(|next| next.clip_id == clip.id && next.framing == clip.framing && (source - next.shown).abs() <= 0.75);
+                let preloaded = self.next.take().filter(|next| next.clip_id == clip.id && next.picture == clip.picture() && (source - next.shown).abs() <= 0.75);
                 self.playing = Some(preloaded.unwrap_or_else(|| Playing::start(project, clip, media, source)));
             }
             let half_frame = 0.5 / project.fps as f64;
@@ -118,14 +118,13 @@ impl Preview {
         }
         self.playing = None;
         let frame_number = if media.kind == MediaKind::Image { 0 } else { (source * project.fps as f64).round() as i64 };
-        let framed = match clip.framing {
-            Framing::Fit => media.id.clone(),
-            Framing::Fill { x, y } => format!("{} fill {x:.3} {y:.3}", media.id),
-        };
+        // Stills are kept by how they're shown, so changing a clip's framing or color fetches it again.
+        let picture = clip.picture();
+        let framed = if picture == Picture::default() { media.id.clone() } else { format!("{} {picture:?}", media.id) };
         let key: StillKey = (framed, frame_number);
         if self.shown.as_ref() != Some(&key) && self.waiting.is_none() {
             let at = if media.kind == MediaKind::Image { 0.0 } else { frame_number as f64 / project.fps as f64 };
-            worker.send(Job::Still { key: key.clone(), path: media.path.clone(), at, width, height, framing: clip.framing });
+            worker.send(Job::Still { key: key.clone(), path: media.path.clone(), at, width, height, picture });
             self.waiting = Some(key);
         }
     }

@@ -65,6 +65,50 @@ pub struct Clip {
     pub fade_out: f64,
     #[serde(default)]
     pub framing: Framing,
+    #[serde(default)]
+    pub grade: Grade,
+}
+
+/// A clip's color, as FFmpeg's `eq` takes it: brightness from -1 to 1 (0 leaves it), contrast and saturation as
+/// multipliers (1 leaves them).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Grade {
+    pub brightness: f32,
+    pub contrast: f32,
+    pub saturation: f32,
+}
+
+impl Default for Grade {
+    fn default() -> Self {
+        Self { brightness: 0.0, contrast: 1.0, saturation: 1.0 }
+    }
+}
+
+impl Grade {
+    pub fn is_neutral(self) -> bool {
+        self == Self::default()
+    }
+
+    pub fn filter(self) -> Option<String> {
+        (!self.is_neutral()).then(|| format!("eq=brightness={:.3}:contrast={:.3}:saturation={:.3}", self.brightness, self.contrast, self.saturation))
+    }
+}
+
+/// How a clip's picture is shown: where it sits in the frame, and its color. Export, stills and playback all draw it
+/// through `filter`, so the preview is what gets exported.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Picture {
+    pub framing: Framing,
+    pub grade: Grade,
+}
+
+impl Picture {
+    pub fn filter(self, width: u32, height: u32) -> String {
+        match self.grade.filter() {
+            Some(eq) => format!("{},{eq}", self.framing.filter(width, height)),
+            None => self.framing.filter(width, height),
+        }
+    }
 }
 
 /// How a picture sits in the frame when their shapes differ (16:9 footage in a 9:16 short).
@@ -106,6 +150,9 @@ impl Clip {
     }
     pub fn contains(&self, t: f64) -> bool {
         t >= self.start && t < self.end()
+    }
+    pub fn picture(&self) -> Picture {
+        Picture { framing: self.framing, grade: self.grade }
     }
     /// How far faded in the clip is at timeline time `t`: 0 is black (silent), 1 is full.
     pub fn fade_at(&self, t: f64) -> f64 {
@@ -350,7 +397,7 @@ impl Project {
         };
         let duration = if media.kind == MediaKind::Image { STILL_SECONDS } else { media.duration.max(MIN_CLIP) };
         let start = self.free_start(track, at, duration, None);
-        let clip = Clip { id: new_id(), media_id: media.id.clone(), start, source_in: 0.0, duration, volume: 1.0, fade_in: 0.0, fade_out: 0.0, framing: Framing::Fit };
+        let clip = Clip { id: new_id(), media_id: media.id.clone(), start, source_in: 0.0, duration, volume: 1.0, fade_in: 0.0, fade_out: 0.0, framing: Framing::Fit, grade: Grade::default() };
         let id = clip.id.clone();
         self.tracks[track].clips.push(clip);
         self.sort_track(track);

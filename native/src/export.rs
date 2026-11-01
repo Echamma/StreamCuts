@@ -41,7 +41,7 @@ pub fn arguments(project: &Project, output: &Path) -> Result<Vec<String>, String
             let shows = track.kind == TrackKind::Video && !track.hidden && media.kind != MediaKind::Audio;
             if shows {
                 // Fades work on the picture's alpha, so a clip fades to whatever is below it (black when nothing is).
-                let mut chain = format!("[{input}:v]{},fps={fps},format=yuva420p,setpts=PTS-STARTPTS", clip.framing.filter(w, h));
+                let mut chain = format!("[{input}:v]{},fps={fps},format=yuva420p,setpts=PTS-STARTPTS", clip.picture().filter(w, h));
                 if clip.fade_in > 0.0 {
                     chain.push_str(&format!(",fade=t=in:st=0:d={:.3}:alpha=1", clip.fade_in));
                 }
@@ -241,9 +241,11 @@ mod tests {
         let clip = project.clip_mut(&id).unwrap();
         (clip.fade_in, clip.fade_out) = (0.5, 1.0);
         clip.framing = crate::project::Framing::Fill { x: 0.25, y: 0.5 };
+        clip.grade.saturation = 1.5;
         let args = arguments(&project, Path::new("o.mp4")).unwrap();
         let graph = &args[args.iter().position(|a| a == "-filter_complex").unwrap() + 1];
         assert!(graph.contains("force_original_aspect_ratio=increase,crop=1080:1920:(iw-ow)*0.250:(ih-oh)*0.500"), "{graph}");
+        assert!(graph.contains("crop=1080:1920:(iw-ow)*0.250:(ih-oh)*0.500,eq=brightness=0.000:contrast=1.000:saturation=1.500,fps="));
         assert!(graph.contains("fade=t=in:st=0:d=0.500:alpha=1,fade=t=out:st=9.000:d=1.000:alpha=1"));
         assert!(graph.contains("afade=t=in:st=0:d=0.500,afade=t=out:st=9.000:d=1.000,adelay=0|0"));
     }

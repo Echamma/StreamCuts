@@ -4,7 +4,7 @@
 use crate::ffmpeg::{self, Frame};
 use crate::filmstrip::{self, Film};
 use crate::transcribe;
-use crate::project::{Caption, Framing, Media};
+use crate::project::{Caption, Media, Picture};
 use crate::waveform::{self, Waveform};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -16,7 +16,7 @@ pub type StillKey = (String, i64);
 pub enum Job {
     Probe(PathBuf),
     Thumbnail { media_id: String, path: PathBuf, at: f64 },
-    Still { key: StillKey, path: PathBuf, at: f64, width: u32, height: u32, framing: Framing },
+    Still { key: StillKey, path: PathBuf, at: f64, width: u32, height: u32, picture: Picture },
     Waveform { media_id: String, path: PathBuf },
     Filmstrip { media_id: String, path: PathBuf, duration: f64 },
     /// Captions for `length` seconds of `path` from `from`, for a clip that starts at `at` on the timeline.
@@ -54,7 +54,7 @@ impl Worker {
                     let result = match job {
                         Job::Probe(path) => Done::Probed(path.clone(), ffmpeg::probe(&path)),
                         Job::Thumbnail { media_id, path, at } => Done::Thumbnail(media_id, ffmpeg::thumbnail(&path, at)),
-                        Job::Still { key, path, at, width, height, framing } => Done::Still(key, ffmpeg::still(&path, at, width, height, framing)),
+                        Job::Still { key, path, at, width, height, picture } => Done::Still(key, ffmpeg::still(&path, at, width, height, picture)),
                         // Reading a long file through takes a while: it gets a thread of its own, so stills don't wait.
                         Job::Waveform { media_id, path } => {
                             aside(&finished, &ctx, move || Done::Waveform(media_id, waveform::decode(&path)));
