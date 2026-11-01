@@ -696,6 +696,40 @@ impl Project {
     }
 
     /// Moves a clip's start edge to `start`, keeping its end where it is.
+    /// The clip that ends exactly where `clip_id` starts on its track, if any (the two share a cut).
+    pub fn left_neighbor(&self, clip_id: &str) -> Option<String> {
+        let at = self.find(clip_id)?;
+        let clip = &self.tracks[at.track].clips[at.index];
+        self.tracks[at.track].clips.iter().find(|c| c.id != clip.id && (c.end() - clip.start).abs() < 1e-6).map(|c| c.id.clone())
+    }
+
+    /// Rolls the cut between two touching clips to `t`: the first ends there and the second starts there, each
+    /// within the footage its source has, and neither shorter than the shortest clip. Returns whether it changed.
+    pub fn roll(&mut self, left_id: &str, right_id: &str, t: f64) -> bool {
+        let (Some(left), Some(right)) = (self.clip(left_id).cloned(), self.clip(right_id).cloned()) else { return false };
+        let (Some(left_media), Some(right_media)) = (self.media(&left.media_id).cloned(), self.media(&right.media_id).cloned()) else { return false };
+        // How far each can grow into the other: the first by the footage after its out point, the second by the
+        // footage before its in point (pictures have no limit).
+        let left_room = if left_media.kind == MediaKind::Image { f64::INFINITY } else { (left_media.max_length() - left.source_in - left.source_length()) / left.speed };
+        let right_room = if right_media.kind == MediaKind::Image { f64::INFINITY } else { right.source_in / right.speed };
+        let cut = right.start;
+        let t = t.clamp((left.start + MIN_CLIP).max(cut - right_room), (right.end() - MIN_CLIP).min(cut + left_room));
+        if (t - cut).abs() < 1e-9 {
+            return false;
+        }
+        let image = |kind: MediaKind| kind == MediaKind::Image;
+        let left_clip = self.clip_mut(left_id).unwrap();
+        left_clip.duration = t - left_clip.start;
+        let right_clip = self.clip_mut(right_id).unwrap();
+        let shift = t - right_clip.start;
+        if !image(right_media.kind) {
+            right_clip.source_in += shift * right_clip.speed;
+        }
+        right_clip.start = t;
+        right_clip.duration -= shift;
+        true
+    }
+
     /// Slips a clip: it stays where it is on the timeline and plays a different stretch of its source, from
     /// `source_in` (kept inside the source). Pictures have nothing to slip. Returns whether it changed.
     pub fn slip(&mut self, clip_id: &str, source_in: f64) -> bool {
@@ -984,6 +1018,23 @@ mod tests {
         assert!(project.crossfade_at(9.0).is_none());
         project.clip_mut(&outgoing).unwrap().source_in = 2.0;
         assert_eq!(project.crossfade_after(&outgoing), 0.0, "no source handle means no transition");
+    }
+
+    #[test]
+    fn rolling_moves_the_cut_within_both_sources() {
+        let (mut project, video) = project_with(10.0);
+        let a = project.place(&video, None, 0.0).unwrap();
+        project.trim_end(&a, 4.0); // source 0..4
+        let b = project.place(&video, None, 4.0).unwrap();
+        project.trim_start(&b, 6.0); // at 6, source 2..10
+        project.move_clip(&b, 4.0, project.find(&b).unwrap().track); // touching at 4, source 2..10 (ends at 12)
+        assert_eq!(project.left_neighbor(&b), Some(a.clone()));
+        assert!(project.roll(&a, &b, 5.0));
+        let (ca, cb) = (project.clip(&a).unwrap().clone(), project.clip(&b).unwrap().clone());
+        assert_eq!((ca.duration, cb.start, cb.source_in, cb.end()), (5.0, 5.0, 3.0, 12.0));
+        project.roll(&a, &b, 0.0);
+        assert_eq!(project.clip(&b).unwrap().start, 2.0, "b can only reach back to its source's start (in point 0)");
+        assert_eq!(project.clip(&a).unwrap().end(), 2.0);
     }
 
     #[test]
