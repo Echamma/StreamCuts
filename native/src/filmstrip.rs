@@ -1,7 +1,7 @@
 //! Filmstrips: small frames along a video, tiled across its clips on the timeline. One FFmpeg run per file, on a
 //! thread of its own; long files decode only keyframes, so a 12-hour stream takes seconds rather than hours.
 
-use crate::ffmpeg;
+use crate::{cache, ffmpeg};
 use egui::{Color32, ColorImage, Rect, TextureHandle, TextureOptions, pos2};
 use std::io::Read;
 use std::path::Path;
@@ -18,6 +18,23 @@ const COLUMNS: usize = 16;
 pub struct Film {
     pub interval: f64,
     pub frames: Vec<Vec<u8>>,
+}
+
+/// The film from the cache in `cache_dir` (its interval, then the frames), or decoded (and cached).
+pub fn cached(path: &Path, duration: f64, cache_dir: &Path) -> Result<Film, String> {
+    let frame = (WIDTH * HEIGHT * 4) as usize;
+    let entry = cache::entry(cache_dir, path, "strip");
+    if let Some(bytes) = entry.as_deref().and_then(cache::read).filter(|b| b.len() > 8 && (b.len() - 8) % frame == 0) {
+        let interval = f64::from_le_bytes(bytes[..8].try_into().expect("8 bytes"));
+        return Ok(Film { interval, frames: bytes[8..].chunks(frame).map(<[u8]>::to_vec).collect() });
+    }
+    let film = decode(path, duration)?;
+    if let Some(entry) = entry {
+        let mut bytes = film.interval.to_le_bytes().to_vec();
+        film.frames.iter().for_each(|f| bytes.extend_from_slice(f));
+        cache::write(&entry, &bytes);
+    }
+    Ok(film)
 }
 
 pub fn decode(path: &Path, duration: f64) -> Result<Film, String> {
@@ -105,8 +122,10 @@ mod tests {
             .status()
             .unwrap();
         assert!(made.success());
-        let film = decode(&file, 5.0).unwrap();
+        let film = cached(&file, 5.0, &dir).unwrap();
         assert_eq!(film.interval, 1.0);
+        let again = cached(&file, 5.0, &dir).unwrap();
+        assert_eq!((again.interval, &again.frames), (film.interval, &film.frames), "the second time comes from the cache");
         assert!((5..=6).contains(&film.frames.len()), "{} frames", film.frames.len());
         assert_ne!(film.frames[0], film.frames[3], "different times, different pictures");
         let ctx = egui::Context::default();

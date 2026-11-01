@@ -1,7 +1,7 @@
 //! Waveforms for the timeline: the loudest sample of every 10 ms of a file's sound, kept as a pyramid of halved levels
 //! so drawing stays cheap however far out the timeline is zoomed (a 12-hour stream is 4.3 million peaks at the bottom).
 
-use crate::ffmpeg;
+use crate::{cache, ffmpeg};
 use std::io::Read;
 use std::path::Path;
 use std::process::Stdio;
@@ -38,6 +38,19 @@ impl Waveform {
         let last = ((to.max(0.0) * scale).ceil() as usize).clamp(first + 1, peaks.len().max(first + 1));
         peaks.get(first..last.min(peaks.len())).and_then(|range| range.iter().copied().max()).unwrap_or(0)
     }
+}
+
+/// The waveform from the cache in `cache_dir`, or decoded (and cached) when it isn't there.
+pub fn cached(path: &Path, cache_dir: &Path) -> Result<Waveform, String> {
+    let entry = cache::entry(cache_dir, path, "wave");
+    if let Some(peaks) = entry.as_deref().and_then(cache::read) {
+        return Ok(Waveform::from_peaks(peaks));
+    }
+    let wave = decode(path)?;
+    if let Some(entry) = entry {
+        cache::write(&entry, &wave.levels[0]);
+    }
+    Ok(wave)
 }
 
 /// Reads a file's sound through FFmpeg into a waveform. Streams, so a 12-hour file never sits in memory as samples.
@@ -118,9 +131,12 @@ mod tests {
             .status()
             .unwrap();
         assert!(made.success());
-        let wave = decode(&file).unwrap();
+        let wave = cached(&file, &dir).unwrap();
         let (loud, quiet) = (wave.peak(0.2, 0.8), wave.peak(1.2, 1.8));
         assert!(loud > 25 && quiet < loud / 4, "loud {loud}, quiet {quiet}");
+        // The second time comes from the cache, the same.
+        assert!(std::fs::read_dir(dir.join("looks")).unwrap().count() == 1);
+        assert_eq!(cached(&file, &dir).unwrap().levels, wave.levels);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

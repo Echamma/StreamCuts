@@ -96,10 +96,10 @@ impl StreamCuts {
         for media in self.project.media.iter().filter(|m| m.path.is_file()) {
             if self.looks_asked.insert(media.id.clone()) {
                 if media.has_audio {
-                    self.worker.send(Job::Waveform { media_id: media.id.clone(), path: media.path.clone() });
+                    self.worker.send(Job::Waveform { media_id: media.id.clone(), path: media.path.clone(), cache: self.place.data_dir.clone() });
                 }
                 if media.kind == MediaKind::Video {
-                    self.worker.send(Job::Filmstrip { media_id: media.id.clone(), path: media.path.clone(), duration: media.duration });
+                    self.worker.send(Job::Filmstrip { media_id: media.id.clone(), path: media.path.clone(), duration: media.duration, cache: self.place.data_dir.clone() });
                 }
             }
             if !self.looks.thumbnails.contains_key(&media.id) && media.kind != MediaKind::Audio {

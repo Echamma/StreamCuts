@@ -17,8 +17,9 @@ pub enum Job {
     Probe(PathBuf),
     Thumbnail { media_id: String, path: PathBuf, at: f64 },
     Still { key: StillKey, path: PathBuf, at: f64, width: u32, height: u32, picture: Picture },
-    Waveform { media_id: String, path: PathBuf },
-    Filmstrip { media_id: String, path: PathBuf, duration: f64 },
+    /// Waveforms and filmstrips are cached in `cache`.
+    Waveform { media_id: String, path: PathBuf, cache: PathBuf },
+    Filmstrip { media_id: String, path: PathBuf, duration: f64, cache: PathBuf },
     /// Captions for `length` source seconds of `path` from `from`, for a clip at `speed` that starts at `at`.
     Transcribe { clip: String, path: PathBuf, from: f64, length: f64, speed: f64, at: f64 },
 }
@@ -56,12 +57,12 @@ impl Worker {
                         Job::Thumbnail { media_id, path, at } => Done::Thumbnail(media_id, ffmpeg::thumbnail(&path, at)),
                         Job::Still { key, path, at, width, height, picture } => Done::Still(key, ffmpeg::still(&path, at, width, height, picture)),
                         // Reading a long file through takes a while: it gets a thread of its own, so stills don't wait.
-                        Job::Waveform { media_id, path } => {
-                            aside(&finished, &ctx, move || Done::Waveform(media_id, waveform::decode(&path)));
+                        Job::Waveform { media_id, path, cache } => {
+                            aside(&finished, &ctx, move || Done::Waveform(media_id, waveform::cached(&path, &cache)));
                             continue;
                         }
-                        Job::Filmstrip { media_id, path, duration } => {
-                            aside(&finished, &ctx, move || Done::Filmstrip(media_id, filmstrip::decode(&path, duration)));
+                        Job::Filmstrip { media_id, path, duration, cache } => {
+                            aside(&finished, &ctx, move || Done::Filmstrip(media_id, filmstrip::cached(&path, duration, &cache)));
                             continue;
                         }
                         Job::Transcribe { clip, path, from, length, speed, at } => {
