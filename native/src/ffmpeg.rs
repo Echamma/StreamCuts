@@ -351,15 +351,17 @@ pub struct SoundStream {
 }
 
 impl SoundStream {
-    pub fn start(path: &Path, from: f64, length: f64, speed: f64, rate: u32, channels: u16) -> Self {
+    /// `filter` shapes the clip's sound (`Sound::filter`): it takes stereo, as in exports.
+    pub fn start(path: &Path, from: f64, length: f64, speed: f64, rate: u32, channels: u16, filter: Option<&str>) -> Self {
         let mut command = command(&ffmpeg());
         command
             .args(["-v", "error", "-ss", &format!("{from:.3}")])
             .arg("-i")
             .arg(path)
             .args(["-t", &format!("{:.3}", length * speed), "-vn"]);
-        if let Some(tempo) = atempo(speed) {
-            command.args(["-af", &tempo]);
+        let filters: Vec<String> = atempo(speed).into_iter().chain(filter.map(|f| format!("aformat=channel_layouts=stereo,{f}"))).collect();
+        if !filters.is_empty() {
+            command.args(["-af", &filters.join(",")]);
         }
         command.args(["-ac", &channels.to_string(), "-ar", &rate.to_string(), "-f", "f32le", "pipe:1"]);
         let (ffmpeg, chunks) = Background::start(command, 32, |mut stdout, sender| {
@@ -469,10 +471,16 @@ mod tests {
         }
         drop(stream);
         // 1.5 s of stereo at 48 kHz from 0.25 s in, give or take a packet.
-        let mut sound = SoundStream::start(&clip, 0.25, 1.5, 1.0, 48_000, 2);
+        let mut sound = SoundStream::start(&clip, 0.25, 1.5, 1.0, 48_000, 2, None);
         let samples: usize = sound.take_chunks().iter().map(|chunk| chunk.len()).sum();
         assert!(samples % 2 == 0 && (samples as i64 - 144_000).abs() < 4_000, "{samples} samples");
         drop(sound);
+        // Panned hard left: the right side is silent.
+        let left = crate::project::Sound { pan: -1.0, ..Default::default() }.filter().unwrap();
+        let mut panned = SoundStream::start(&clip, 0.25, 0.5, 1.0, 48_000, 2, Some(&left));
+        let samples: Vec<f32> = panned.take_chunks().iter().flatten().collect();
+        let (l, r) = samples.chunks(2).fold((0.0f32, 0.0f32), |(l, r), s| (l.max(s[0].abs()), r.max(s[1].abs())));
+        assert!(samples.len() > 40_000 && l > 0.05 && r < 1e-4, "{} samples, left {l}, right {r}", samples.len());
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

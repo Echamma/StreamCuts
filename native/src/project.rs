@@ -98,6 +98,8 @@ pub struct Clip {
     pub grade: Grade,
     #[serde(default)]
     pub effects: Effects,
+    #[serde(default)]
+    pub sound: Sound,
     /// How fast the source plays: 2 is twice as fast (the clip covers twice the source in its length).
     #[serde(default = "normal_speed")]
     pub speed: f64,
@@ -139,6 +141,44 @@ impl Grade {
             (Some(eq), Some(wheels)) => Some(format!("{eq},{wheels}")),
             (eq, wheels) => eq.or(wheels),
         }
+    }
+}
+
+/// A clip's sound shaping, as the web StreamCuts has it: a three-band EQ in dB (a low shelf at 120 Hz, a peak at 1 kHz,
+/// a high shelf at 12 kHz) and a pan from -1 (left) to 1 (right) that keeps the near side at full level.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct Sound {
+    pub low: f32,
+    pub mid: f32,
+    pub high: f32,
+    pub pan: f32,
+}
+
+impl Sound {
+    pub fn is_neutral(self) -> bool {
+        self == Self::default()
+    }
+
+    /// FFmpeg's filters for it, on stereo sound (exports and playback both run them); `None` when it changes nothing.
+    pub fn filter(self) -> Option<String> {
+        let mut chain = Vec::new();
+        if self.pan != 0.0 {
+            // The web StreamCuts' pan law: the far side fades out, the near side stays at full level.
+            let pan = self.pan.clamp(-1.0, 1.0);
+            let (left, right) = ((1.0 - pan).min(1.0), (1.0 + pan).min(1.0));
+            chain.push(format!("pan=stereo|c0={left:.3}*c0|c1={right:.3}*c1"));
+        }
+        // The web's shelves have a slope of 1 (the Web Audio spec's), which FFmpeg takes as t=s:w=1.
+        if self.low != 0.0 {
+            chain.push(format!("lowshelf=f=120:t=s:w=1:g={:.2}", self.low));
+        }
+        if self.mid != 0.0 {
+            chain.push(format!("equalizer=f=1000:t=q:w=1:g={:.2}", self.mid));
+        }
+        if self.high != 0.0 {
+            chain.push(format!("highshelf=f=12000:t=s:w=1:g={:.2}", self.high));
+        }
+        (!chain.is_empty()).then(|| chain.join(","))
     }
 }
 
@@ -743,7 +783,7 @@ impl Project {
         };
         let duration = if media.kind == MediaKind::Image { STILL_SECONDS } else { media.duration.max(MIN_CLIP) };
         let start = self.free_start(track, at, duration, None);
-        let clip = Clip { id: new_id(), media_id: media.id.clone(), start, source_in: 0.0, duration, volume: 1.0, fade_in: 0.0, fade_out: 0.0, crossfade_in: 0.0, crossfade_from: None, framing: Framing::Fit, grade: Grade::default(), effects: Effects::default(), speed: 1.0 };
+        let clip = Clip { id: new_id(), media_id: media.id.clone(), start, source_in: 0.0, duration, volume: 1.0, fade_in: 0.0, fade_out: 0.0, crossfade_in: 0.0, crossfade_from: None, framing: Framing::Fit, grade: Grade::default(), effects: Effects::default(), sound: Sound::default(), speed: 1.0 };
         let id = clip.id.clone();
         self.tracks[track].clips.push(clip);
         self.sort_track(track);
@@ -1172,6 +1212,13 @@ mod tests {
         assert!(project.crossfade_at(9.0).is_none());
         project.clip_mut(&outgoing).unwrap().source_in = 2.0;
         assert_eq!(project.crossfade_after(&outgoing), 0.0, "no source handle means no transition");
+    }
+
+    #[test]
+    fn sound_becomes_pan_and_eq_filters() {
+        assert_eq!(Sound::default().filter(), None);
+        let shaped = Sound { pan: 0.5, low: 3.0, ..Default::default() };
+        assert_eq!(shaped.filter().unwrap(), "pan=stereo|c0=0.500*c0|c1=1.000*c1,lowshelf=f=120:t=s:w=1:g=3.00");
     }
 
     #[test]

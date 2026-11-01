@@ -60,6 +60,9 @@ pub fn arguments(project: &Project, output: &Path) -> Result<Vec<String>, String
             if media.has_audio && !track.muted && !hidden_video && clip.volume > 0.0 {
                 let delay = (clip.start * 1000.0).round() as u64;
                 let mut chain = format!("[{input}:a]asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo,volume={:.3}", clip.volume);
+                if let Some(sound) = clip.sound.filter() {
+                    chain.push_str(&format!(",{sound}"));
+                }
                 if let Some(tempo) = crate::ffmpeg::atempo(clip.speed) {
                     chain.push_str(&format!(",{tempo}"));
                 }
@@ -258,6 +261,9 @@ mod tests {
         let picture = project.add_media(crate::ffmpeg::probe(&still).unwrap());
         let first = project.place(&video, None, 0.0).unwrap();
         (project.clip_mut(&first).unwrap().fade_in, project.clip_mut(&first).unwrap().fade_out) = (0.5, 0.5);
+        // Its sound shaped and its color graded on the wheels: FFmpeg has to take those filters in the graph too.
+        project.clip_mut(&first).unwrap().sound = crate::project::Sound { pan: -0.5, low: 4.0, mid: -2.0, high: 3.0 };
+        project.clip_mut(&first).unwrap().grade.wheels.gain.r = 0.2;
         // Twice as fast: the 2-second clip covers 1 second, and FFmpeg has to take setpts and atempo.
         project.set_speed(&first, 2.0);
         let upper = project.add_track(TrackKind::Video);

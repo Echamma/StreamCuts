@@ -180,7 +180,9 @@ fn signature(project: &Project) -> u64 {
         for value in [clip.start, clip.source_in, clip.duration, clip.fade_in, clip.fade_out, clip.crossfade_in, clip.speed] {
             value.to_bits().hash(&mut hasher);
         }
-        clip.volume.to_bits().hash(&mut hasher);
+        for value in [clip.volume, clip.sound.low, clip.sound.mid, clip.sound.high, clip.sound.pan] {
+            value.to_bits().hash(&mut hasher);
+        }
     }
     hasher.finish()
 }
@@ -290,7 +292,7 @@ impl Audio {
                 continue;
             }
             let begin = clip.start.max(playhead);
-            let mut decoder = SoundStream::start(&media.path, clip.source_time(begin), end - begin, clip.speed, rate, channels);
+            let mut decoder = SoundStream::start(&media.path, clip.source_time(begin), end - begin, clip.speed, rate, channels, clip.sound.filter().as_deref());
             let frames = |seconds: f64| (seconds * rate as f64).round() as u64;
             voices.push(Voice {
                 next: frame(begin),

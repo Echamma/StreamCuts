@@ -7,7 +7,7 @@ use crate::captions;
 use crate::export::{self, Export};
 use crate::ffmpeg::Frame;
 use crate::preview::{Clock, Preview};
-use crate::project::{Effects, ExportFormat, Framing, Grade, History, MediaKind, Picture, Project, SPEEDS};
+use crate::project::{Effects, ExportFormat, Framing, Grade, History, MediaKind, Picture, Project, SPEEDS, Sound};
 use crate::storage;
 use crate::filmstrip::Strip;
 use crate::timeline::{Looks, MediaDrag, Timeline, timecode};
@@ -835,6 +835,18 @@ impl StreamCuts {
                         ui.close();
                     }
                 }
+                // The web StreamCuts' EQ and pan, in a submenu (the Clip menu is tall already).
+                ui.menu_button("Sound: EQ and pan", |ui| {
+                    ui.set_min_width(260.0);
+                    let sound = &mut changed.sound;
+                    ui.add(egui::Slider::new(&mut sound.pan, -1.0..=1.0).fixed_decimals(2).text("Pan, left to right"));
+                    for (value, label) in [(&mut sound.low, "Low (120 Hz)"), (&mut sound.mid, "Mid (1 kHz)"), (&mut sound.high, "High (12 kHz)")] {
+                        ui.add(egui::Slider::new(value, -12.0..=12.0).fixed_decimals(1).suffix(" dB").text(label));
+                    }
+                    if ui.add_enabled(!sound.is_neutral(), egui::Button::new("Reset")).clicked() {
+                        *sound = Sound::default();
+                    }
+                });
                 ui.separator();
             }
             if kind == MediaKind::Video {
