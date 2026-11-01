@@ -142,13 +142,58 @@ pub struct Effects {
     pub blur: f32,
     /// Unsharp strength; 0 leaves the picture alone.
     pub sharpen: f32,
+    /// A tone curve preset (the web StreamCuts' tone curves); `None` leaves the tones alone.
+    #[serde(default)]
+    pub look: Option<Look>,
+}
+
+/// FFmpeg's `curves` presets, as named looks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Look {
+    Lighter,
+    Darker,
+    MediumContrast,
+    StrongContrast,
+    Vintage,
+    CrossProcess,
+    Negative,
+}
+
+impl Look {
+    pub const ALL: [Look; 7] = [Look::Lighter, Look::Darker, Look::MediumContrast, Look::StrongContrast, Look::Vintage, Look::CrossProcess, Look::Negative];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Look::Lighter => "Lighter",
+            Look::Darker => "Darker",
+            Look::MediumContrast => "More contrast",
+            Look::StrongContrast => "Strong contrast",
+            Look::Vintage => "Vintage",
+            Look::CrossProcess => "Cross process",
+            Look::Negative => "Negative",
+        }
+    }
+
+    fn preset(self) -> &'static str {
+        match self {
+            Look::Lighter => "lighter",
+            Look::Darker => "darker",
+            Look::MediumContrast => "medium_contrast",
+            Look::StrongContrast => "strong_contrast",
+            Look::Vintage => "vintage",
+            Look::CrossProcess => "cross_process",
+            Look::Negative => "negative",
+        }
+    }
 }
 
 impl Effects {
-    pub fn is_neutral(self) -> bool { self.blur == 0.0 && self.sharpen == 0.0 }
+    pub fn is_neutral(self) -> bool { self.blur == 0.0 && self.sharpen == 0.0 && self.look.is_none() }
 
     pub fn filter(self) -> String {
         let mut chain = String::new();
+        if let Some(look) = self.look { chain.push_str(&format!(",curves=preset={}", look.preset())); }
         if self.blur > 0.0 { chain.push_str(&format!(",gblur=sigma={:.2}", self.blur.clamp(0.0, 20.0))); }
         if self.sharpen > 0.0 { chain.push_str(&format!(",unsharp=5:5:{:.2}", self.sharpen.clamp(0.0, 2.0))); }
         chain

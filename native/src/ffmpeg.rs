@@ -389,10 +389,15 @@ mod tests {
         let graded = still(&clip, 1.0, 160, 90, gray).unwrap();
         let spread = graded.rgba.chunks(4).map(|p| p[0].max(p[1]).max(p[2]) - p[0].min(p[1]).min(p[2])).max().unwrap();
         assert!(spread <= 6, "colors left in a gray picture: {spread}");
-        let soft = Picture { effects: crate::project::Effects { blur: 4.0, sharpen: 0.0 }, ..Default::default() };
+        let soft = Picture { effects: crate::project::Effects { blur: 4.0, sharpen: 0.0, look: None }, ..Default::default() };
         let blurred = still(&clip, 1.0, 160, 90, soft).unwrap();
         assert_ne!(blurred.rgba, frame.rgba, "blur should change the decoded picture");
-        let crisp = Picture { effects: crate::project::Effects { blur: 0.0, sharpen: 1.0 }, ..Default::default() };
+        // The negative look inverts the picture, through the same filter exports use.
+        let negative = Picture { effects: crate::project::Effects { look: Some(crate::project::Look::Negative), ..Default::default() }, ..Default::default() };
+        let inverted = still(&clip, 1.0, 160, 90, negative).unwrap();
+        let (a, b) = (&frame.rgba[4 * 4000..][..3], &inverted.rgba[4 * 4000..][..3]);
+        assert!(a.iter().zip(b).all(|(x, y)| (*x as i32 + *y as i32 - 255).abs() < 12), "{a:?} vs {b:?}");
+        let crisp = Picture { effects: crate::project::Effects { blur: 0.0, sharpen: 1.0, look: None }, ..Default::default() };
         let sharpened = still(&clip, 1.0, 160, 90, crisp).unwrap();
         assert_ne!(sharpened.rgba, frame.rgba, "sharpen should change the decoded picture");
         // Streamed frames carry their real source time: each looks like the still at its time, not its neighbors'.

@@ -848,6 +848,12 @@ impl StreamCuts {
                 });
                 ui.add(egui::Slider::new(&mut changed.effects.blur, 0.0..=12.0).text("Blur"));
                 ui.add(egui::Slider::new(&mut changed.effects.sharpen, 0.0..=2.0).text("Sharpen"));
+                egui::ComboBox::from_label("Look").selected_text(changed.effects.look.map_or("None", |l| l.label())).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut changed.effects.look, None, "None");
+                    for look in crate::project::Look::ALL {
+                        ui.selectable_value(&mut changed.effects.look, Some(look), look.label());
+                    }
+                });
             }
         });
         if changed != clip || speed != clip.speed {
