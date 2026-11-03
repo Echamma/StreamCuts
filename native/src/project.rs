@@ -157,6 +157,9 @@ pub struct Clip {
     /// A `.cube` color lookup table (a camera's log-to-Rec. 709 LUT, or a look) applied before the grade.
     #[serde(default)]
     pub lut: Option<PathBuf>,
+    /// Where the action is over time (auto-reframe): a filled frame keeps its crop on it.
+    #[serde(default)]
+    pub follow: Vec<Focus>,
     /// The clip this one is linked to: a video clip and its sound on an audio track (Detach sound). Linked clips move,
     /// trim, split and go together, and the video clip plays no sound of its own.
     #[serde(default)]
@@ -489,6 +492,8 @@ impl ExportFormat {
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Picture {
     pub framing: Framing,
+    /// A filled frame's crop follows this (auto-reframe); `Framing::Fill`'s own place is then unused.
+    pub follow: Option<FollowRef>,
     pub lut: Option<LutRef>,
     pub grade: Grade,
     pub effects: Effects,
@@ -517,6 +522,97 @@ impl Transition {
 
 /// How blurred a blur-through gets at its blurriest: a Gaussian this fraction of the frame's height across.
 pub const BLUR_THROUGH: f32 = 0.02;
+
+/// Where the action is at source time `t`: `x` and `y` from 0 to 1 across and down the picture.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Focus {
+    pub t: f64,
+    pub x: f32,
+    pub y: f32,
+}
+
+/// The focus tracks clips follow this run, so a `Picture` (which is `Copy`) can name one by number.
+static FOLLOWS: Mutex<Vec<std::sync::Arc<Vec<Focus>>>> = Mutex::new(Vec::new());
+
+/// A focus track, by its number in this run's list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FollowRef(usize);
+
+impl FollowRef {
+    pub fn of(track: &[Focus]) -> Self {
+        let mut follows = FOLLOWS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        Self(follows.iter().position(|f| f.as_slice() == track).unwrap_or_else(|| {
+            follows.push(std::sync::Arc::new(track.to_vec()));
+            follows.len() - 1
+        }))
+    }
+
+    pub fn track(self) -> std::sync::Arc<Vec<Focus>> {
+        FOLLOWS.lock().unwrap_or_else(|poisoned| poisoned.into_inner())[self.0].clone()
+    }
+}
+
+/// A focus track as an FFmpeg expression of a filter's frame time `t`: straight between its points, level before the
+/// first and after the last. `origin` is the source time of the filter's first frame, and `rate` how many source
+/// seconds a second of its frames covers (the clip's speed, once `setpts` has paced it).
+fn focus_expression(track: &[Focus], origin: f64, rate: f64, value: impl Fn(&Focus) -> f32) -> String {
+    let at = |focus: &Focus| (focus.t - origin) / rate.max(1e-6);
+    let (first, last) = (&track[0], &track[track.len() - 1]);
+    let mut terms = vec![format!("{:.4}*lt(t,{:.3})", value(first), at(first))];
+    for pair in track.windows(2) {
+        let (a, b) = (&pair[0], &pair[1]);
+        let (from, to) = (at(a), at(b));
+        if to <= 0.0 || to <= from {
+            continue;
+        }
+        let slope = (value(b) - value(a)) as f64 / (to - from);
+        terms.push(format!("({:.4}+{slope:.6}*(t-({from:.3})))*gte(t,{from:.3})*lt(t,{to:.3})", value(a)));
+    }
+    terms.push(format!("{:.4}*gte(t,{:.3})", value(last), at(last)));
+    terms.join("+")
+}
+
+/// Fills a `width`x`height` frame like `Framing::Fill`, the crop's middle on the focus as it moves (or as near as the
+/// picture's edges allow).
+fn follow_filter(track: &[Focus], width: u32, height: u32, origin: f64, rate: f64) -> String {
+    let (x, y) = (focus_expression(track, origin, rate, |f| f.x), focus_expression(track, origin, rate, |f| f.y));
+    format!("scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height}:'clip(({x})*iw-ow/2,0,iw-ow)':'clip(({y})*ih-oh/2,0,ih-oh)'")
+}
+
+/// Keeps the fewest points that stay within `tolerance` of the track (Ramer-Douglas-Peucker), loosening it until at
+/// most `most` are left, so the crop expression stays short.
+pub fn simplify_track(track: &[Focus], tolerance: f32, most: usize) -> Vec<Focus> {
+    fn keep(track: &[Focus], tolerance: f32, kept: &mut Vec<bool>, from: usize, to: usize) {
+        let (a, b) = (track[from], track[to]);
+        let mut worst = (0.0f32, from);
+        for (i, p) in track.iter().enumerate().take(to).skip(from + 1) {
+            let k = if b.t > a.t { ((p.t - a.t) / (b.t - a.t)) as f32 } else { 0.0 };
+            let off = (a.x + (b.x - a.x) * k - p.x).abs().max((a.y + (b.y - a.y) * k - p.y).abs());
+            if off > worst.0 {
+                worst = (off, i);
+            }
+        }
+        if worst.0 > tolerance {
+            kept[worst.1] = true;
+            keep(track, tolerance, kept, from, worst.1);
+            keep(track, tolerance, kept, worst.1, to);
+        }
+    }
+    if track.len() <= 2 {
+        return track.to_vec();
+    }
+    let mut tolerance = tolerance;
+    loop {
+        let mut kept = vec![false; track.len()];
+        (kept[0], kept[track.len() - 1]) = (true, true);
+        keep(track, tolerance, &mut kept, 0, track.len() - 1);
+        let out: Vec<Focus> = track.iter().zip(&kept).filter(|(_, k)| **k).map(|(f, _)| *f).collect();
+        if out.len() <= most.max(2) {
+            return out;
+        }
+        tolerance *= 1.5;
+    }
+}
 
 /// The LUT files clips use this run, so a `Picture` (which is `Copy`, and goes to the worker and to FFmpeg command
 /// lines) can name one by number.
@@ -564,7 +660,16 @@ pub fn filter_path(path: &Path) -> String {
 
 impl Picture {
     pub fn filter(self, width: u32, height: u32) -> String {
-        let mut color = self.framing.filter(width, height);
+        self.filter_at(width, height, 0.0, 1.0)
+    }
+
+    /// The filters for frames from source time `origin` on, each second of them covering `rate` seconds of source (a
+    /// moving crop needs to know when each frame is).
+    pub fn filter_at(self, width: u32, height: u32, origin: f64, rate: f64) -> String {
+        let mut color = match (self.framing, self.follow.map(FollowRef::track)) {
+            (Framing::Fill { .. }, Some(track)) if !track.is_empty() => follow_filter(&track, width, height, origin, rate),
+            (framing, _) => framing.filter(width, height),
+        };
         // The LUT first (it turns a camera's log footage into normal color), then the grade. A LUT file that's gone is
         // left out rather than failing every picture.
         if let Some(lut) = self.lut.map(LutRef::path).filter(|path| path.is_file()) {
@@ -622,7 +727,8 @@ impl Clip {
         t >= self.start && t < self.end()
     }
     pub fn picture(&self) -> Picture {
-        Picture { framing: self.framing, lut: self.lut.as_deref().map(LutRef::of), grade: self.grade, effects: self.effects }
+        let follow = (!self.follow.is_empty()).then(|| FollowRef::of(&self.follow));
+        Picture { framing: self.framing, follow, lut: self.lut.as_deref().map(LutRef::of), grade: self.grade, effects: self.effects }
     }
     /// How far faded in the clip is at timeline time `t`: 0 is black (silent), 1 is full.
     pub fn fade_at(&self, t: f64) -> f64 {
@@ -1018,7 +1124,7 @@ impl Project {
         };
         let duration = if media.kind == MediaKind::Image { STILL_SECONDS } else { media.duration.max(MIN_CLIP) };
         let start = self.free_start(track, at, duration, None);
-        let clip = Clip { id: new_id(), media_id: media.id.clone(), start, source_in: 0.0, duration, volume: 1.0, fade_in: 0.0, fade_out: 0.0, crossfade_in: 0.0, crossfade_from: None, transition: Transition::default(), framing: Framing::Fit, grade: Grade::default(), effects: Effects::default(), sound: Sound::default(), lut: None, link: None, speed: 1.0 };
+        let clip = Clip { id: new_id(), media_id: media.id.clone(), start, source_in: 0.0, duration, volume: 1.0, fade_in: 0.0, fade_out: 0.0, crossfade_in: 0.0, crossfade_from: None, transition: Transition::default(), framing: Framing::Fit, grade: Grade::default(), effects: Effects::default(), sound: Sound::default(), lut: None, follow: Vec::new(), link: None, speed: 1.0 };
         let id = clip.id.clone();
         self.tracks[track].clips.push(clip);
         self.sort_track(track);
@@ -1088,6 +1194,7 @@ impl Project {
             grade: Grade::default(),
             effects: Effects::default(),
             lut: None,
+            follow: Vec::new(),
             ..clip.clone()
         };
         let id = sound.id.clone();
@@ -1572,6 +1679,17 @@ mod tests {
         assert!(project.crossfade_at(9.0).is_none());
         project.clip_mut(&outgoing).unwrap().source_in = 2.0;
         assert_eq!(project.crossfade_after(&outgoing), 0.0, "no source handle means no transition");
+    }
+
+    #[test]
+    fn focus_tracks_become_short_crop_expressions() {
+        let line: Vec<Focus> = (0..=40).map(|i| Focus { t: i as f64 * 0.25, x: i as f32 / 40.0, y: 0.5 }).collect();
+        assert_eq!(simplify_track(&line, 0.02, 40).len(), 2, "a straight pan needs only its ends");
+        let zigzag: Vec<Focus> = (0..200).map(|i| Focus { t: i as f64 * 0.25, x: (i % 2) as f32, y: 0.5 }).collect();
+        assert!(simplify_track(&zigzag, 0.02, 30).len() <= 30);
+        let two = [Focus { t: 1.0, x: 0.2, y: 0.5 }, Focus { t: 3.0, x: 0.8, y: 0.5 }];
+        // From source time 2 at double speed: the first point was half a second of frames ago, the last is in half.
+        assert_eq!(focus_expression(&two, 2.0, 2.0, |f| f.x), "0.2000*lt(t,-0.500)+(0.2000+0.600000*(t-(-0.500)))*gte(t,-0.500)*lt(t,0.500)+0.8000*gte(t,0.500)");
     }
 
     #[test]

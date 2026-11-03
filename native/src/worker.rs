@@ -35,6 +35,8 @@ pub enum Job {
     Boss { media_id: String, path: PathBuf, duration: f64 },
     /// Where a video cuts to another scene.
     Scenes { media_id: String, path: PathBuf },
+    /// Where the action is in a clip's stretch of video (auto-reframe).
+    Focus { clip: String, path: PathBuf, from: f64, length: f64 },
     /// An editing proxy of a video, made at `output`.
     Proxy { media_id: String, path: PathBuf, output: PathBuf },
     /// A clip's loudness; with `normalize`, its volume is then set to reach -14 LUFS.
@@ -53,6 +55,7 @@ pub enum Done {
     Scenes { media_id: String, result: Result<Vec<f64>, String> },
     Loudness { clip: String, normalize: bool, result: Result<f64, String> },
     Proxy { media_id: String, result: Result<PathBuf, String> },
+    Focus { clip: String, result: Result<Vec<crate::project::Focus>, String> },
 }
 
 pub struct Worker {
@@ -108,6 +111,10 @@ impl Worker {
                         }
                         Job::Transcribe { clip, path, from, length, speed, at } => {
                             aside(&finished, &ctx, move || Done::Captions { from: at, to: at + length / speed, result: transcribe::captions(&clip, &path, from, length, speed, at) });
+                            continue;
+                        }
+                        Job::Focus { clip, path, from, length } => {
+                            aside(&finished, &ctx, move || Done::Focus { clip, result: ffmpeg::focus(&path, from, length) });
                             continue;
                         }
                         Job::Proxy { media_id, path, output } => {

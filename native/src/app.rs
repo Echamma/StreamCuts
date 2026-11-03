@@ -51,6 +51,8 @@ pub struct StreamCuts {
     scene_jobs: Vec<String>,
     /// Media whose editing proxy is being made.
     proxy_jobs: Vec<String>,
+    /// Clips whose action is being followed (auto-reframe).
+    focus_jobs: Vec<String>,
     boss_plan: Option<BossPlan>,
     /// Typing in a caption: one undo step for the whole edit.
     caption_typing: bool,
@@ -100,6 +102,7 @@ impl StreamCuts {
             boss_running: None,
             scene_jobs: Vec::new(),
             proxy_jobs: Vec::new(),
+            focus_jobs: Vec::new(),
             boss_plan: None,
             caption_typing: false,
             media_search: String::new(),
@@ -244,6 +247,23 @@ impl StreamCuts {
                     }
                     Err(error) => self.toasts.push(error),
                 },
+                Done::Focus { clip, result } => {
+                    self.focus_jobs.retain(|id| id != &clip);
+                    match result {
+                        Ok(track) => {
+                            self.history.record(&self.project);
+                            if let Some(c) = self.project.clip_mut(&clip) {
+                                if c.framing == Framing::Fit {
+                                    c.framing = Framing::Fill { x: 0.5, y: 0.5 };
+                                }
+                                c.follow = track;
+                            }
+                            self.edited();
+                            self.toasts.push("Reframed: the crop follows the action".into());
+                        }
+                        Err(error) => self.toasts.push(error),
+                    }
+                }
                 Done::Proxy { media_id, result } => {
                     self.proxy_jobs.retain(|id| id != &media_id);
                     match result {
@@ -975,6 +995,7 @@ impl StreamCuts {
         let mut loudness = None;
         // Some(true) makes (or remakes) the clip's media's editing proxy, Some(false) deletes it.
         let mut proxy = None;
+        let mut reframe = false;
         // Some(true) detaches the clip's sound onto an audio track, Some(false) unlinks it from its linked clip.
         let mut link = None;
         let has_sound = self.project.media(&clip.media_id).is_some_and(|m| m.has_audio) && !self.project.sounds_elsewhere(&clip);
@@ -1089,8 +1110,29 @@ impl StreamCuts {
                     }
                 });
                 if let Framing::Fill { x, y } = &mut changed.framing {
-                    ui.add(egui::Slider::new(x, 0.0..=1.0).show_value(false).text("Left to right"));
-                    ui.add(egui::Slider::new(y, 0.0..=1.0).show_value(false).text("Top to bottom"));
+                    if changed.follow.is_empty() {
+                        ui.add(egui::Slider::new(x, 0.0..=1.0).show_value(false).text("Left to right"));
+                        ui.add(egui::Slider::new(y, 0.0..=1.0).show_value(false).text("Top to bottom"));
+                    } else {
+                        ui.label(canopy_ui::muted("The crop follows the action."));
+                    }
+                }
+                // The web StreamCuts' auto-reframe: fill the frame and keep the crop on where things move.
+                if kind == MediaKind::Video {
+                    let busy = self.focus_jobs.contains(&clip.id);
+                    let label = if busy { "Following the action…" } else if changed.follow.is_empty() { "Auto-reframe" } else { "Auto-reframe again" };
+                    ui.horizontal(|ui| {
+                        if ui.add_enabled(!busy, egui::Button::new(label))
+                            .on_hover_text("Fill the frame, the crop following where things move (wide video into a vertical short)")
+                            .clicked()
+                        {
+                            reframe = true;
+                            ui.close();
+                        }
+                        if !changed.follow.is_empty() && ui.button("Stop following").clicked() {
+                            changed.follow.clear();
+                        }
+                    });
                 }
                 ui.separator();
                 // Color and effects get submenus of their own: together they're taller than a laptop screen.
@@ -1221,6 +1263,11 @@ impl StreamCuts {
             self.scene_jobs.push(clip.media_id.clone());
             self.worker.send(Job::Scenes { media_id: clip.media_id.clone(), path });
             self.toasts.push("Finding scene changes; long videos take a while".into());
+        }
+        if let (true, Some(path)) = (reframe, self.project.media(&clip.media_id).map(|m| m.path.clone())) {
+            self.focus_jobs.push(clip.id.clone());
+            self.worker.send(Job::Focus { clip: clip.id.clone(), path, from: clip.source_in, length: clip.source_length() });
+            self.toasts.push("Following the action; long clips take a while".into());
         }
         if let Some(detach) = link {
             self.history.record(&self.project);

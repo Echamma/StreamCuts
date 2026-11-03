@@ -130,7 +130,7 @@ pub fn arguments(project: &Project, output: &Path) -> Result<Vec<String>, String
             if shows {
                 // Fades work on the picture's alpha, so a clip fades to whatever is below it (black when nothing is).
                 let pace = if (clip.speed - 1.0).abs() < 1e-6 { "PTS-STARTPTS".to_string() } else { format!("(PTS-STARTPTS)/{:.4}", clip.speed) };
-                let mut chain = format!("[{input}:v]{},fps={fps},format=yuva420p,setpts={pace}", clip.picture().filter(w, h));
+                let mut chain = format!("[{input}:v]{},fps={fps},format=yuva420p,setpts={pace}", clip.picture().filter_at(w, h, clip.source_in, 1.0));
                 // A blur-through mixes each side towards a blurred copy of itself across the crossfade (`K`, 0 sharp to
                 // 1 blurred, by the clip's own time T): the outgoing clip on its way out, the incoming one in reverse.
                 let blur = |chain: &mut String, side: &str, k: String| {

@@ -147,6 +147,87 @@ pub fn proxy(path: &Path, output: &Path) -> Result<(), String> {
     std::fs::rename(&partial, output).map_err(|e| format!("Couldn't keep the proxy ({e})."))
 }
 
+/// Where the action is in a stretch of a video, as the web StreamCuts' auto-reframe finds it: four frames a second at
+/// a small size, and in each the cell of an 8x8 grid that changed most since the frame before (held where nothing
+/// much moves), eased over half a second. Returns points at source times, few enough for a crop expression. Reads the
+/// whole stretch (streaming it); call it off the UI thread.
+pub fn focus(path: &Path, from: f64, length: f64) -> Result<Vec<crate::project::Focus>, String> {
+    const RATE: f64 = 4.0;
+    let (width, height) = (160usize, 90usize);
+    let mut child = command(&ffmpeg())
+        .args(["-v", "error", "-ss", &seek_to(from), "-t", &format!("{length:.3}"), "-i"])
+        .arg(path)
+        .args(["-an", "-vf", &format!("fps={RATE},scale={width}:{height}"), "-pix_fmt", "gray", "-f", "rawvideo", "pipe:1"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("FFmpeg couldn't start ({e})."))?;
+    let mut stdout = child.stdout.take().ok_or("FFmpeg gave no picture.")?;
+    let mut motion = Motion::new(width, height, RATE);
+    let mut track = Vec::new();
+    let mut frame = vec![0u8; width * height];
+    while stdout.read_exact(&mut frame).is_ok() {
+        let (x, y) = motion.next(&frame);
+        track.push(crate::project::Focus { t: from + track.len() as f64 / RATE, x, y });
+    }
+    let _ = child.wait();
+    if track.is_empty() {
+        return Err("FFmpeg read no frames to follow.".into());
+    }
+    Ok(crate::project::simplify_track(&track, 0.03, 40))
+}
+
+/// The web StreamCuts' motion-energy saliency (its `saliency` crate), frame by frame.
+struct Motion {
+    size: (usize, usize),
+    previous: Option<Vec<u8>>,
+    /// The eased place, and how much of each new place it takes (dt / (dt + 0.5 s)).
+    place: Option<(f32, f32)>,
+    ease: f32,
+}
+
+impl Motion {
+    const GRID: usize = 8;
+
+    fn new(width: usize, height: usize, rate: f64) -> Self {
+        let dt = 1.0 / rate as f32;
+        Motion { size: (width, height), previous: None, place: None, ease: dt / (dt + 0.5) }
+    }
+
+    fn next(&mut self, luma: &[u8]) -> (f32, f32) {
+        let (width, height) = self.size;
+        let last = self.place.unwrap_or((0.5, 0.5));
+        let raw = match &self.previous {
+            None => last,
+            Some(previous) => {
+                let mut cells = [0u64; Self::GRID * Self::GRID];
+                for y in 0..height {
+                    for x in 0..width {
+                        let i = y * width + x;
+                        cells[(y * Self::GRID / height) * Self::GRID + x * Self::GRID / width] += luma[i].abs_diff(previous[i]) as u64;
+                    }
+                }
+                // Below half a level of change per pixel it's noise, not motion: stay put.
+                let total: u64 = cells.iter().sum();
+                if (total as f64) < 0.5 * (width * height) as f64 {
+                    last
+                } else {
+                    let best = (0..cells.len()).max_by_key(|&i| cells[i]).unwrap_or(0);
+                    (((best % Self::GRID) as f32 + 0.5) / Self::GRID as f32, ((best / Self::GRID) as f32 + 0.5) / Self::GRID as f32)
+                }
+            }
+        };
+        self.previous = Some(luma.to_vec());
+        let eased = match self.place {
+            None => raw,
+            Some((x, y)) => (x + (raw.0 - x) * self.ease, y + (raw.1 - y) * self.ease),
+        };
+        self.place = Some(eased);
+        eased
+    }
+}
+
 /// Where the picture cuts to another scene, in source seconds: FFmpeg's scene score above `threshold` (0-1; the web
 /// StreamCuts uses 0.3). Reads the whole file at a small size; call it off the UI thread.
 pub fn scenes(path: &Path, threshold: f64) -> Result<Vec<f64>, String> {
@@ -297,7 +378,7 @@ pub fn still(path: &Path, at: f64, width: u32, height: u32, picture: Picture) ->
         .args(["-v", "error", "-ss", &seek_to(at)])
         .arg("-i")
         .arg(path)
-        .args(["-frames:v", "1", "-an", "-vf", &picture.filter(width, height), "-pix_fmt", "rgba", "-f", "rawvideo", "pipe:1"])
+        .args(["-frames:v", "1", "-an", "-vf", &picture.filter_at(width, height, at, 1.0), "-pix_fmt", "rgba", "-f", "rawvideo", "pipe:1"])
         .stderr(Stdio::null())
         .output()
         .map_err(|e| format!("FFmpeg couldn't start ({e})."))?;
@@ -383,7 +464,7 @@ impl FrameStream {
             .args(["-v", "error", "-ss", &seek_to(from)])
             .arg("-i")
             .arg(path)
-            .args(["-an", "-vf", &format!("setpts=(PTS-STARTPTS)/{speed:.4},fps={fps},{}", picture.filter(width, height)), "-pix_fmt", "rgba", "-f", "rawvideo", "pipe:1"]);
+            .args(["-an", "-vf", &format!("setpts=(PTS-STARTPTS)/{speed:.4},fps={fps},{}", picture.filter_at(width, height, from, speed)), "-pix_fmt", "rgba", "-f", "rawvideo", "pipe:1"]);
         let frame_bytes = (width * height * 4) as usize;
         let (ffmpeg, frames) = Background::start(command, 6, move |mut stdout, sender| {
             for index in 0.. {
@@ -464,6 +545,24 @@ mod tests {
     }
 
     #[test]
+    fn motion_follows_what_moves() {
+        let (w, h) = (80, 80);
+        // A bright square moving along the right edge, on black.
+        let frame = |step: usize| -> Vec<u8> {
+            (0..w * h).map(|i| if i % w >= 70 && (i / w) / 10 == step { 255 } else { 0 }).collect()
+        };
+        let mut motion = Motion::new(w, h, 4.0);
+        let mut place = motion.next(&frame(0));
+        assert_eq!(place, (0.5, 0.5), "nothing to compare the first frame with");
+        for step in 1..8 {
+            place = motion.next(&frame(step));
+        }
+        assert!(place.0 > 0.8 && place.1 > 0.5, "drifts right and down after it: {place:?}");
+        let still = motion.next(&frame(7));
+        assert!((still.0 - place.0).abs() < 1e-6, "nothing moved: it stays");
+    }
+
+    #[test]
     fn blur_through_softens_both_pictures_midway() {
         // A white square on black, and a plain gray picture.
         let (w, h) = (100usize, 100usize);
@@ -509,6 +608,16 @@ mod tests {
         let proxied = probe(&made).unwrap();
         assert!(proxied.kind == MediaKind::Video && !proxied.has_audio && (proxied.width, proxied.height) == (320, 180), "{}", proxied.info());
         assert!((proxied.duration - 2.0).abs() < 0.1, "proxy duration {}", proxied.duration);
+        // Following a focus that pans from the left edge to the right, a vertical frame shows the picture's left end
+        // at first and its right end at the last, as a fill placed at either side does.
+        let pan = [crate::project::Focus { t: 0.0, x: 0.0, y: 0.5 }, crate::project::Focus { t: 2.0, x: 1.0, y: 0.5 }];
+        let fill = |x| Picture { framing: Framing::Fill { x, y: 0.5 }, ..Default::default() };
+        let followed = Picture { follow: Some(crate::project::FollowRef::of(&pan)), ..fill(0.5) };
+        assert_eq!(still(&clip, 0.1, 90, 160, followed).unwrap().rgba, still(&clip, 0.1, 90, 160, fill(0.0)).unwrap().rgba);
+        assert_eq!(still(&clip, 1.9, 90, 160, followed).unwrap().rgba, still(&clip, 1.9, 90, 160, fill(1.0)).unwrap().rgba);
+        // The test pattern moves, so following it finds points across the clip.
+        let found = focus(&clip, 0.0, 2.0).unwrap();
+        assert!(!found.is_empty() && found.iter().all(|f| (0.0..=2.0).contains(&f.t)), "{found:?}");
         // The generated clip is one continuous test pattern: no cuts.
         assert!(scenes(&clip, 0.3).unwrap().is_empty());
         assert_eq!(frame.rgba.len(), 160 * 90 * 4);
