@@ -93,6 +93,9 @@ pub struct Clip {
     pub crossfade_in: f64,
     #[serde(default)]
     pub crossfade_from: Option<String>,
+    /// How its crossfade in looks.
+    #[serde(default)]
+    pub transition: Transition,
     #[serde(default)]
     pub framing: Framing,
     #[serde(default)]
@@ -440,6 +443,30 @@ pub struct Picture {
     pub grade: Grade,
     pub effects: Effects,
 }
+
+/// How a crossfade looks, as the web StreamCuts' transitions: a plain dissolve, or both pictures blurring through it
+/// (the outgoing one blurs as it fades out, the incoming one comes into focus as it fades in).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Transition {
+    #[default]
+    Dissolve,
+    BlurThrough,
+}
+
+impl Transition {
+    pub const ALL: [Transition; 2] = [Transition::Dissolve, Transition::BlurThrough];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Transition::Dissolve => "Dissolve",
+            Transition::BlurThrough => "Blur through",
+        }
+    }
+}
+
+/// How blurred a blur-through gets at its blurriest: a Gaussian this fraction of the frame's height across.
+pub const BLUR_THROUGH: f32 = 0.02;
 
 /// The LUT files clips use this run, so a `Picture` (which is `Copy`, and goes to the worker and to FFmpeg command
 /// lines) can name one by number.
@@ -841,6 +868,13 @@ impl Project {
         clip.crossfade_from = from;
     }
 
+    /// How the crossfade out of `clip_id` into the next clip looks (the next clip's transition), if it has one.
+    pub fn transition_after(&self, clip_id: &str) -> Option<Transition> {
+        let at = self.find(clip_id)?;
+        let next = self.tracks[at.track].clips.get(at.index + 1)?;
+        self.crossfade_before(&next.id).map(|_| next.transition)
+    }
+
     pub fn crossfade_after(&self, clip_id: &str) -> f64 {
         let Some(at) = self.find(clip_id) else { return 0.0 };
         self.tracks[at.track].clips.get(at.index + 1)
@@ -930,7 +964,7 @@ impl Project {
         };
         let duration = if media.kind == MediaKind::Image { STILL_SECONDS } else { media.duration.max(MIN_CLIP) };
         let start = self.free_start(track, at, duration, None);
-        let clip = Clip { id: new_id(), media_id: media.id.clone(), start, source_in: 0.0, duration, volume: 1.0, fade_in: 0.0, fade_out: 0.0, crossfade_in: 0.0, crossfade_from: None, framing: Framing::Fit, grade: Grade::default(), effects: Effects::default(), sound: Sound::default(), lut: None, link: None, speed: 1.0 };
+        let clip = Clip { id: new_id(), media_id: media.id.clone(), start, source_in: 0.0, duration, volume: 1.0, fade_in: 0.0, fade_out: 0.0, crossfade_in: 0.0, crossfade_from: None, transition: Transition::default(), framing: Framing::Fit, grade: Grade::default(), effects: Effects::default(), sound: Sound::default(), lut: None, link: None, speed: 1.0 };
         let id = clip.id.clone();
         self.tracks[track].clips.push(clip);
         self.sort_track(track);

@@ -149,7 +149,7 @@ impl Preview {
                 }
                 self.transition.as_mut().unwrap().advance(old_source, 0.5 * outgoing.speed / project.fps as f64);
                 if let (Some(old), Some(new)) = (self.transition.as_ref().and_then(|p| p.last.as_ref()), self.playing.as_ref().and_then(|p| p.last.as_ref())) {
-                    let frame = ffmpeg::blend_frames(old, new, progress as f32);
+                    let frame = ffmpeg::crossfade_frames(old, new, progress as f32, clip.transition);
                     Self::show(&mut self.texture, &mut self.scopes, ctx, &frame);
                     self.shown = None;
                 }
@@ -170,9 +170,9 @@ impl Preview {
         // Stills are kept by how they're shown, so changing a clip's framing or color fetches it again.
         let picture = clip.picture();
         let blend = project.crossfade_at(t).map(|(outgoing, outgoing_media, _, _, progress)| StillBlend {
-            path: outgoing_media.path.clone(), at: outgoing.source_time(t), picture: outgoing.picture(), progress: progress as f32,
+            path: outgoing_media.path.clone(), at: outgoing.source_time(t), picture: outgoing.picture(), progress: progress as f32, transition: clip.transition,
         });
-        let framed = if blend.is_some() { format!("{} {picture:?} transition {:.3}", media.id, t) }
+        let framed = if blend.is_some() { format!("{} {picture:?} {:?} {:.3}", media.id, clip.transition, t) }
             else if picture == Picture::default() { media.id.clone() } else { format!("{} {picture:?}", media.id) };
         let key: StillKey = (framed, frame_number);
         if self.shown.as_ref() != Some(&key) && self.waiting.as_ref() != Some(&key) {

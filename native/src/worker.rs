@@ -20,6 +20,7 @@ pub struct StillBlend {
     pub at: f64,
     pub picture: Picture,
     pub progress: f32,
+    pub transition: crate::project::Transition,
 }
 
 pub enum Job {
@@ -75,7 +76,7 @@ impl Worker {
                 let result = ffmpeg::still(&path, at, width, height, picture).and_then(|incoming| {
                     if let Some(blend) = blend {
                         let outgoing = ffmpeg::still(&blend.path, blend.at, width, height, blend.picture)?;
-                        Ok(ffmpeg::blend_frames(&outgoing, &incoming, blend.progress))
+                        Ok(ffmpeg::crossfade_frames(&outgoing, &incoming, blend.progress, blend.transition))
                     } else { Ok(incoming) }
                 });
                 let result = Done::Still(key, result);

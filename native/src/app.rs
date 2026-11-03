@@ -916,6 +916,13 @@ impl StreamCuts {
                     ui.add(egui::DragValue::new(&mut changed.crossfade_in).range(0.0..=crossfade_limit).speed(0.02).fixed_decimals(2).suffix(" s"))
                         .on_hover_text("Blend from the previous clip on this track. Its unused source footage supplies the overlap.");
                     ui.end_row();
+                    ui.label("Transition");
+                    egui::ComboBox::from_id_salt("clip-transition").selected_text(changed.transition.label()).show_ui(ui, |ui| {
+                        for transition in crate::project::Transition::ALL {
+                            ui.selectable_value(&mut changed.transition, transition, transition.label());
+                        }
+                    }).response.on_hover_text("How the crossfade in looks");
+                    ui.end_row();
                 }
             });
             if kind != MediaKind::Image {

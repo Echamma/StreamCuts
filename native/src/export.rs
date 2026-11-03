@@ -45,6 +45,18 @@ pub fn arguments(project: &Project, output: &Path) -> Result<Vec<String>, String
                 // Fades work on the picture's alpha, so a clip fades to whatever is below it (black when nothing is).
                 let pace = if (clip.speed - 1.0).abs() < 1e-6 { "PTS-STARTPTS".to_string() } else { format!("(PTS-STARTPTS)/{:.4}", clip.speed) };
                 let mut chain = format!("[{input}:v]{},fps={fps},format=yuva420p,setpts={pace}", clip.picture().filter(w, h));
+                // A blur-through mixes each side towards a blurred copy of itself across the crossfade (`K`, 0 sharp to
+                // 1 blurred, by the clip's own time T): the outgoing clip on its way out, the incoming one in reverse.
+                let blur = |chain: &mut String, side: &str, k: String| {
+                    let sigma = crate::project::BLUR_THROUGH * h as f32;
+                    chain.push_str(&format!(",split[s{input}{side}][b{input}{side}];[b{input}{side}]gblur=sigma={sigma:.2}:steps=3[g{input}{side}];[s{input}{side}][g{input}{side}]blend=all_expr='A*(1-{k})+B*{k}'"));
+                };
+                if crossfade_out > 0.0 && project.transition_after(&clip.id) == Some(crate::project::Transition::BlurThrough) {
+                    blur(&mut chain, "out", format!("clip((T-{:.3})/{crossfade_out:.3},0,1)", clip.duration));
+                }
+                if crossfade_in > 0.0 && clip.transition == crate::project::Transition::BlurThrough {
+                    blur(&mut chain, "in", format!("(1-clip(T/{crossfade_in:.3},0,1))"));
+                }
                 let fade_in = if crossfade_in > 0.0 { crossfade_in } else { clip.fade_in };
                 if fade_in > 0.0 {
                     chain.push_str(&format!(",fade=t=in:st=0:d={fade_in:.3}:alpha=1"));
@@ -360,6 +372,16 @@ mod tests {
         let frame = crate::ffmpeg::still(&output, 2.5, 64, 64, crate::project::Picture::default()).unwrap();
         let pixel = &frame.rgba[4 * (32 * 64 + 32)..][..4];
         assert!(pixel[0] > 45 && pixel[2] > 45, "both colors should be visible: {pixel:?}");
+        // The same as a blur-through: FFmpeg takes the blurs in the graph, and the plain colors still blend.
+        project.clip_mut(&incoming).unwrap().transition = crate::project::Transition::BlurThrough;
+        let args = arguments(&project, Path::new("o.mp4")).unwrap();
+        let graph = &args[args.iter().position(|a| a == "-filter_complex").unwrap() + 1];
+        assert_eq!(graph.matches("gblur=sigma=1.28:steps=3").count(), 2, "{graph}");
+        let run = start(&project, &output, egui::Context::default()).unwrap();
+        assert_eq!(run.result.recv().unwrap(), Ok(()));
+        let frame = crate::ffmpeg::still(&output, 2.5, 64, 64, crate::project::Picture::default()).unwrap();
+        let pixel = &frame.rgba[4 * (32 * 64 + 32)..][..4];
+        assert!(pixel[0] > 45 && pixel[2] > 45, "both colors should be visible through the blur: {pixel:?}");
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

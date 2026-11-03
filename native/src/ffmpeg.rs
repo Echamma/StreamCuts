@@ -1,6 +1,6 @@
 //! FFmpeg and FFprobe run as child processes: StreamCuts probes, decodes and exports through them, with nothing linked.
 
-use crate::project::{Framing, Media, MediaKind, Picture, new_id};
+use crate::project::{BLUR_THROUGH, Framing, Media, MediaKind, Picture, Transition, new_id};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
@@ -173,6 +173,63 @@ pub struct Frame {
 }
 
 /// The incoming picture fades over the outgoing one at a cut. Both are decoded to the project size.
+/// The picture partway (`progress`, 0-1) through a crossfade, as exports draw it: a dissolve, or for a blur-through
+/// each picture mixed towards a blurred copy of itself on its way out (or in) first.
+pub fn crossfade_frames(outgoing: &Frame, incoming: &Frame, progress: f32, transition: Transition) -> Frame {
+    match transition {
+        Transition::Dissolve => blend_frames(outgoing, incoming, progress),
+        Transition::BlurThrough => {
+            let sigma = BLUR_THROUGH * incoming.size[1] as f32;
+            let leaving = blend_frames(outgoing, &blurred(outgoing, sigma), progress);
+            let arriving = blend_frames(incoming, &blurred(incoming, sigma), 1.0 - progress);
+            blend_frames(&leaving, &arriving, progress)
+        }
+    }
+}
+
+/// A Gaussian-like blur of `sigma` pixels: three box blurs across and three down, so the preview blurs like FFmpeg's
+/// `gblur` in exports. Alpha is left alone.
+pub fn blurred(frame: &Frame, sigma: f32) -> Frame {
+    let [width, height] = frame.size;
+    // The box that, three times over, spreads as far as the Gaussian.
+    let radius = ((((4.0 * sigma * sigma + 1.0).sqrt()) - 1.0) / 2.0).round().max(0.0) as usize;
+    let mut rgba = frame.rgba.clone();
+    if radius > 0 && width > 0 && height > 0 {
+        let mut line = Vec::new();
+        for _ in 0..3 {
+            for y in 0..height {
+                box_pass(&mut rgba, y * width * 4, 4, width, radius, &mut line);
+            }
+            for x in 0..width {
+                box_pass(&mut rgba, x * 4, width * 4, height, radius, &mut line);
+            }
+        }
+    }
+    Frame { time: frame.time, size: frame.size, rgba }
+}
+
+/// One box blur along a line of `count` pixels `stride` bytes apart from `start`, its end pixels repeated beyond it.
+fn box_pass(rgba: &mut [u8], start: usize, stride: usize, count: usize, radius: usize, line: &mut Vec<[u32; 3]>) {
+    line.clear();
+    line.extend((0..count).map(|i| {
+        let p = start + i * stride;
+        [rgba[p] as u32, rgba[p + 1] as u32, rgba[p + 2] as u32]
+    }));
+    let at = |i: isize| line[i.clamp(0, count as isize - 1) as usize];
+    let (r, width) = (radius as isize, 2 * radius as u32 + 1);
+    let mut sum = (-r..=r).fold([0u32; 3], |sum, i| { let v = at(i); [sum[0] + v[0], sum[1] + v[1], sum[2] + v[2]] });
+    for i in 0..count as isize {
+        let p = start + i as usize * stride;
+        for c in 0..3 {
+            rgba[p + c] = ((sum[c] + width / 2) / width) as u8;
+        }
+        let (add, remove) = (at(i + r + 1), at(i - r));
+        for c in 0..3 {
+            sum[c] = sum[c] + add[c] - remove[c];
+        }
+    }
+}
+
 pub fn blend_frames(outgoing: &Frame, incoming: &Frame, progress: f32) -> Frame {
     let progress = progress.clamp(0.0, 1.0);
     let mut rgba = incoming.rgba.clone();
@@ -403,6 +460,24 @@ mod tests {
         assert_eq!(atempo(1.5).as_deref(), Some("atempo=1.5000"));
         assert_eq!(atempo(4.0).as_deref(), Some("atempo=2,atempo=2.0000"));
         assert_eq!(atempo(0.25).as_deref(), Some("atempo=0.5,atempo=0.5000"));
+    }
+
+    #[test]
+    fn blur_through_softens_both_pictures_midway() {
+        // A white square on black, and a plain gray picture.
+        let (w, h) = (100usize, 100usize);
+        let square: Vec<u8> = (0..w * h).flat_map(|i| if (40..60).contains(&(i % w)) && (40..60).contains(&(i / w)) { [255, 255, 255, 255] } else { [0, 0, 0, 255] }).collect();
+        let (sharp, gray) = (Frame { time: 0.0, size: [w, h], rgba: square }, Frame { time: 0.0, size: [w, h], rgba: [128, 128, 128, 255].repeat(w * h) });
+        let soft = blurred(&sharp, 4.0);
+        let at = |f: &Frame, x: usize, y: usize| f.rgba[4 * (y * w + x)];
+        // The blur spreads the square's edge and keeps the gray flat.
+        assert!(at(&soft, 38, 50) > 0 && at(&soft, 50, 50) < 255 && at(&soft, 50, 50) > 200);
+        assert_eq!(blurred(&gray, 4.0).rgba, gray.rgba);
+        // At the very start a blur-through shows the outgoing picture sharp; midway its edge has softened.
+        assert_eq!(crossfade_frames(&sharp, &gray, 0.0, Transition::BlurThrough).rgba, sharp.rgba);
+        let midway = crossfade_frames(&sharp, &gray, 0.5, Transition::BlurThrough);
+        let dissolved = crossfade_frames(&sharp, &gray, 0.5, Transition::Dissolve);
+        assert!(at(&midway, 38, 50) > at(&dissolved, 38, 50), "the edge spreads beyond a plain dissolve's");
     }
 
     /// Needs FFmpeg on PATH: makes a 2-second clip with sound, then reads it back.
