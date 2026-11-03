@@ -446,7 +446,13 @@ mod tests {
         let dark = Picture { grade: crate::project::Grade { wheels, ..Default::default() }, ..Default::default() };
         let black = still(&clip, 1.0, 160, 90, dark).unwrap();
         assert!(black.rgba.chunks(4).all(|p| p[..3].iter().all(|&v| v <= 4)), "the wheels' filter didn't apply");
-        let soft = Picture { effects: crate::project::Effects { blur: 4.0, sharpen: 0.0, look: None }, ..Default::default() };
+        // A falling master curve inverts the picture, through the filter exports use.
+        let falling = crate::project::Curves { master: [1.0, 0.75, 0.5, 0.25, 0.0], ..Default::default() };
+        let curved = Picture { effects: crate::project::Effects { curves: falling, ..Default::default() }, ..Default::default() };
+        let inverted = still(&clip, 1.0, 160, 90, curved).unwrap();
+        let (a, b) = (&frame.rgba[4 * 4000..][..3], &inverted.rgba[4 * 4000..][..3]);
+        assert!(a.iter().zip(b).all(|(x, y)| (*x as i32 + *y as i32 - 255).abs() < 12), "{a:?} vs {b:?} through the curve");
+        let soft = Picture { effects: crate::project::Effects { blur: 4.0, ..Default::default() }, ..Default::default() };
         let blurred = still(&clip, 1.0, 160, 90, soft).unwrap();
         assert_ne!(blurred.rgba, frame.rgba, "blur should change the decoded picture");
         // The negative look inverts the picture, through the same filter exports use.
@@ -461,7 +467,7 @@ mod tests {
         let inverted = still(&clip, 1.0, 160, 90, looked_up).unwrap();
         let (a, b) = (&frame.rgba[4 * 4000..][..3], &inverted.rgba[4 * 4000..][..3]);
         assert!(a.iter().zip(b).all(|(x, y)| (*x as i32 + *y as i32 - 255).abs() < 12), "{a:?} vs {b:?} through the LUT");
-        let crisp = Picture { effects: crate::project::Effects { blur: 0.0, sharpen: 1.0, look: None }, ..Default::default() };
+        let crisp = Picture { effects: crate::project::Effects { sharpen: 1.0, ..Default::default() }, ..Default::default() };
         let sharpened = still(&clip, 1.0, 160, 90, crisp).unwrap();
         assert_ne!(sharpened.rgba, frame.rgba, "sharpen should change the decoded picture");
         // Streamed frames carry their real source time: each looks like the still at its time, not its neighbors'.

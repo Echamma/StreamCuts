@@ -947,50 +947,82 @@ impl StreamCuts {
                     ui.add(egui::Slider::new(y, 0.0..=1.0).show_value(false).text("Top to bottom"));
                 }
                 ui.separator();
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Color").font(font::ui(12.0)).color(color::INK_MUTED));
-                    if !changed.grade.is_neutral() && ui.small_button("Reset").clicked() {
-                        changed.grade = Grade::default();
-                    }
-                });
-                ui.add(egui::Slider::new(&mut changed.grade.brightness, -0.5..=0.5).show_value(false).text("Brightness"));
-                ui.add(egui::Slider::new(&mut changed.grade.contrast, 0.5..=2.0).show_value(false).text("Contrast"));
-                ui.add(egui::Slider::new(&mut changed.grade.saturation, 0.0..=2.5).show_value(false).text("Saturation"));
-                ui.horizontal(|ui| {
-                    let wheels = &mut changed.grade.wheels;
-                    color_wheel(ui, "Lift", &mut wheels.lift);
-                    color_wheel(ui, "Gamma", &mut wheels.gamma);
-                    color_wheel(ui, "Gain", &mut wheels.gain);
-                });
-                ui.separator();
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Effects").font(font::ui(12.0)).color(color::INK_MUTED));
-                    if !changed.effects.is_neutral() && ui.small_button("Reset").clicked() {
-                        changed.effects = Effects::default();
-                    }
-                });
-                ui.add(egui::Slider::new(&mut changed.effects.blur, 0.0..=12.0).text("Blur"));
-                ui.add(egui::Slider::new(&mut changed.effects.sharpen, 0.0..=2.0).text("Sharpen"));
-                egui::ComboBox::from_label("Look").selected_text(changed.effects.look.map_or("None", |l| l.label())).show_ui(ui, |ui| {
-                    ui.selectable_value(&mut changed.effects.look, None, "None");
-                    for look in crate::project::Look::ALL {
-                        ui.selectable_value(&mut changed.effects.look, Some(look), look.label());
-                    }
-                });
-                // A .cube LUT, as the web StreamCuts' color page takes: a camera's log-to-normal LUT, or a look.
-                ui.horizontal(|ui| {
-                    let name = changed.lut.as_ref().and_then(|p| p.file_name()).map_or("Add a LUT…".into(), |n| n.to_string_lossy().into_owned());
-                    let missing = changed.lut.as_ref().is_some_and(|p| !p.is_file());
-                    let button = ui.button(if missing { format!("{name} (missing)") } else { name })
-                        .on_hover_text("A .cube color lookup table, applied before the color above");
-                    if button.clicked() {
-                        if let Some(path) = rfd::FileDialog::new().set_title("Choose a LUT").add_filter("Cube LUT", &["cube"]).pick_file() {
-                            changed.lut = Some(path);
+                // Color and effects get submenus of their own: together they're taller than a laptop screen.
+                let color_label = if changed.grade.is_neutral() && changed.lut.is_none() { "Color" } else { "Color (changed)" };
+                ui.menu_button(color_label, |ui| {
+                    ui.set_min_width(250.0);
+                    // A .cube LUT, as the web StreamCuts' color page takes: a camera's log-to-normal LUT, or a look.
+                    ui.horizontal(|ui| {
+                        let name = changed.lut.as_ref().and_then(|p| p.file_name()).map_or("Add a LUT…".into(), |n| n.to_string_lossy().into_owned());
+                        let missing = changed.lut.as_ref().is_some_and(|p| !p.is_file());
+                        let button = ui.button(if missing { format!("{name} (missing)") } else { name })
+                            .on_hover_text("A .cube color lookup table, applied before the color below");
+                        if button.clicked() {
+                            if let Some(path) = rfd::FileDialog::new().set_title("Choose a LUT").add_filter("Cube LUT", &["cube"]).pick_file() {
+                                changed.lut = Some(path);
+                            }
                         }
-                    }
-                    if changed.lut.is_some() && ui.small_button("Remove").clicked() {
-                        changed.lut = None;
-                    }
+                        if changed.lut.is_some() && ui.small_button("Remove").clicked() {
+                            changed.lut = None;
+                        }
+                    });
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Color").font(font::ui(12.0)).color(color::INK_MUTED));
+                        if !changed.grade.is_neutral() && ui.small_button("Reset").clicked() {
+                            changed.grade = Grade::default();
+                        }
+                    });
+                    ui.add(egui::Slider::new(&mut changed.grade.brightness, -0.5..=0.5).show_value(false).text("Brightness"));
+                    ui.add(egui::Slider::new(&mut changed.grade.contrast, 0.5..=2.0).show_value(false).text("Contrast"));
+                    ui.add(egui::Slider::new(&mut changed.grade.saturation, 0.0..=2.5).show_value(false).text("Saturation"));
+                    ui.horizontal(|ui| {
+                        let wheels = &mut changed.grade.wheels;
+                        color_wheel(ui, "Lift", &mut wheels.lift);
+                        color_wheel(ui, "Gamma", &mut wheels.gamma);
+                        color_wheel(ui, "Gain", &mut wheels.gain);
+                    });
+                });
+                ui.menu_button(if changed.effects.is_neutral() { "Effects" } else { "Effects (changed)" }, |ui| {
+                    ui.set_min_width(250.0);
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Effects").font(font::ui(12.0)).color(color::INK_MUTED));
+                        if !changed.effects.is_neutral() && ui.small_button("Reset").clicked() {
+                            changed.effects = Effects::default();
+                        }
+                    });
+                    ui.add(egui::Slider::new(&mut changed.effects.blur, 0.0..=12.0).text("Blur"));
+                    ui.add(egui::Slider::new(&mut changed.effects.sharpen, 0.0..=2.0).text("Sharpen"));
+                    egui::ComboBox::from_label("Look").selected_text(changed.effects.look.map_or("None", |l| l.label())).show_ui(ui, |ui| {
+                        ui.selectable_value(&mut changed.effects.look, None, "None");
+                        for look in crate::project::Look::ALL {
+                            ui.selectable_value(&mut changed.effects.look, Some(look), look.label());
+                        }
+                    });
+                    // The web StreamCuts' Curves, in a submenu (the Clip menu is tall already).
+                    ui.menu_button("Curves", |ui| {
+                        let curves = &mut changed.effects.curves;
+                        let which = ui.scope_id().with("curve-channel");
+                        let mut channel = ui.data(|d| d.get_temp::<usize>(which)).unwrap_or(0);
+                        ui.horizontal(|ui| {
+                            for (i, name) in ["All", "Red", "Green", "Blue"].into_iter().enumerate() {
+                                if ui.selectable_label(channel == i, name).clicked() {
+                                    channel = i;
+                                }
+                            }
+                        });
+                        ui.data_mut(|d| d.insert_temp(which, channel));
+                        let (points, ink) = match channel {
+                            1 => (&mut curves.red, Color32::from_rgb(255, 100, 100)),
+                            2 => (&mut curves.green, Color32::from_rgb(100, 230, 120)),
+                            3 => (&mut curves.blue, Color32::from_rgb(120, 160, 255)),
+                            _ => (&mut curves.master, color::INK),
+                        };
+                        curve_editor(ui, points, ink);
+                        if ui.add_enabled(*curves != crate::project::Curves::default(), egui::Button::new("Reset all curves")).clicked() {
+                            *curves = crate::project::Curves::default();
+                        }
+                    });
                 });
             }
         });
@@ -1373,4 +1405,33 @@ fn color_wheel(ui: &mut Ui, label: &str, wheel: &mut crate::project::Wheel) {
         ui.add(egui::DragValue::new(&mut wheel.master).range(-0.5..=0.5).speed(0.005).fixed_decimals(2))
             .on_hover_text(format!("{label} for all colors"));
     });
+}
+
+/// A tone curve to bend: drag one of its five points up or down (double-click puts it back on the line).
+fn curve_editor(ui: &mut Ui, points: &mut [f32; 5], ink: Color32) {
+    use crate::project::{CURVE_KNOTS, curve_at};
+    let (rect, _) = ui.allocate_exact_size(vec2(200.0, 200.0), Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, 4, Color32::from_black_alpha(120));
+    let at = |x: f32, y: f32| pos2(rect.left() + x * rect.width(), rect.bottom() - y * rect.height());
+    for q in [0.25, 0.5, 0.75] {
+        painter.line_segment([at(q, 0.0), at(q, 1.0)], egui::Stroke::new(1.0, color::HAIRLINE));
+        painter.line_segment([at(0.0, q), at(1.0, q)], egui::Stroke::new(1.0, color::HAIRLINE));
+    }
+    painter.line_segment([at(0.0, 0.0), at(1.0, 1.0)], egui::Stroke::new(1.0, color::HAIRLINE_STRONG));
+    let line: Vec<egui::Pos2> = (0..=80).map(|i| i as f32 / 80.0).map(|x| at(x, curve_at(points, x))).collect();
+    painter.add(egui::Shape::line(line, egui::Stroke::new(2.0, ink)));
+    for (i, x) in CURVE_KNOTS.into_iter().enumerate() {
+        let handle = Rect::from_center_size(at(x, points[i]), vec2(16.0, 16.0));
+        let response = ui.interact(handle, ui.scope_id().with(("curve-point", i)), Sense::click_and_drag()).on_hover_cursor(egui::CursorIcon::ResizeVertical);
+        if response.double_clicked() {
+            points[i] = x;
+        } else if response.dragged() {
+            if let Some(pointer) = response.interact_pointer_pos() {
+                points[i] = ((rect.bottom() - pointer.y) / rect.height()).clamp(0.0, 1.0);
+            }
+        }
+        let hot = response.hovered() || response.dragged();
+        ui.painter().circle(at(x, points[i]), if hot { 6.0 } else { 4.5 }, ink, egui::Stroke::new(1.5, Color32::BLACK));
+    }
 }

@@ -241,6 +241,63 @@ pub struct Effects {
     /// A tone curve preset (the web StreamCuts' tone curves); `None` leaves the tones alone.
     #[serde(default)]
     pub look: Option<Look>,
+    /// Custom tone curves, after the preset.
+    #[serde(default)]
+    pub curves: Curves,
+}
+
+/// Where a curve's points sit across: black, quarter tones, midtones, three-quarter tones, white.
+pub const CURVE_KNOTS: [f32; 5] = [0.0, 0.25, 0.5, 0.75, 1.0];
+
+/// Tone curves, as the web StreamCuts' Curves effect has them: one for all channels (master), then one each for red,
+/// green and blue. Each is how bright its five points come out (`CURVE_KNOTS` going in), joined smoothly without
+/// overshooting (PCHIP, as FFmpeg's `curves` joins them with `interp=pchip`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Curves {
+    pub master: [f32; 5],
+    pub red: [f32; 5],
+    pub green: [f32; 5],
+    pub blue: [f32; 5],
+}
+
+impl Default for Curves {
+    fn default() -> Self {
+        Self { master: CURVE_KNOTS, red: CURVE_KNOTS, green: CURVE_KNOTS, blue: CURVE_KNOTS }
+    }
+}
+
+impl Curves {
+    /// FFmpeg's `curves` with the channels that aren't straight; `None` when none is bent.
+    pub fn filter(self) -> Option<String> {
+        let channels: Vec<String> = [("master", self.master), ("red", self.red), ("green", self.green), ("blue", self.blue)]
+            .into_iter()
+            .filter(|(_, points)| *points != CURVE_KNOTS)
+            .map(|(name, points)| {
+                let points: Vec<String> = CURVE_KNOTS.iter().zip(points).map(|(x, y)| format!("{x}/{:.3}", y.clamp(0.0, 1.0))).collect();
+                format!("{name}='{}'", points.join(" "))
+            })
+            .collect();
+        (!channels.is_empty()).then(|| format!("curves=interp=pchip:{}", channels.join(":")))
+    }
+}
+
+/// A curve's value at `x` (0-1): monotone cubic (PCHIP) through its points at `CURVE_KNOTS`, for drawing it.
+pub fn curve_at(points: &[f32; 5], x: f32) -> f32 {
+    let (k, h) = (CURVE_KNOTS, 0.25f32);
+    let slopes: Vec<f32> = (0..4).map(|i| (points[i + 1] - points[i]) / h).collect();
+    // Fritsch-Carlson tangents: the harmonic mean of the slopes either side, flat where the curve turns.
+    let mut tangents = [0.0f32; 5];
+    tangents[0] = slopes[0];
+    tangents[4] = slopes[3];
+    for i in 1..4 {
+        let (a, b) = (slopes[i - 1], slopes[i]);
+        tangents[i] = if a * b <= 0.0 { 0.0 } else { 2.0 * a * b / (a + b) };
+    }
+    let i = ((x.clamp(0.0, 1.0) / h) as usize).min(3);
+    let t = (x.clamp(0.0, 1.0) - k[i]) / h;
+    let (t2, t3) = (t * t, t * t * t);
+    let y = (2.0 * t3 - 3.0 * t2 + 1.0) * points[i] + (t3 - 2.0 * t2 + t) * h * tangents[i] + (-2.0 * t3 + 3.0 * t2) * points[i + 1] + (t3 - t2) * h * tangents[i + 1];
+    y.clamp(0.0, 1.0)
 }
 
 /// FFmpeg's `curves` presets, as named looks.
@@ -285,11 +342,12 @@ impl Look {
 }
 
 impl Effects {
-    pub fn is_neutral(self) -> bool { self.blur == 0.0 && self.sharpen == 0.0 && self.look.is_none() }
+    pub fn is_neutral(self) -> bool { self.blur == 0.0 && self.sharpen == 0.0 && self.look.is_none() && self.curves == Curves::default() }
 
     pub fn filter(self) -> String {
         let mut chain = String::new();
         if let Some(look) = self.look { chain.push_str(&format!(",curves=preset={}", look.preset())); }
+        if let Some(curves) = self.curves.filter() { chain.push_str(&format!(",{curves}")); }
         if self.blur > 0.0 { chain.push_str(&format!(",gblur=sigma={:.2}", self.blur.clamp(0.0, 20.0))); }
         if self.sharpen > 0.0 { chain.push_str(&format!(",unsharp=5:5:{:.2}", self.sharpen.clamp(0.0, 2.0))); }
         chain
@@ -1426,6 +1484,20 @@ mod tests {
         assert!(project.crossfade_at(9.0).is_none());
         project.clip_mut(&outgoing).unwrap().source_in = 2.0;
         assert_eq!(project.crossfade_after(&outgoing), 0.0, "no source handle means no transition");
+    }
+
+    #[test]
+    fn tone_curves_bend_only_what_was_moved() {
+        assert_eq!(Curves::default().filter(), None);
+        let lifted = Curves { master: [0.0, 0.3, 0.5, 0.75, 1.0], ..Default::default() };
+        assert_eq!(lifted.filter().unwrap(), "curves=interp=pchip:master='0/0.000 0.25/0.300 0.5/0.500 0.75/0.750 1/1.000'");
+        // Straight stays straight; a bent curve passes through its points and never overshoots them.
+        for x in [0.0, 0.1, 0.5, 0.9, 1.0] {
+            assert!((curve_at(&CURVE_KNOTS, x) - x).abs() < 1e-5);
+        }
+        assert!((curve_at(&lifted.master, 0.25) - 0.3).abs() < 1e-5);
+        let samples: Vec<f32> = (0..=100).map(|i| curve_at(&lifted.master, i as f32 / 100.0)).collect();
+        assert!(samples.windows(2).all(|w| w[1] >= w[0]), "a rising curve keeps rising");
     }
 
     #[test]
