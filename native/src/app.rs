@@ -54,6 +54,9 @@ pub struct StreamCuts {
     boss_plan: Option<BossPlan>,
     /// Typing in a caption: one undo step for the whole edit.
     caption_typing: bool,
+    /// The Media search, and whether a file's notes are being typed (one undo step per note).
+    media_search: String,
+    media_typing: bool,
     /// Dragging a clip setting: one undo step for the whole drag.
     adjusting: bool,
     /// Media whose waveform and filmstrip have been asked for.
@@ -91,6 +94,8 @@ impl StreamCuts {
             proxy_jobs: Vec::new(),
             boss_plan: None,
             caption_typing: false,
+            media_search: String::new(),
+            media_typing: false,
             adjusting: false,
             looks_asked: HashSet::new(),
             pending: HashMap::new(),
@@ -571,53 +576,147 @@ impl StreamCuts {
             ui.label(egui::RichText::new("Import video, pictures or sound, or drop files here.").color(color::INK_MUTED));
             return;
         }
+        // A search (words, #tag, 3* for three stars or more), and saved searches to pick from: the smart bins.
+        let searching = !self.media_search.trim().is_empty();
+        ui.horizontal(|ui| {
+            let width = ui.available_width() - if searching { 76.0 } else { 0.0 };
+            ui.add(egui::TextEdit::singleline(&mut self.media_search).hint_text("Search: words, #tag, 3*").desired_width(width))
+                .on_hover_text("Words match names, notes and tags; #tag needs that tag; 3* needs three stars or more");
+            if searching && ui.small_button("Save bin").on_hover_text("Keep this search as a smart bin").clicked() {
+                let query = self.media_search.trim().to_owned();
+                if !self.project.smart_bins.iter().any(|bin| bin.query == query) {
+                    self.history.record(&self.project);
+                    self.project.smart_bins.push(crate::project::SmartBin { id: crate::project::new_id(), name: query.clone(), query });
+                    self.edited();
+                }
+            }
+        });
+        let mut forget = None;
+        if !self.project.smart_bins.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                for bin in &self.project.smart_bins {
+                    let on = self.media_search.trim() == bin.query;
+                    if ui.selectable_label(on, &bin.name).on_hover_text("A smart bin: click to show what it finds").clicked() {
+                        self.media_search = if on { String::new() } else { bin.query.clone() };
+                    }
+                    if ui.small_button("×").on_hover_text("Delete this smart bin").clicked() {
+                        forget = Some(bin.id.clone());
+                    }
+                }
+            });
+        }
+        if let Some(id) = forget {
+            self.history.record(&self.project);
+            self.project.smart_bins.retain(|bin| bin.id != id);
+            self.edited();
+        }
+        ui.add_space(4.0);
         let mut place_now = None;
         let mut find = None;
         let mut remove = None;
         let mut scenes = None;
+        // Changes to a file's rating, tags or notes: (media id, its new attributes, whether to keep an undo step).
+        let mut noted: Option<(String, crate::project::Attributes, bool)> = None;
+        let query = self.media_search.clone();
+        let shown: Vec<&crate::project::Media> = self.project.media.iter().filter(|m| m.matches(&query)).collect();
+        if shown.is_empty() {
+            ui.label(egui::RichText::new("Nothing matches this search.").color(color::INK_MUTED));
+        }
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-            for media in &self.project.media {
+            for media in shown {
                 let missing = !media.path.is_file();
                 let id = ui.scope_id().with(("media", &media.id));
-                let response = ui.dnd_drag_source(id, MediaDrag(media.id.clone()), |ui| {
-                    // Clicks go to the row (click to find a missing file, double-click to place it); drags go to the drag source.
-                    let (rect, row) = ui.allocate_exact_size(vec2(ui.available_width(), 46.0), Sense::click());
-                    let painter = ui.painter();
-                    painter.rect_filled(rect, 8, color::VEIL);
-                    let thumb = Rect::from_min_size(rect.min + vec2(4.0, 4.0), vec2(68.0, 38.0));
-                    match self.looks.thumbnails.get(&media.id) {
-                        Some(texture) => {
-                            painter.image(texture.id(), thumb, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
-                        }
-                        None => {
-                            painter.rect_filled(thumb, 4, color::VEIL_STRONG);
-                            let which = match media.kind { MediaKind::Audio => Icon::Audio, MediaKind::Image => Icon::Image, MediaKind::Video => Icon::Video };
-                            icon(painter, Rect::from_center_size(thumb.center(), vec2(18.0, 18.0)), which, color::INK_SOFT);
-                        }
-                    }
-                    let text = painter.with_clip_rect(Rect::from_min_max(pos2(thumb.right() + 8.0, rect.top()), rect.max - vec2(6.0, 0.0)));
-                    text.text(pos2(thumb.right() + 8.0, rect.top() + 8.0), Align2::LEFT_TOP, &media.name, font::ui(13.0), color::INK);
-                    if missing {
-                        text.text(pos2(thumb.right() + 8.0, rect.bottom() - 7.0), Align2::LEFT_BOTTOM, "Missing: click to find it", font::ui(11.0), color::SUN);
-                    } else {
-                        let mut detail = match media.kind { MediaKind::Image => format!("Picture · {}×{}", media.width, media.height), _ => timecode(media.duration, self.project.fps) };
-                        if self.proxy_jobs.contains(&media.id) {
-                            detail.push_str(" · making proxy…");
-                        } else if self.preview.proxies.contains_key(&media.id) {
-                            detail.push_str(" · proxy");
-                        }
-                        text.text(pos2(thumb.right() + 8.0, rect.bottom() - 7.0), Align2::LEFT_BOTTOM, detail, font::ui(11.0), color::INK_MUTED);
-                    }
-                    row
-                });
-                let response = egui::InnerResponse { response: response.response.on_hover_text(media.info()), ..response };
-                if missing && response.response.clicked() {
-                    find = Some(media.id.clone());
-                } else if response.response.double_clicked() {
-                    place_now = Some(media.id.clone());
-                }
                 let used = self.project.tracks.iter().any(|t| t.clips.iter().any(|c| c.media_id == media.id));
-                response.inner.context_menu(|ui| {
+                // The row takes its own clicks and drags: egui's dnd_drag_source lays a drag-only widget over what's
+                // inside it, and that swallows every click there (finding a missing file, placing it, its menu).
+                let (rect, row) = ui.allocate_exact_size(vec2(ui.available_width(), 46.0), Sense::click_and_drag());
+                let painter = ui.painter();
+                painter.rect_filled(rect, 8, color::VEIL);
+                let thumb = Rect::from_min_size(rect.min + vec2(4.0, 4.0), vec2(68.0, 38.0));
+                match self.looks.thumbnails.get(&media.id) {
+                    Some(texture) => {
+                        painter.image(texture.id(), thumb, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                    }
+                    None => {
+                        painter.rect_filled(thumb, 4, color::VEIL_STRONG);
+                        let which = match media.kind { MediaKind::Audio => Icon::Audio, MediaKind::Image => Icon::Image, MediaKind::Video => Icon::Video };
+                        icon(painter, Rect::from_center_size(thumb.center(), vec2(18.0, 18.0)), which, color::INK_SOFT);
+                    }
+                }
+                let text = painter.with_clip_rect(Rect::from_min_max(pos2(thumb.right() + 8.0, rect.top()), rect.max - vec2(30.0, 0.0)));
+                // The name stops short of its stars, which sit right to left before the menu button (the fonts have no star).
+                let stars = media.attributes.rating as f32 * 12.0;
+                let name = painter.with_clip_rect(Rect::from_min_max(pos2(thumb.right() + 8.0, rect.top()), pos2(rect.right() - 34.0 - stars, rect.bottom())));
+                name.text(pos2(thumb.right() + 8.0, rect.top() + 8.0), Align2::LEFT_TOP, &media.name, font::ui(13.0), color::INK);
+                for k in 0..media.attributes.rating {
+                    star(painter, pos2(rect.right() - 40.0 - k as f32 * 12.0, rect.top() + 15.0), 5.5, color::SUN);
+                }
+                if missing {
+                    text.text(pos2(thumb.right() + 8.0, rect.bottom() - 7.0), Align2::LEFT_BOTTOM, "Missing: click to find it", font::ui(11.0), color::SUN);
+                } else {
+                    let mut detail = match media.kind { MediaKind::Image => format!("Picture · {}×{}", media.width, media.height), _ => timecode(media.duration, self.project.fps) };
+                    for tag in &media.attributes.tags {
+                        detail.push_str(&format!(" · #{tag}"));
+                    }
+                    if self.proxy_jobs.contains(&media.id) {
+                        detail.push_str(" · making proxy…");
+                    } else if self.preview.proxies.contains_key(&media.id) {
+                        detail.push_str(" · proxy");
+                    }
+                    text.text(pos2(thumb.right() + 8.0, rect.bottom() - 7.0), Align2::LEFT_BOTTOM, detail, font::ui(11.0), color::INK_MUTED);
+                }
+                // The file's menu: on its button, or a right-click on the row.
+                let mut menu = |ui: &mut Ui| {
+                    ui.set_min_width(220.0);
+                    let mut attributes = media.attributes.clone();
+                    ui.horizontal(|ui| {
+                        ui.label("Rating");
+                        for stars in 1..=5u8 {
+                            let (spot, response) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::click());
+                            let lit = attributes.rating >= stars;
+                            star(ui.painter(), spot.center(), if response.hovered() { 9.0 } else { 8.0 }, if lit { color::SUN } else { color::INK_MUTED });
+                            if response.on_hover_text(format!("{stars} of 5; click again to clear")).clicked() {
+                                attributes.rating = if attributes.rating == stars { 0 } else { stars };
+                            }
+                        }
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Tags");
+                        let mut gone = None;
+                        for (i, tag) in attributes.tags.iter().enumerate() {
+                            if ui.small_button(format!("#{tag} ×")).on_hover_text("Remove this tag").clicked() {
+                                gone = Some(i);
+                            }
+                        }
+                        if let Some(i) = gone {
+                            attributes.tags.remove(i);
+                        }
+                    });
+                    let draft = ui.scope_id().with("new-tag");
+                    let mut tag: String = ui.data(|d| d.get_temp(draft)).unwrap_or_default();
+                    let field = ui.add(egui::TextEdit::singleline(&mut tag).hint_text("Add a tag, then Enter").desired_width(200.0));
+                    if field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                        let mut tagged = media.clone();
+                        tagged.attributes = attributes.clone();
+                        if tagged.add_tag(&tag) {
+                            attributes = tagged.attributes;
+                        }
+                        tag.clear();
+                        field.request_focus();
+                    }
+                    ui.data_mut(|d| d.insert_temp(draft, tag));
+                    ui.label("Notes");
+                    let notes = ui.add(egui::TextEdit::multiline(&mut attributes.notes).desired_rows(3).desired_width(200.0));
+                    if attributes != media.attributes {
+                        // Typing a note keeps one undo step for all of it.
+                        let typing = notes.changed();
+                        noted = Some((media.id.clone(), attributes, !(typing && self.media_typing)));
+                        self.media_typing |= typing;
+                    }
+                    if !notes.has_focus() {
+                        self.media_typing = false;
+                    }
+                    ui.separator();
                     if media.kind == MediaKind::Video && !missing {
                         let busy = self.scene_jobs.contains(&media.id);
                         if ui.add_enabled(used && !busy, egui::Button::new(if busy { "Finding scenes…" } else { "Detect scenes" }))
@@ -631,11 +730,43 @@ impl StreamCuts {
                     }
                     if ui.add_enabled(!used, egui::Button::new("Remove from project")).on_disabled_hover_text("A clip on the timeline uses it").clicked() {
                         remove = Some(media.id.clone());
+                        ui.close();
                     }
+                };
+                let button = Rect::from_center_size(pos2(rect.right() - 16.0, rect.center().y), vec2(24.0, 24.0));
+                ui.scope_builder(UiBuilder::new().max_rect(button), |ui| {
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                    egui::containers::menu::MenuButton::new("···").config(stays_open()).ui(ui, |ui| menu(ui));
                 });
+                let row = row.on_hover_text(media.info()).on_hover_cursor(egui::CursorIcon::Grab);
+                egui::Popup::context_menu(&row).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| menu(ui));
+                // Dragged onto the timeline, it's placed where it lands; a label follows the pointer meanwhile.
+                if row.dragged() {
+                    egui::DragAndDrop::set_payload(ui.ctx(), MediaDrag(media.id.clone()));
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                    if let Some(at) = ui.ctx().pointer_interact_pos() {
+                        egui::Area::new(id.with("dragged")).order(egui::Order::Tooltip).fixed_pos(at + vec2(14.0, 10.0)).interactable(false).show(ui.ctx(), |ui| {
+                            egui::Frame::popup(ui.style()).show(ui, |ui| ui.label(&media.name));
+                        });
+                    }
+                }
+                if missing && row.clicked() {
+                    find = Some(media.id.clone());
+                } else if row.double_clicked() {
+                    place_now = Some(media.id.clone());
+                }
                 ui.add_space(2.0);
             }
         });
+        if let Some((id, attributes, step)) = noted {
+            if step {
+                self.history.record(&self.project);
+            }
+            if let Some(media) = self.project.media.iter_mut().find(|m| m.id == id) {
+                media.attributes = attributes;
+            }
+            self.edited();
+        }
         if let Some(id) = find {
             self.find_media(&id);
         }
@@ -839,7 +970,7 @@ impl StreamCuts {
         // Some(true) detaches the clip's sound onto an audio track, Some(false) unlinks it from its linked clip.
         let mut link = None;
         let has_sound = self.project.media(&clip.media_id).is_some_and(|m| m.has_audio) && !self.project.sounds_elsewhere(&clip);
-        ui.menu_button(egui::RichText::new("Clip").font(font::ui(13.0)), |ui| {
+        egui::containers::menu::MenuButton::new(egui::RichText::new("Clip").font(font::ui(13.0))).config(stays_open()).ui(ui, |ui| {
             ui.set_min_width(230.0);
             if self.project.linked(&clip.id).is_some() {
                 if ui.button("Unlink").on_hover_text("Let this clip and its linked clip move and trim on their own").clicked() {
@@ -1100,7 +1231,7 @@ impl StreamCuts {
         let mut changed = title.clone();
         ui.add_space(10.0);
         let field = ui.add(egui::TextEdit::singleline(&mut changed.text).desired_width(ui.available_width().clamp(100.0, 260.0) - 60.0).hint_text("Title"));
-        ui.menu_button(egui::RichText::new("Size & place").font(font::ui(13.0)), |ui| {
+        egui::containers::menu::MenuButton::new(egui::RichText::new("Size & place").font(font::ui(13.0))).config(stays_open()).ui(ui, |ui| {
             ui.set_min_width(240.0);
             ui.add(egui::Slider::new(&mut changed.size, 0.03..=0.25).show_value(false).text("Size"));
             ui.horizontal(|ui| {
@@ -1441,4 +1572,25 @@ fn curve_editor(ui: &mut Ui, points: &mut [f32; 5], ink: Color32) {
         let hot = response.hovered() || response.dragged();
         ui.painter().circle(at(x, points[i]), if hot { 6.0 } else { 4.5 }, ink, egui::Stroke::new(1.5, Color32::BLACK));
     }
+}
+
+/// A five-pointed star filling a circle of `radius` around `center`.
+fn star(painter: &egui::Painter, center: egui::Pos2, radius: f32, fill: Color32) {
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(center, fill);
+    for i in 0..=10u32 {
+        let angle = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / 5.0;
+        let reach = if i % 2 == 0 { radius } else { radius * 0.45 };
+        mesh.colored_vertex(center + vec2(angle.cos(), angle.sin()) * reach, fill);
+        if i > 0 {
+            mesh.add_triangle(0, i, i + 1);
+        }
+    }
+    painter.add(mesh);
+}
+
+/// For menus you work in: egui closes a menu on any click inside it, which would close the Clip menu on every value,
+/// tab and field. These close on a click outside, and their actions close them themselves.
+fn stays_open() -> egui::containers::menu::MenuConfig {
+    egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
 }

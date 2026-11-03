@@ -67,7 +67,7 @@ pub fn probe(path: &Path) -> Result<Media, String> {
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     if is_image(path) {
         let (width, height) = image::image_dimensions(path).map_err(|e| format!("{name} couldn't be read: {e}"))?;
-        return Ok(Media { id: new_id(), path: path.to_path_buf(), name, kind: MediaKind::Image, duration: 0.0, width, height, has_audio: false, frame_rate: 0.0 });
+        return Ok(Media { id: new_id(), path: path.to_path_buf(), name, kind: MediaKind::Image, duration: 0.0, width, height, has_audio: false, frame_rate: 0.0, attributes: Default::default() });
     }
     let output = command(&ffprobe())
         .args(["-v", "error", "-print_format", "json", "-show_format", "-show_streams"])
@@ -99,8 +99,9 @@ pub fn probe(path: &Path) -> Result<Media, String> {
                 let (n, d) = (n.parse::<f64>().ok()?, d.parse::<f64>().ok()?);
                 (d > 0.0).then(|| n / d)
             }).unwrap_or(0.0),
+            attributes: Default::default(),
         }),
-        None if has_audio => Ok(Media { id: new_id(), path: path.to_path_buf(), name, kind: MediaKind::Audio, duration, width: 0, height: 0, has_audio, frame_rate: 0.0 }),
+        None if has_audio => Ok(Media { id: new_id(), path: path.to_path_buf(), name, kind: MediaKind::Audio, duration, width: 0, height: 0, has_audio, frame_rate: 0.0, attributes: Default::default() }),
         None => Err(format!("{name} has no picture or sound StreamCuts can use.")),
     }
 }

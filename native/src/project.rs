@@ -34,9 +34,59 @@ pub struct Media {
     /// Frames a second of a video; 0 when unknown (projects saved before it was read) or not a video.
     #[serde(default)]
     pub frame_rate: f64,
+    #[serde(default)]
+    pub attributes: Attributes,
+}
+
+/// What you note about a file, as the web StreamCuts' clip attributes: a star rating (0 unrated, up to 5), tags and
+/// notes. Media searches and smart bins go by them.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct Attributes {
+    #[serde(default)]
+    pub rating: u8,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub notes: String,
+}
+
+/// A saved Media search (the web StreamCuts' smart bins).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SmartBin {
+    pub id: String,
+    pub name: String,
+    pub query: String,
 }
 
 impl Media {
+    /// Adds a tag, unless it's blank or already there (in any case). Returns whether it was added.
+    pub fn add_tag(&mut self, tag: &str) -> bool {
+        let tag = tag.trim();
+        if tag.is_empty() || self.attributes.tags.iter().any(|t| t.to_lowercase() == tag.to_lowercase()) {
+            return false;
+        }
+        self.attributes.tags.push(tag.to_owned());
+        true
+    }
+
+    /// Whether it fits a Media search: each word in its name, notes or tags (in any case), `#tag` for a tag it has,
+    /// and `3*` or `★★★` for at least that many stars. A blank search fits everything.
+    pub fn matches(&self, query: &str) -> bool {
+        let attributes = &self.attributes;
+        let haystack = format!("{}\n{}\n{}", self.name, attributes.notes, attributes.tags.join("\n")).to_lowercase();
+        query.split_whitespace().all(|word| {
+            let stars = word.strip_suffix('*').and_then(|n| n.parse::<u8>().ok())
+                .or_else(|| word.chars().all(|c| c == '★').then(|| word.chars().count() as u8));
+            if let Some(stars) = stars {
+                return attributes.rating >= stars;
+            }
+            match word.strip_prefix('#').filter(|tag| !tag.is_empty()) {
+                Some(tag) => attributes.tags.iter().any(|t| t.to_lowercase() == tag.to_lowercase()),
+                None => haystack.contains(&word.to_lowercase()),
+            }
+        })
+    }
+
     /// What the web StreamCuts' media info shows: kind, size, frame rate, length, sound, and the file's size.
     pub fn info(&self) -> String {
         let mut parts = vec![match self.kind { MediaKind::Video => "Video", MediaKind::Audio => "Sound", MediaKind::Image => "Picture" }.to_owned()];
@@ -619,6 +669,9 @@ pub struct Project {
     /// Moments marked on the timeline, in order: by hand (M) or by scene detection.
     #[serde(default)]
     pub markers: Vec<Marker>,
+    /// Saved Media searches.
+    #[serde(default)]
+    pub smart_bins: Vec<SmartBin>,
     /// Exports even out the loudness to what social video expects (-14 LUFS).
     #[serde(default)]
     pub even_loudness: bool,
@@ -758,6 +811,7 @@ impl Project {
             ],
             captions: Vec::new(),
             markers: Vec::new(),
+            smart_bins: Vec::new(),
             titles: Vec::new(),
             even_loudness: false,
             export_format: ExportFormat::default(),
@@ -1455,7 +1509,7 @@ mod tests {
     use super::*;
 
     fn media(kind: MediaKind, duration: f64) -> Media {
-        Media { id: new_id(), path: PathBuf::from(format!("C:/m/{}.mp4", new_id())), name: "m".into(), kind, duration, width: 1920, height: 1080, has_audio: kind != MediaKind::Image, frame_rate: 30.0 }
+        Media { id: new_id(), path: PathBuf::from(format!("C:/m/{}.mp4", new_id())), name: "m".into(), kind, duration, width: 1920, height: 1080, has_audio: kind != MediaKind::Image, frame_rate: 30.0, attributes: Attributes::default() }
     }
 
     fn project_with(duration: f64) -> (Project, String) {
@@ -1518,6 +1572,20 @@ mod tests {
         assert!(project.crossfade_at(9.0).is_none());
         project.clip_mut(&outgoing).unwrap().source_in = 2.0;
         assert_eq!(project.crossfade_after(&outgoing), 0.0, "no source handle means no transition");
+    }
+
+    #[test]
+    fn media_searches_go_by_words_tags_and_stars() {
+        let mut clip = Media { name: "Stream Highlights.mp4".into(), ..media(MediaKind::Video, 10.0) };
+        assert!(clip.add_tag("Funny") && !clip.add_tag(" funny ") && !clip.add_tag(""));
+        clip.attributes.notes = "the boss fight".into();
+        clip.attributes.rating = 3;
+        for query in ["", "highlights", "BOSS stream", "#funny", "3*", "★★", "funny 1*"] {
+            assert!(clip.matches(query), "{query:?} should match");
+        }
+        for query in ["#fun", "4*", "★★★★", "boss intro"] {
+            assert!(!clip.matches(query), "{query:?} shouldn't match");
+        }
     }
 
     #[test]
