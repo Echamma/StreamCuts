@@ -4,7 +4,7 @@
 use crate::audio::Audio;
 use crate::boss::Suggestion;
 use crate::captions;
-use crate::export::{self, Export};
+use crate::export::{self, Export, Preset, Queued, Status};
 use crate::ffmpeg::Frame;
 use crate::preview::{Clock, Preview};
 use crate::project::{Effects, ExportFormat, Framing, Grade, History, MediaKind, Picture, Project, SPEEDS, Sound};
@@ -68,6 +68,13 @@ pub struct StreamCuts {
     playhead: f64,
     timeline: Timeline,
     export: Option<Export>,
+    /// Renders waiting their turn (the web StreamCuts' render queue), the one rendering now (its id), your saved
+    /// presets, and the Deliver window with the name for a new preset.
+    queue: Vec<Queued>,
+    rendering: Option<String>,
+    presets: Vec<Preset>,
+    show_deliver: bool,
+    preset_name: String,
     show_projects: bool,
     toasts: Vec<String>,
     exported: Vec<PathBuf>,
@@ -81,6 +88,7 @@ impl StreamCuts {
             .first()
             .and_then(|doc| storage::load(&place.projects_dir.join(&doc.id)).ok())
             .unwrap_or_else(|| Project::new("Untitled cut"));
+        let presets = Preset::load(&place.data_dir);
         let mut app = Self {
             place,
             project,
@@ -105,6 +113,11 @@ impl StreamCuts {
             playhead: 0.0,
             timeline: Timeline::default(),
             export: None,
+            queue: Vec::new(),
+            rendering: None,
+            presets,
+            show_deliver: false,
+            preset_name: String::new(),
             show_projects: false,
             toasts: Vec::new(),
             exported: Vec::new(),
@@ -436,6 +449,11 @@ impl StreamCuts {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if primary_button(ui, "Export", Mood::Ember).clicked() && self.export.is_none() {
                     self.start_export(ui.ctx());
+                }
+                let waiting = self.queue.iter().filter(|q| matches!(q.status, Status::Waiting | Status::Rendering(_))).count();
+                let label = if waiting > 0 { format!("Queue ({waiting})") } else { "Queue".into() };
+                if quiet_button(ui, &label, None).on_hover_text("Render with presets, one after another, while you keep editing").clicked() {
+                    self.show_deliver = !self.show_deliver;
                 }
                 let projects = if narrow { icon_button(ui, Icon::Project, "Projects", self.show_projects) } else { quiet_button(ui, "Projects", Some(Icon::Project)) };
                 if projects.clicked() {
@@ -1344,8 +1362,138 @@ impl StreamCuts {
         }
     }
 
+    /// Starts the next waiting render when nothing is rendering.
+    fn render_next(&mut self, ctx: &egui::Context) {
+        if self.export.is_some() {
+            return;
+        }
+        let Some(job) = self.queue.iter_mut().find(|q| q.status == Status::Waiting) else { return };
+        if let Some(media) = job.project.missing_media().first() {
+            job.status = Status::Failed(format!("{} is missing", media.name));
+            return;
+        }
+        let _ = std::fs::create_dir_all(&self.place.exports_dir);
+        let name = canopy_ui::canopy_core::files::unique_name(&self.place.exports_dir, &format!("{}.{}", job.name, job.project.export_format.extension()));
+        let output = self.place.exports_dir.join(name);
+        match export::start(&job.project, &output, ctx.clone()) {
+            Ok(run) => {
+                self.export = Some(run);
+                self.rendering = Some(job.id.clone());
+                job.status = Status::Rendering(output);
+            }
+            Err(error) => job.status = Status::Failed(error),
+        }
+    }
+
+    /// The Deliver window: presets to queue, your own saved, and the render queue.
+    fn deliver_window(&mut self, ui: &mut Ui) {
+        if !self.show_deliver {
+            return;
+        }
+        let mut open = true;
+        let (mut queue, mut forget, mut remove, mut stop, mut save) = (None, None, None, false, false);
+        let progress = self.export.as_ref().filter(|_| self.rendering.is_some()).map_or(0.0, |run| run.progress.load(Ordering::Relaxed) as f32 / 1000.0);
+        egui::Window::new("Deliver").open(&mut open).collapsible(false).resizable(false).default_width(380.0).constrain_to(ui.max_rect()).show(ui.ctx(), |ui| {
+            ui.label(egui::RichText::new("Presets").font(font::ui(12.0)).color(color::INK_MUTED));
+            let built_in = Preset::built_in();
+            egui::Grid::new("presets").num_columns(3).spacing(vec2(8.0, 6.0)).show(ui, |ui| {
+                for (mine, preset) in built_in.iter().map(|p| (false, p)).chain(self.presets.iter().map(|p| (true, p))) {
+                    if ui.small_button("Queue").clicked() {
+                        queue = Some(preset.clone());
+                    }
+                    ui.label(&preset.name).on_hover_text(preset.describe());
+                    ui.horizontal(|ui| {
+                        ui.label(canopy_ui::muted(preset.describe()));
+                        if mine && ui.small_button("×").on_hover_text("Delete this preset").clicked() {
+                            forget = Some(preset.name.clone());
+                        }
+                    });
+                    ui.end_row();
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut self.preset_name).hint_text("Name these settings").desired_width(180.0));
+                save = ui.add_enabled(!self.preset_name.trim().is_empty(), egui::Button::new("Save as preset"))
+                    .on_hover_text(Preset::of(&self.project, "").describe())
+                    .clicked();
+            });
+            ui.separator();
+            ui.label(egui::RichText::new("Render queue").font(font::ui(12.0)).color(color::INK_MUTED));
+            if self.queue.is_empty() {
+                ui.label(canopy_ui::muted("Queue a preset: renders run one after another, into this space's files."));
+            }
+            for job in &self.queue {
+                ui.horizontal(|ui| {
+                    ui.label(&job.name);
+                    match &job.status {
+                        Status::Waiting => {
+                            ui.label(canopy_ui::muted("waiting"));
+                        }
+                        Status::Rendering(_) => {
+                            ui.add(egui::ProgressBar::new(progress).desired_width(110.0).show_percentage());
+                            stop |= ui.small_button("Stop").clicked();
+                        }
+                        Status::Done(path) => {
+                            ui.label(canopy_ui::muted("done")).on_hover_text(path.display().to_string());
+                        }
+                        Status::Failed(error) => {
+                            ui.label(egui::RichText::new("failed").color(color::SUN)).on_hover_text(error);
+                        }
+                    }
+                    if !matches!(job.status, Status::Rendering(_)) && ui.small_button("×").on_hover_text("Take it off the queue").clicked() {
+                        remove = Some(job.id.clone());
+                    }
+                });
+            }
+        });
+        self.show_deliver = open;
+        if let Some(preset) = queue {
+            self.queue.push(Queued::new(&self.project, &preset));
+        }
+        if save {
+            let preset = Preset::of(&self.project, &self.preset_name);
+            self.presets.retain(|p| p.name != preset.name);
+            self.presets.push(preset);
+            self.preset_name.clear();
+            if let Err(error) = Preset::save(&self.place.data_dir, &self.presets) {
+                self.toasts.push(error);
+            }
+        }
+        if let Some(name) = forget {
+            self.presets.retain(|p| p.name != name);
+            if let Err(error) = Preset::save(&self.place.data_dir, &self.presets) {
+                self.toasts.push(error);
+            }
+        }
+        if let Some(id) = remove {
+            self.queue.retain(|q| q.id != id);
+        }
+        if let (true, Some(run)) = (stop, &self.export) {
+            run.cancel.store(true, Ordering::Relaxed);
+        }
+    }
+
     fn export_window(&mut self, ui: &mut Ui, host: &mut dyn Host) {
         let Some(run) = &self.export else { return };
+        // A queued render reports in the Deliver window, and the editor stays usable meanwhile.
+        if let Some(id) = self.rendering.clone() {
+            if let Ok(result) = run.result.try_recv() {
+                self.export = None;
+                self.rendering = None;
+                if let Some(job) = self.queue.iter_mut().find(|q| q.id == id) {
+                    let output = match &job.status { Status::Rendering(path) => Some(path.clone()), _ => None };
+                    job.status = match (result, output) {
+                        (Ok(()), Some(path)) => {
+                            host.exported(path.clone());
+                            Status::Done(path)
+                        }
+                        (Err(error), _) => Status::Failed(error),
+                        (Ok(()), None) => Status::Failed("Lost track of the file".into()),
+                    };
+                }
+            }
+            return;
+        }
         if let Ok(result) = run.result.try_recv() {
             let path = self.exported.pop();
             self.export = None;
@@ -1437,6 +1585,8 @@ impl CanopyApp for StreamCuts {
         }
         self.projects_window(ui);
         self.boss_window(ui);
+        self.render_next(&ctx);
+        self.deliver_window(ui);
         self.export_window(ui, host);
     }
 

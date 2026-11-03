@@ -5,11 +5,97 @@
 use crate::captions;
 use crate::ffmpeg::{command, ffmpeg};
 use crate::project::{ExportFormat, MediaKind, Project, TrackKind, new_id};
+use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+/// A way to deliver, as the web StreamCuts' export presets: frame size, frame rate, format and loudness.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Preset {
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub format: ExportFormat,
+    #[serde(default)]
+    pub even_loudness: bool,
+}
+
+impl Preset {
+    /// The web StreamCuts' platform presets.
+    pub fn built_in() -> Vec<Preset> {
+        let preset = |name: &str, width, height, fps| Preset { name: name.into(), width, height, fps, format: ExportFormat::Mp4, even_loudness: true };
+        vec![
+            preset("TikTok", 1080, 1920, 30),
+            preset("Instagram Reels", 1080, 1920, 30),
+            preset("YouTube Shorts", 1080, 1920, 60),
+            preset("Instagram Square", 1080, 1080, 30),
+            preset("Instagram Portrait", 1080, 1350, 30),
+            preset("YouTube 1080p", 1920, 1080, 30),
+            preset("YouTube 4K", 3840, 2160, 30),
+        ]
+    }
+
+    /// The project's own settings, under `name`.
+    pub fn of(project: &Project, name: &str) -> Preset {
+        let (width, height, fps, format, even_loudness) = (project.width, project.height, project.fps, project.export_format, project.even_loudness);
+        Preset { name: name.trim().into(), width, height, fps, format, even_loudness }
+    }
+
+    /// The project as this preset renders it.
+    pub fn apply(&self, project: &Project) -> Project {
+        let mut out = project.clone();
+        (out.width, out.height, out.fps, out.export_format, out.even_loudness) = (self.width, self.height, self.fps, self.format, self.even_loudness);
+        out
+    }
+
+    pub fn describe(&self) -> String {
+        let sound = if self.even_loudness && self.format != ExportFormat::Audio { " · even loudness" } else { "" };
+        match self.format {
+            ExportFormat::Audio => format!("{}{sound}", self.format.label()),
+            _ => format!("{}×{} · {} fps · {}{sound}", self.width, self.height, self.fps, self.format.label()),
+        }
+    }
+
+    /// Your saved presets, from `dir` (none when there are none yet).
+    pub fn load(dir: &Path) -> Vec<Preset> {
+        std::fs::read(dir.join(PRESETS)).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default()
+    }
+
+    pub fn save(dir: &Path, presets: &[Preset]) -> Result<(), String> {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        let json = serde_json::to_vec_pretty(presets).map_err(|e| e.to_string())?;
+        std::fs::write(dir.join(PRESETS), json).map_err(|e| format!("Couldn't save the preset ({e})."))
+    }
+}
+
+/// Where your saved presets live, in the app's data folder.
+const PRESETS: &str = "export-presets.json";
+
+/// One render in the queue: the project as it was when queued, at a preset's settings.
+pub struct Queued {
+    pub id: String,
+    pub name: String,
+    pub project: Project,
+    pub status: Status,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Status {
+    Waiting,
+    Rendering(PathBuf),
+    Done(PathBuf),
+    Failed(String),
+}
+
+impl Queued {
+    pub fn new(project: &Project, preset: &Preset) -> Self {
+        Queued { id: new_id(), name: format!("{} - {}", project.name, preset.name), project: preset.apply(project), status: Status::Waiting }
+    }
+}
 
 /// The captions file an export's FFmpeg reads from its working folder.
 const CAPTIONS: &str = "captions.ass";
@@ -291,6 +377,24 @@ mod tests {
         let rendered = crate::ffmpeg::probe(&output).unwrap();
         assert!((rendered.duration - 2.5).abs() < 0.15, "rendered {}", rendered.duration);
         assert!(rendered.has_audio && rendered.width == 320);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn presets_render_the_project_their_way() {
+        let mut project = Project::new("Stream");
+        project.even_loudness = false;
+        let shorts = Preset::built_in().into_iter().find(|p| p.name == "YouTube Shorts").unwrap();
+        let queued = Queued::new(&project, &shorts);
+        assert_eq!((queued.project.width, queued.project.height, queued.project.fps, queued.project.even_loudness), (1080, 1920, 60, true));
+        assert_eq!((queued.name.as_str(), &queued.status), ("Stream - YouTube Shorts", &Status::Waiting));
+        assert_eq!(shorts.describe(), "1080×1920 · 60 fps · MP4 (H.264) · even loudness");
+        // Your own presets keep across runs.
+        let dir = std::env::temp_dir().join(format!("streamcuts-presets-{}", new_id()));
+        assert!(Preset::load(&dir).is_empty());
+        let mine = Preset::of(&project, " Mine ");
+        Preset::save(&dir, std::slice::from_ref(&mine)).unwrap();
+        assert_eq!(Preset::load(&dir), vec![mine]);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
