@@ -625,10 +625,8 @@ impl StreamCuts {
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             for media in shown {
                 let missing = !media.path.is_file();
-                let id = ui.scope_id().with(("media", &media.id));
                 let used = self.project.tracks.iter().any(|t| t.clips.iter().any(|c| c.media_id == media.id));
-                // The row takes its own clicks and drags: egui's dnd_drag_source lays a drag-only widget over what's
-                // inside it, and that swallows every click there (finding a missing file, placing it, its menu).
+                // The row takes clicks and drags itself (see `canopy_ui::drag_source`).
                 let (rect, row) = ui.allocate_exact_size(vec2(ui.available_width(), 46.0), Sense::click_and_drag());
                 let painter = ui.painter();
                 painter.rect_filled(rect, 8, color::VEIL);
@@ -738,18 +736,10 @@ impl StreamCuts {
                     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                     egui::containers::menu::MenuButton::new("···").config(stays_open()).ui(ui, |ui| menu(ui));
                 });
-                let row = row.on_hover_text(media.info()).on_hover_cursor(egui::CursorIcon::Grab);
+                let row = row.on_hover_text(media.info());
                 egui::Popup::context_menu(&row).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| menu(ui));
-                // Dragged onto the timeline, it's placed where it lands; a label follows the pointer meanwhile.
-                if row.dragged() {
-                    egui::DragAndDrop::set_payload(ui.ctx(), MediaDrag(media.id.clone()));
-                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-                    if let Some(at) = ui.ctx().pointer_interact_pos() {
-                        egui::Area::new(id.with("dragged")).order(egui::Order::Tooltip).fixed_pos(at + vec2(14.0, 10.0)).interactable(false).show(ui.ctx(), |ui| {
-                            egui::Frame::popup(ui.style()).show(ui, |ui| ui.label(&media.name));
-                        });
-                    }
-                }
+                // Dragged onto the timeline, it's placed where it lands.
+                canopy_ui::drag_source(ui, &row, || MediaDrag(media.id.clone()), &media.name);
                 if missing && row.clicked() {
                     find = Some(media.id.clone());
                 } else if row.double_clicked() {
