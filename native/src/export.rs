@@ -57,7 +57,7 @@ pub fn arguments(project: &Project, output: &Path) -> Result<Vec<String>, String
                 base += 1;
             }
             let hidden_video = track.kind == TrackKind::Video && track.hidden;
-            if media.has_audio && !track.muted && !hidden_video && clip.volume > 0.0 {
+            if media.has_audio && !track.muted && !hidden_video && clip.volume > 0.0 && !project.sounds_elsewhere(clip) {
                 let delay = (clip.start * 1000.0).round() as u64;
                 let mut chain = format!("[{input}:a]asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo,volume={:.3}", clip.volume);
                 if let Some(sound) = clip.sound.filter() {

@@ -104,6 +104,10 @@ pub struct Clip {
     /// A `.cube` color lookup table (a camera's log-to-Rec. 709 LUT, or a look) applied before the grade.
     #[serde(default)]
     pub lut: Option<PathBuf>,
+    /// The clip this one is linked to: a video clip and its sound on an audio track (Detach sound). Linked clips move,
+    /// trim, split and go together, and the video clip plays no sound of its own.
+    #[serde(default)]
+    pub link: Option<String>,
     /// How fast the source plays: 2 is twice as fast (the clip covers twice the source in its length).
     #[serde(default = "normal_speed")]
     pub speed: f64,
@@ -868,7 +872,7 @@ impl Project {
         };
         let duration = if media.kind == MediaKind::Image { STILL_SECONDS } else { media.duration.max(MIN_CLIP) };
         let start = self.free_start(track, at, duration, None);
-        let clip = Clip { id: new_id(), media_id: media.id.clone(), start, source_in: 0.0, duration, volume: 1.0, fade_in: 0.0, fade_out: 0.0, crossfade_in: 0.0, crossfade_from: None, framing: Framing::Fit, grade: Grade::default(), effects: Effects::default(), sound: Sound::default(), lut: None, speed: 1.0 };
+        let clip = Clip { id: new_id(), media_id: media.id.clone(), start, source_in: 0.0, duration, volume: 1.0, fade_in: 0.0, fade_out: 0.0, crossfade_in: 0.0, crossfade_from: None, framing: Framing::Fit, grade: Grade::default(), effects: Effects::default(), sound: Sound::default(), lut: None, link: None, speed: 1.0 };
         let id = clip.id.clone();
         self.tracks[track].clips.push(clip);
         self.sort_track(track);
@@ -879,9 +883,97 @@ impl Project {
         self.tracks[track].clips.sort_by(|a, b| a.start.total_cmp(&b.start));
     }
 
-    /// Moves a clip to `start` on `track` (same kind). If it would overlap a neighbor it lands against that neighbor's
-    /// nearer edge; if there's no room at all it stays put. Returns whether it moved.
+    /// The clip linked to `clip_id`, if it's still there.
+    pub fn linked(&self, clip_id: &str) -> Option<String> {
+        self.clip(clip_id)?.link.clone().filter(|id| self.find(id).is_some())
+    }
+
+    /// Whether a video clip's sound plays from its linked clip on an audio track instead.
+    pub fn sounds_elsewhere(&self, clip: &Clip) -> bool {
+        let kind = |id: &str| self.find(id).map(|at| self.tracks[at.track].kind);
+        kind(&clip.id) == Some(TrackKind::Video) && clip.link.as_deref().and_then(kind) == Some(TrackKind::Audio)
+    }
+
+    /// Runs `edit` on a clip, then gives the clip linked to it the same place, length and footage, so the two stay in
+    /// step. If the linked clip has no room for that on its track, neither changes. Returns whether anything did.
+    fn keep_linked(&mut self, clip_id: &str, edit: impl FnOnce(&mut Self) -> bool) -> bool {
+        let Some(partner) = self.linked(clip_id) else { return edit(self) };
+        let (tracks, captions) = (self.tracks.clone(), self.captions.clone());
+        let before = self.clip(&partner).cloned().unwrap();
+        if !edit(self) {
+            return false;
+        }
+        let Some(clip) = self.clip(clip_id).cloned() else { return true };
+        let at = self.find(&partner).unwrap();
+        if Self::overlaps(&self.tracks[at.track], clip.start, clip.end(), Some(&partner)) {
+            (self.tracks, self.captions) = (tracks, captions);
+            return false;
+        }
+        let other = &mut self.tracks[at.track].clips[at.index];
+        (other.start, other.duration, other.source_in, other.speed) = (clip.start, clip.duration, clip.source_in, clip.speed);
+        self.sort_track(at.track);
+        // Captions made from the linked clip's speech go with it.
+        let by = clip.start - before.start;
+        if by != 0.0 {
+            self.captions.iter_mut().filter(|c| c.clip.as_deref() == Some(partner.as_str())).for_each(|c| c.shift(by));
+            self.captions.sort_by(|a, b| a.start.total_cmp(&b.start));
+        }
+        true
+    }
+
+    /// Puts a video clip's sound on an audio track as a clip of its own, linked to it (the first audio track with room,
+    /// or a new one). The sound clip takes the volume, fades and sound settings; the video clip goes quiet. Returns the
+    /// sound clip's id.
+    pub fn detach_sound(&mut self, clip_id: &str) -> Option<String> {
+        let at = self.find(clip_id)?;
+        let clip = self.tracks[at.track].clips[at.index].clone();
+        if self.tracks[at.track].kind != TrackKind::Video || self.linked(clip_id).is_some() || !self.media(&clip.media_id)?.has_audio {
+            return None;
+        }
+        let track = (0..self.tracks.len())
+            .find(|&t| self.tracks[t].kind == TrackKind::Audio && !self.tracks[t].locked && !Self::overlaps(&self.tracks[t], clip.start, clip.end(), None))
+            .unwrap_or_else(|| self.add_track(TrackKind::Audio));
+        let sound = Clip {
+            id: new_id(),
+            link: Some(clip.id.clone()),
+            crossfade_in: 0.0,
+            crossfade_from: None,
+            framing: Framing::Fit,
+            grade: Grade::default(),
+            effects: Effects::default(),
+            lut: None,
+            ..clip.clone()
+        };
+        let id = sound.id.clone();
+        self.tracks[track].clips.push(sound);
+        self.sort_track(track);
+        self.clip_mut(clip_id)?.link = Some(id.clone());
+        Some(id)
+    }
+
+    /// Unlinks a clip from the one linked to it. A video clip whose sound was detached stays quiet (its volume goes
+    /// to 0), so nothing plays twice. Returns whether it was linked.
+    pub fn unlink(&mut self, clip_id: &str) -> bool {
+        let Some(partner) = self.linked(clip_id) else { return false };
+        for id in [clip_id.to_owned(), partner] {
+            let quiet = self.clip(&id).is_some_and(|c| self.sounds_elsewhere(c));
+            let clip = self.clip_mut(&id).unwrap();
+            clip.link = None;
+            if quiet {
+                clip.volume = 0.0;
+            }
+        }
+        true
+    }
+
+    /// Moves a clip to `start` on `track` (same kind), and the clip linked to it by as much on its own track. If it
+    /// would overlap a neighbor it lands against that neighbor's nearer edge; if there's no room at all it stays put.
+    /// Returns whether it moved.
     pub fn move_clip(&mut self, clip_id: &str, start: f64, track: usize) -> bool {
+        self.keep_linked(clip_id, |project| project.move_clip_alone(clip_id, start, track))
+    }
+
+    fn move_clip_alone(&mut self, clip_id: &str, start: f64, track: usize) -> bool {
         let Some(from) = self.find(clip_id) else { return false };
         if self.tracks.get(track).map(|t| t.kind) != Some(self.tracks[from.track].kind) {
             return false;
@@ -1011,6 +1103,10 @@ impl Project {
     /// Slips a clip: it stays where it is on the timeline and plays a different stretch of its source, from
     /// `source_in` (kept inside the source). Pictures have nothing to slip. Returns whether it changed.
     pub fn slip(&mut self, clip_id: &str, source_in: f64) -> bool {
+        self.keep_linked(clip_id, |project| project.slip_alone(clip_id, source_in))
+    }
+
+    fn slip_alone(&mut self, clip_id: &str, source_in: f64) -> bool {
         let Some(at) = self.find(clip_id) else { return false };
         let clip = &self.tracks[at.track].clips[at.index];
         let Some(media) = self.media(&clip.media_id) else { return false };
@@ -1029,6 +1125,10 @@ impl Project {
 
     /// Moves a clip's start edge to `start`, keeping its end where it is.
     pub fn trim_start(&mut self, clip_id: &str, start: f64) -> bool {
+        self.keep_linked(clip_id, |project| project.trim_start_alone(clip_id, start))
+    }
+
+    fn trim_start_alone(&mut self, clip_id: &str, start: f64) -> bool {
         let Some(at) = self.find(clip_id) else { return false };
         let clip = self.tracks[at.track].clips[at.index].clone();
         let previous_end = self.tracks[at.track].clips.iter().filter(|c| c.end() <= clip.start + 1e-9 && c.id != clip.id).map(Clip::end).fold(0.0, f64::max);
@@ -1048,6 +1148,10 @@ impl Project {
     /// Changes how fast a clip plays, keeping the stretch of source it shows: it gets shorter when faster and longer
     /// when slower, though never into the next clip on its track (then it shows less of the source).
     pub fn set_speed(&mut self, clip_id: &str, speed: f64) -> bool {
+        self.keep_linked(clip_id, |project| project.set_speed_alone(clip_id, speed))
+    }
+
+    fn set_speed_alone(&mut self, clip_id: &str, speed: f64) -> bool {
         let Some(at) = self.find(clip_id) else { return false };
         let clip = self.tracks[at.track].clips[at.index].clone();
         let speed = speed.clamp(*SPEEDS.start(), *SPEEDS.end());
@@ -1062,6 +1166,10 @@ impl Project {
 
     /// Moves a clip's end edge to `end`, keeping its start where it is.
     pub fn trim_end(&mut self, clip_id: &str, end: f64) -> bool {
+        self.keep_linked(clip_id, |project| project.trim_end_alone(clip_id, end))
+    }
+
+    fn trim_end_alone(&mut self, clip_id: &str, end: f64) -> bool {
         let Some(at) = self.find(clip_id) else { return false };
         let clip = self.tracks[at.track].clips[at.index].clone();
         let next_start = self.tracks[at.track].clips.iter().filter(|c| c.start >= clip.end() - 1e-9 && c.id != clip.id).map(|c| c.start).fold(f64::INFINITY, f64::min);
@@ -1072,8 +1180,19 @@ impl Project {
         true
     }
 
-    /// Splits a clip in two at timeline time `t`. Returns the new right-hand clip's id.
+    /// Splits a clip in two at timeline time `t`, and the clip linked to it too (the right halves are linked to each
+    /// other). Returns the new right-hand clip's id.
     pub fn split(&mut self, clip_id: &str, t: f64) -> Option<String> {
+        let partner = self.linked(clip_id);
+        let right = self.split_alone(clip_id, t)?;
+        if let Some(other_right) = partner.and_then(|partner| self.split_alone(&partner, t)) {
+            self.clip_mut(&right)?.link = Some(other_right.clone());
+            self.clip_mut(&other_right)?.link = Some(right.clone());
+        }
+        Some(right)
+    }
+
+    fn split_alone(&mut self, clip_id: &str, t: f64) -> Option<String> {
         let at = self.find(clip_id)?;
         let clip = self.tracks[at.track].clips[at.index].clone();
         if t <= clip.start + MIN_CLIP / 2.0 || t >= clip.end() - MIN_CLIP / 2.0 {
@@ -1090,6 +1209,7 @@ impl Project {
             fade_in: 0.0,
             crossfade_in: 0.0,
             crossfade_from: None,
+            link: None,
             ..clip.clone()
         };
         let id = right.id.clone();
@@ -1110,8 +1230,16 @@ impl Project {
         ids.iter().filter_map(|id| self.split(id, t)).collect()
     }
 
-    /// Deletes clips and captions by id.
+    /// The ids with the clips linked to them added.
+    fn with_linked(&self, clip_ids: &[String]) -> Vec<String> {
+        let mut ids = clip_ids.to_vec();
+        ids.extend(clip_ids.iter().filter_map(|id| self.linked(id)).filter(|id| !clip_ids.contains(id)));
+        ids
+    }
+
+    /// Deletes clips (and the clips linked to them) and captions by id.
     pub fn delete(&mut self, clip_ids: &[String]) -> usize {
+        let clip_ids = &self.with_linked(clip_ids);
         let text = self.captions.len() + self.titles.len();
         self.captions.retain(|c| !clip_ids.contains(&c.id));
         self.titles.retain(|t| !clip_ids.contains(&t.id));
@@ -1126,6 +1254,7 @@ impl Project {
 
     /// Deletes clips and closes the gaps they leave: later clips on the same track move left by what was deleted.
     pub fn ripple_delete(&mut self, clip_ids: &[String]) -> usize {
+        let clip_ids = &self.with_linked(clip_ids);
         let mut removed = 0;
         for track in &mut self.tracks {
             let gone: Vec<(String, f64, f64)> = track.clips.iter().filter(|c| clip_ids.contains(&c.id)).map(|c| (c.id.clone(), c.start, c.duration)).collect();
@@ -1165,7 +1294,7 @@ impl Project {
             .filter(|track| !track.muted && !(track.kind == TrackKind::Video && track.hidden))
             .flat_map(|track| track.clips.iter())
             .filter_map(|clip| self.media(&clip.media_id).map(|m| (clip, m)))
-            .filter(|(clip, media)| media.has_audio && clip.volume > 0.0)
+            .filter(|(clip, media)| media.has_audio && clip.volume > 0.0 && !self.sounds_elsewhere(clip))
             .collect()
     }
 
@@ -1297,6 +1426,40 @@ mod tests {
         assert!(project.crossfade_at(9.0).is_none());
         project.clip_mut(&outgoing).unwrap().source_in = 2.0;
         assert_eq!(project.crossfade_after(&outgoing), 0.0, "no source handle means no transition");
+    }
+
+    #[test]
+    fn detached_sound_stays_with_its_video() {
+        let (mut project, video) = project_with(10.0);
+        let picture = project.place(&video, None, 0.0).unwrap();
+        let sound = project.detach_sound(&picture).unwrap();
+        let track_of = |p: &Project, id: &str| p.tracks[p.find(id).unwrap().track].kind;
+        assert_eq!((track_of(&project, &picture), track_of(&project, &sound)), (TrackKind::Video, TrackKind::Audio));
+        assert_eq!(project.audible_clips().iter().map(|(c, _)| c.id.clone()).collect::<Vec<_>>(), vec![sound.clone()], "only the sound clip plays");
+        assert!(project.detach_sound(&picture).is_none(), "already detached");
+        let span = |p: &Project, id: &str| { let c = p.clip(id).unwrap(); (c.start, c.end(), c.source_in) };
+        // Moves, trims and slips go to both.
+        assert!(project.move_clip(&picture, 2.0, project.find(&picture).unwrap().track));
+        project.trim_end(&sound, 8.0);
+        project.slip(&picture, 1.0);
+        assert_eq!((span(&project, &picture), span(&project, &sound)), ((2.0, 8.0, 1.0), (2.0, 8.0, 1.0)));
+        // A move the sound has no room for moves neither.
+        let other = project.add_media(media(MediaKind::Audio, 3.0));
+        let audio_track = project.find(&sound).unwrap().track;
+        project.place(&other, Some(audio_track), 9.0).unwrap();
+        assert!(!project.move_clip(&picture, 5.0, project.find(&picture).unwrap().track));
+        assert_eq!(span(&project, &picture), (2.0, 8.0, 1.0));
+        // Splits split both, and the right halves are linked to each other; deleting one deletes the other.
+        let right = project.split(&picture, 4.0).unwrap();
+        let right_sound = project.linked(&right).unwrap();
+        assert_eq!((span(&project, &right_sound), project.linked(&sound)), ((4.0, 8.0, 3.0), Some(picture.clone())));
+        assert_eq!(project.delete(&[right.clone()]), 2);
+        assert!(project.clip(&right_sound).is_none());
+        // Unlinked, the video clip stays quiet and the sound clip plays on.
+        assert!(project.unlink(&sound));
+        assert_eq!((project.clip(&picture).unwrap().volume, project.linked(&picture)), (0.0, None));
+        let playing: Vec<String> = project.audible_clips().iter().map(|(c, _)| c.id.clone()).collect();
+        assert!(playing.contains(&sound) && !playing.contains(&picture), "{playing:?}");
     }
 
     #[test]

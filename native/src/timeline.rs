@@ -230,11 +230,14 @@ impl Timeline {
                 continue;
             }
             let selected = self.selection.contains(&clip.id);
-            lane_painter.rect_filled(clip_rect, 6, clip_fill(media.kind));
+            // A clip on an audio track is all sound, whatever its media (a video's detached sound).
+            let kind = if project.tracks[track_index].kind == TrackKind::Audio { MediaKind::Audio } else { media.kind };
+            lane_painter.rect_filled(clip_rect, 6, clip_fill(kind));
             // Pictures across the top of the clip's body and its sound mirrored along the bottom; a sound clip is all sound.
             let body = Rect::from_min_max(pos2(clip_rect.left() + 2.0, clip_rect.top() + 16.0), clip_rect.max - vec2(2.0, 2.0));
-            let wave = looks.waveforms.get(&media.id);
-            let (pictures, sound) = match (media.kind, wave.is_some()) {
+            // A video clip whose sound was detached shows no sound of its own.
+            let wave = looks.waveforms.get(&media.id).filter(|_| !project.sounds_elsewhere(&clip));
+            let (pictures, sound) = match (kind, wave.is_some()) {
                 (MediaKind::Audio, _) => (None, Some(body)),
                 (_, true) => {
                     let split = body.top() + body.height() * 0.62;
@@ -273,8 +276,12 @@ impl Timeline {
                     x += step;
                 }
             }
-            lane_painter.with_clip_rect(visible.shrink(2.0)).text(pos2(clip_rect.left() + 6.0, clip_rect.top() + 8.0), Align2::LEFT_CENTER, &media.name, font::ui(11.0), color::INK);
-            lane_painter.rect_stroke(clip_rect, 6, Stroke::new(if selected { 2.0 } else { 1.0 }, if selected { color::SELECT_INK } else { color::HAIRLINE_STRONG }), StrokeKind::Inside);
+            let name = if clip.link.is_some() { format!("{} · linked", media.name) } else { media.name.clone() };
+            lane_painter.with_clip_rect(visible.shrink(2.0)).text(pos2(clip_rect.left() + 6.0, clip_rect.top() + 8.0), Align2::LEFT_CENTER, name, font::ui(11.0), color::INK);
+            // The clip linked to a selected one is outlined lightly: it goes wherever the selected one does.
+            let partner_selected = clip.link.as_ref().is_some_and(|id| self.selection.contains(id));
+            let stroke = if selected { Stroke::new(2.0, color::SELECT_INK) } else if partner_selected { Stroke::new(1.5, color::SELECT_INK.gamma_multiply(0.5)) } else { Stroke::new(1.0, color::HAIRLINE_STRONG) };
+            lane_painter.rect_stroke(clip_rect, 6, stroke, StrokeKind::Inside);
 
             // A locked track's clips are shown dimmed and take no clicks or drags.
             let locked = project.tracks[track_index].locked;
@@ -301,7 +308,9 @@ impl Timeline {
                     let (alt, ctrl) = ui.input(|i| (i.modifiers.alt, i.modifiers.command));
                     // Ctrl on an edge that touches another clip rolls the cut between them; Ctrl inside slides.
                     let (at_start, at_end) = ((p.x - clip_rect.left()).abs() <= EDGE, (p.x - clip_rect.right()).abs() <= EDGE);
-                    let (left, right) = (project.left_neighbor(&clip.id), project.right_neighbor(&clip.id));
+                    // Linked clips don't roll or slide: their partner's neighbors would fall out of step.
+                    let alone = clip.link.is_none();
+                    let (left, right) = (project.left_neighbor(&clip.id).filter(|_| alone), project.right_neighbor(&clip.id).filter(|_| alone));
                     self.gesture = Some(if let (true, true, Some(left)) = (ctrl, at_start, left.clone()) {
                         Gesture::Roll { left, right: clip.id.clone() }
                     } else if let (true, true, Some(right)) = (ctrl, at_end, right.clone()) {

@@ -836,9 +836,25 @@ impl StreamCuts {
         let mut loudness = None;
         // Some(true) makes (or remakes) the clip's media's editing proxy, Some(false) deletes it.
         let mut proxy = None;
+        // Some(true) detaches the clip's sound onto an audio track, Some(false) unlinks it from its linked clip.
+        let mut link = None;
+        let has_sound = self.project.media(&clip.media_id).is_some_and(|m| m.has_audio) && !self.project.sounds_elsewhere(&clip);
         ui.menu_button(egui::RichText::new("Clip").font(font::ui(13.0)), |ui| {
             ui.set_min_width(230.0);
-            if self.project.media(&clip.media_id).is_some_and(|m| m.has_audio) {
+            if self.project.linked(&clip.id).is_some() {
+                if ui.button("Unlink").on_hover_text("Let this clip and its linked clip move and trim on their own").clicked() {
+                    link = Some(false);
+                    ui.close();
+                }
+                ui.separator();
+            } else if kind == MediaKind::Video && has_sound {
+                if ui.button("Detach sound").on_hover_text("Put its sound on an audio track as a clip of its own, linked to this one").clicked() {
+                    link = Some(true);
+                    ui.close();
+                }
+                ui.separator();
+            }
+            if has_sound {
                 for (label, normalize, hint) in [
                     ("Measure loudness", false, "Its integrated loudness (EBU R128), as it plays"),
                     ("Normalize to -14 LUFS", true, "Set its volume so it plays at the loudness social apps use"),
@@ -1028,6 +1044,13 @@ impl StreamCuts {
             self.worker.send(Job::Scenes { media_id: clip.media_id.clone(), path });
             self.toasts.push("Finding scene changes; long videos take a while".into());
         }
+        if let Some(detach) = link {
+            self.history.record(&self.project);
+            let done = if detach { self.project.detach_sound(&clip.id).is_some() } else { self.project.unlink(&clip.id) };
+            if done {
+                self.edited();
+            }
+        }
     }
 
     /// One selected title gets its text, and a menu for its size, height and length, in the timeline bar.
@@ -1102,7 +1125,7 @@ impl StreamCuts {
     fn volume_control(&mut self, ui: &mut Ui) {
         let [id] = self.timeline.selection.as_slice() else { return };
         let Some(clip) = self.project.clip(id) else { return };
-        if !self.project.media(&clip.media_id).is_some_and(|media| media.has_audio) {
+        if !self.project.media(&clip.media_id).is_some_and(|media| media.has_audio) || self.project.sounds_elsewhere(clip) {
             return;
         }
         let (id, before) = (id.clone(), clip.volume);
