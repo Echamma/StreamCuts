@@ -71,6 +71,8 @@ pub struct StreamCuts {
     /// The Media search, and whether a file's notes are being typed (one undo step per note).
     media_search: String,
     media_typing: bool,
+    /// The file selected in Media: Delete removes it while no clip is selected.
+    media_selected: Option<String>,
     /// Dragging a clip setting: one undo step for the whole drag.
     adjusting: bool,
     /// Media whose waveform and filmstrip have been asked for.
@@ -119,6 +121,7 @@ impl StreamCuts {
             caption_typing: false,
             media_search: String::new(),
             media_typing: false,
+            media_selected: None,
             adjusting: false,
             looks_asked: HashSet::new(),
             pending: HashMap::new(),
@@ -440,6 +443,33 @@ impl StreamCuts {
         self.edited();
     }
 
+    /// Takes a file out of the project, with the clips that use it (the file stays on disk; Ctrl+Z brings it back).
+    fn remove_media(&mut self, id: &str) {
+        let Some(name) = self.project.media(id).map(|m| m.name.clone()) else {
+            self.media_selected = None;
+            return;
+        };
+        self.history.record(&self.project);
+        let Some(clips) = self.project.remove_media_with_clips(id) else {
+            return;
+        };
+        if self.media_selected.as_deref() == Some(id) {
+            self.media_selected = None;
+        }
+        let project = &self.project;
+        self.timeline.selection.retain(|clip| {
+            project.clip(clip).is_some()
+                || project.captions.iter().any(|c| &c.id == clip)
+                || project.titles.iter().any(|t| &t.id == clip)
+        });
+        self.toasts.push(match clips {
+            0 => format!("Removed {name}. Ctrl+Z brings it back."),
+            1 => format!("Removed {name} and its clip. Ctrl+Z brings them back."),
+            n => format!("Removed {name} and its {n} clips. Ctrl+Z brings them back."),
+        });
+        self.edited();
+    }
+
     fn shortcuts(&mut self, ui: &Ui, focused: bool) {
         if !focused || ui.ctx().egui_wants_keyboard_input() {
             return;
@@ -461,7 +491,11 @@ impl StreamCuts {
             i.consume_key(Modifiers::NONE, Key::Delete)
                 || i.consume_key(Modifiers::NONE, Key::Backspace)
         }) {
-            self.delete_selection(false);
+            // Clips selected on the timeline go first; with none, the file selected in Media.
+            match self.media_selected.clone() {
+                Some(id) if self.timeline.selection.is_empty() => self.remove_media(&id),
+                _ => self.delete_selection(false),
+            }
         }
         if ctx.input_mut(|i| {
             i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z)
@@ -876,9 +910,14 @@ impl StreamCuts {
             self.edited();
         }
         ui.add_space(4.0);
+        // A file selected here is what Delete removes, while no clip is selected on the timeline.
+        if !self.timeline.selection.is_empty() {
+            self.media_selected = None;
+        }
         let mut place_now = None;
         let mut find = None;
         let mut remove = None;
+        let mut select = None;
         let mut scenes = None;
         // Changes to a file's rating, tags or notes: (media id, its new attributes, whether to keep an undo step).
         let mut noted: Option<(String, crate::project::Attributes, bool)> = None;
@@ -899,7 +938,11 @@ impl StreamCuts {
                 // The row takes clicks and drags itself (see `canopy_ui::drag_source`).
                 let (rect, row) = ui.allocate_exact_size(vec2(ui.available_width(), 46.0), Sense::click_and_drag());
                 let painter = ui.painter();
-                painter.rect_filled(rect, 8, color::VEIL);
+                if self.media_selected.as_deref() == Some(media.id.as_str()) {
+                    painter.rect(rect, 8, color::VEIL_STRONG, egui::Stroke::new(1.5, color::SUN), egui::StrokeKind::Inside);
+                } else {
+                    painter.rect_filled(rect, 8, color::VEIL);
+                }
                 let thumb = Rect::from_min_size(rect.min + vec2(4.0, 4.0), vec2(68.0, 38.0));
                 match self.looks.thumbnails.get(&media.id) {
                     Some(texture) => {
@@ -996,7 +1039,17 @@ impl StreamCuts {
                             ui.close();
                         }
                     }
-                    if ui.add_enabled(!used, egui::Button::new("Remove from project")).on_disabled_hover_text("A clip on the timeline uses it").clicked() {
+                    let clips = self.project.clips_using(&media.id);
+                    let label = match clips {
+                        0 => "Remove from project".to_owned(),
+                        1 => "Remove from project, with its clip".to_owned(),
+                        n => format!("Remove from project, with its {n} clips"),
+                    };
+                    if ui
+                        .button(label)
+                        .on_hover_text("The file stays on disk. Delete does this to the selected file; Ctrl+Z brings it back.")
+                        .clicked()
+                    {
                         remove = Some(media.id.clone());
                         ui.close();
                     }
@@ -1010,6 +1063,9 @@ impl StreamCuts {
                 egui::Popup::context_menu(&row).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| menu(ui));
                 // Dragged onto the timeline, it's placed where it lands.
                 canopy_ui::drag_source(ui, &row, || MediaDrag(media.id.clone()), &media.name);
+                if row.clicked() || row.secondary_clicked() {
+                    select = Some(media.id.clone());
+                }
                 if missing && row.clicked() {
                     find = Some(media.id.clone());
                 } else if row.double_clicked() {
@@ -1036,11 +1092,12 @@ impl StreamCuts {
             self.toasts
                 .push("Finding scene changes; long videos take a while".into());
         }
+        if let Some(id) = select {
+            self.media_selected = Some(id);
+            self.timeline.selection.clear();
+        }
         if let Some(id) = remove {
-            self.history.record(&self.project);
-            if self.project.remove_media(&id) {
-                self.edited();
-            }
+            self.remove_media(&id);
         }
         if let Some(id) = place_now {
             self.history.record(&self.project);

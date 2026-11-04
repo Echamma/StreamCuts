@@ -1193,6 +1193,38 @@ impl Project {
         self.media.len() < before
     }
 
+    /// How many clips on the timeline use this media.
+    pub fn clips_using(&self, id: &str) -> usize {
+        self.tracks
+            .iter()
+            .map(|t| t.clips.iter().filter(|c| c.media_id == id).count())
+            .sum()
+    }
+
+    /// Takes media out of the project with every clip that uses it (and the clips linked to those) and the captions
+    /// of those clips. The file itself stays where it is. Returns how many clips went, or None if there's no such media.
+    pub fn remove_media_with_clips(&mut self, id: &str) -> Option<usize> {
+        if !self.media.iter().any(|m| m.id == id) {
+            return None;
+        }
+        let using: Vec<String> = self
+            .tracks
+            .iter()
+            .flat_map(|t| {
+                t.clips
+                    .iter()
+                    .filter(|c| c.media_id == id)
+                    .map(|c| c.id.clone())
+            })
+            .collect();
+        let gone = self.with_linked(&using);
+        self.captions
+            .retain(|c| !c.clip.as_ref().is_some_and(|clip| gone.contains(clip)));
+        let removed = self.delete(&gone);
+        self.media.retain(|m| m.id != id);
+        Some(removed)
+    }
+
     /// Media the timeline uses whose file isn't where the project says it is.
     pub fn missing_media(&self) -> Vec<&Media> {
         let used: Vec<&str> = self
@@ -2685,6 +2717,38 @@ mod tests {
         assert!(!project.remove_media(&video), "a clip uses it");
         assert!(project.remove_media(&spare));
         assert_eq!(project.media.len(), 1);
+    }
+
+    #[test]
+    fn media_in_use_goes_with_its_clips_and_their_captions() {
+        let (mut project, video) = project_with(10.0);
+        let other = project.add_media(media(MediaKind::Video, 4.0));
+        let first = project.place(&video, None, 0.0).unwrap();
+        let second = project.place(&video, None, 10.0).unwrap();
+        let sound = project.detach_sound(&first);
+        let keep = project.place(&other, None, 20.0).unwrap();
+        let caption = |id: &str, clip: &str, start: f64| Caption {
+            id: id.into(),
+            start,
+            end: start + 1.0,
+            text: "words".into(),
+            words: Vec::new(),
+            clip: Some(clip.into()),
+        };
+        project.add_captions(
+            0.0,
+            30.0,
+            vec![caption("c1", &second, 11.0), caption("c2", &keep, 21.0)],
+        );
+        assert_eq!(project.clips_using(&video), 2 + sound.is_some() as usize);
+        let removed = project.remove_media_with_clips(&video).unwrap();
+        assert_eq!(removed, 2 + sound.is_some() as usize);
+        assert!(project.media(&video).is_none());
+        assert_eq!(project.clips_using(&video), 0);
+        assert!(project.clip(&keep).is_some(), "other media's clips stay");
+        assert_eq!(project.captions.len(), 1);
+        assert_eq!(project.captions[0].id, "c2");
+        assert_eq!(project.remove_media_with_clips(&video), None);
     }
 
     #[test]
