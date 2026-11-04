@@ -3,7 +3,7 @@
 //! in last from an ASS file (FFmpeg runs in a folder holding it and the caption font, so no paths need escaping).
 
 use crate::captions;
-use crate::ffmpeg::{command, ffmpeg};
+use crate::ffmpeg::{command, ffmpeg, is_gif};
 use crate::project::{ExportFormat, MediaKind, Project, TrackKind, new_id};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader};
@@ -187,7 +187,21 @@ pub fn arguments(project: &Project, output: &Path) -> Result<Vec<String>, String
             };
             let crossfade_out = project.crossfade_after(&clip.id);
             let crossfade_in = project.crossfade_before(&clip.id).map_or(0.0, |(_, d)| d);
-            if media.kind == MediaKind::Image {
+            // An animated picture plays round and round, starting wherever the clip's source time is in its loop. FFmpeg
+            // has no `-loop` for GIFs, so a GIF of one frame goes round the same way.
+            let looped = media.loop_length();
+            let phase = looped.map_or(0.0, |length| clip.source_in.rem_euclid(length));
+            if looped.is_some() || (media.kind == MediaKind::Image && is_gif(&media.path)) {
+                args.extend([
+                    "-stream_loop".into(),
+                    "-1".into(),
+                    "-t".into(),
+                    format!(
+                        "{:.3}",
+                        phase + (clip.duration + crossfade_out) * clip.speed
+                    ),
+                ]);
+            } else if media.kind == MediaKind::Image {
                 args.extend([
                     "-loop".into(),
                     "1".into(),
@@ -212,8 +226,14 @@ pub fn arguments(project: &Project, output: &Path) -> Result<Vec<String>, String
                 } else {
                     format!("(PTS-STARTPTS)/{:.4}", clip.speed)
                 };
+                // Each time round, a loop starts from its first frame, so the way into the first one is trimmed off.
+                let trim = if phase > 0.0 {
+                    format!("trim=start={phase:.3},")
+                } else {
+                    String::new()
+                };
                 let mut chain = format!(
-                    "[{input}:v]{},fps={fps},format=yuva420p,setpts={pace}",
+                    "[{input}:v]{trim}{},fps={fps},format=yuva420p,setpts={pace}",
                     clip.picture().filter_at(w, h, clip.source_in, 1.0)
                 );
                 // A blur-through mixes each side towards a blurred copy of itself across the crossfade (`K`, 0 sharp to
@@ -546,6 +566,84 @@ mod tests {
         let graph = &args[args.iter().position(|a| a == "-filter_complex").unwrap() + 1];
         assert!(graph.contains("[mixed]loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000[aout]"));
         assert!(joined.ends_with("-t 30.000 -progress pipe:1 -nostats C:/out/cut.mp4"));
+    }
+
+    #[test]
+    fn gifs_go_round_instead_of_holding_a_frame() {
+        let mut project = Project::new("Gifs");
+        let mut animated = media(MediaKind::Image, 2.96, false);
+        animated.path = PathBuf::from("C:/m/horse.gif");
+        let mut single = media(MediaKind::Image, 0.0, false);
+        single.path = PathBuf::from("C:/m/dot.gif");
+        let (animated, single) = (project.add_media(animated), project.add_media(single));
+        project.place(&animated, None, 0.0);
+        project.place(&single, None, 5.0);
+        let joined = arguments(&project, Path::new("o.mp4")).unwrap().join(" ");
+        assert!(
+            joined.contains("-stream_loop -1 -t 5.000 -i C:/m/horse.gif"),
+            "{joined}"
+        );
+        assert!(
+            joined.contains("-stream_loop -1 -t 5.000 -i C:/m/dot.gif"),
+            "{joined}"
+        );
+        assert!(
+            !joined.contains("-loop 1"),
+            "FFmpeg has no -loop for GIFs: {joined}"
+        );
+    }
+
+    /// Needs FFmpeg on PATH: an animated GIF and a GIF of one frame export, the animated one going round.
+    #[test]
+    fn renders_gifs_with_ffmpeg() {
+        let dir = std::env::temp_dir().join(format!("streamcuts-export-gif-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (animated, single) = (dir.join("animated.gif"), dir.join("single.gif"));
+        for (source, path) in [
+            ("color=c=red:s=160x90:r=10:d=1,hue=h=360*t", &animated),
+            ("color=c=orange:s=160x90:r=1:d=1", &single),
+        ] {
+            assert!(
+                command(&ffmpeg())
+                    .args(["-v", "error", "-y", "-f", "lavfi", "-i", source])
+                    .arg(path)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let mut project = Project::new("Gifs");
+        (project.width, project.height) = (160, 90);
+        let animated = project.add_media(crate::ffmpeg::probe(&animated).unwrap());
+        let single = project.add_media(crate::ffmpeg::probe(&single).unwrap());
+        let first = project.place(&animated, None, 0.0).unwrap();
+        project.trim_end(&first, 1.5);
+        let second = project.place(&single, None, 1.5).unwrap();
+        project.trim_end(&second, 2.5);
+        let output = dir.join("out.mp4");
+        let run = start(&project, &output, egui::Context::default()).unwrap();
+        assert_eq!(run.result.recv().unwrap(), Ok(()));
+        let rendered = crate::ffmpeg::probe(&output).unwrap();
+        assert!(
+            (rendered.duration - 2.5).abs() < 0.15,
+            "rendered {}",
+            rendered.duration
+        );
+        let frame = |t: f64| crate::ffmpeg::still(&output, t, 160, 90, Default::default()).unwrap();
+        let difference = |a: &crate::ffmpeg::Frame, b: &crate::ffmpeg::Frame| {
+            a.rgba
+                .iter()
+                .zip(&b.rgba)
+                .map(|(x, y)| x.abs_diff(*y) as f64)
+                .sum::<f64>()
+                / a.rgba.len() as f64
+        };
+        assert!(difference(&frame(0.25), &frame(0.65)) > 20.0, "it animates");
+        assert!(
+            difference(&frame(0.25), &frame(1.25)) < 8.0,
+            "and goes round again after a second"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// Needs FFmpeg on PATH: renders a real two-track timeline and checks the result plays for the right length.

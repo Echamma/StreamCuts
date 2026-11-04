@@ -108,12 +108,19 @@ impl Media {
         })
     }
 
+    /// How long an animated picture (a GIF) takes to play once: its clips loop it for as long as they last. `None` for
+    /// still pictures, videos and sound.
+    pub fn loop_length(&self) -> Option<f64> {
+        (self.kind == MediaKind::Image && self.duration > 0.0).then_some(self.duration)
+    }
+
     /// What the web StreamCuts' media info shows: kind, size, frame rate, length, sound, and the file's size.
     pub fn info(&self) -> String {
         let mut parts = vec![
             match self.kind {
                 MediaKind::Video => "Video",
                 MediaKind::Audio => "Sound",
+                MediaKind::Image if self.loop_length().is_some() => "Animated picture",
                 MediaKind::Image => "Picture",
             }
             .to_owned(),
@@ -123,6 +130,9 @@ impl Media {
         }
         if self.frame_rate > 0.0 {
             parts.push(format!("{} fps", (self.frame_rate * 100.0).round() / 100.0));
+        }
+        if let Some(length) = self.loop_length() {
+            parts.push(format!("loops every {length:.2} s"));
         }
         if self.kind != MediaKind::Image {
             let seconds = self.duration.round() as u64;

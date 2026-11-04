@@ -160,6 +160,16 @@ impl StreamCuts {
                         cache: self.place.data_dir.clone(),
                     });
                 }
+                // GIFs added before StreamCuts animated them were saved as stills: find out whether they loop.
+                if media.kind == MediaKind::Image
+                    && media.duration == 0.0
+                    && crate::ffmpeg::is_gif(&media.path)
+                {
+                    self.worker.send(Job::Loop {
+                        media_id: media.id.clone(),
+                        path: media.path.clone(),
+                    });
+                }
                 if media.kind == MediaKind::Video {
                     self.worker.send(Job::Filmstrip {
                         media_id: media.id.clone(),
@@ -229,6 +239,13 @@ impl StreamCuts {
                         Err(error) => self.toasts.push(error),
                     }
                 }
+                Done::Looped(id, Some((length, rate))) => {
+                    if let Some(media) = self.project.media.iter_mut().find(|m| m.id == id) {
+                        (media.duration, media.frame_rate) = (length, rate);
+                        self.edited();
+                    }
+                }
+                Done::Looped(_, None) => {}
                 Done::Thumbnail(id, Ok(frame)) => {
                     let texture = Self::texture(ctx, &format!("thumb-{id}"), &frame);
                     self.looks.thumbnails.insert(id, texture);
@@ -905,7 +922,7 @@ impl StreamCuts {
                 if missing {
                     text.text(pos2(thumb.right() + 8.0, rect.bottom() - 7.0), Align2::LEFT_BOTTOM, "Missing: click to find it", font::ui(11.0), color::SUN);
                 } else {
-                    let mut detail = match media.kind { MediaKind::Image => format!("Picture · {}×{}", media.width, media.height), _ => timecode(media.duration, self.project.fps) };
+                    let mut detail = match media.kind { MediaKind::Image => format!("{} · {}×{}", if media.loop_length().is_some() { "Animated" } else { "Picture" }, media.width, media.height), _ => timecode(media.duration, self.project.fps) };
                     for tag in &media.attributes.tags {
                         detail.push_str(&format!(" · #{tag}"));
                     }

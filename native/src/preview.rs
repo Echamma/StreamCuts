@@ -28,8 +28,14 @@ struct Playing {
 }
 
 impl Playing {
-    /// Plays `clip` from `path`: its media, or that media's editing proxy.
-    fn start(project: &Project, clip: &Clip, path: &Path, source: f64) -> Self {
+    /// Plays `clip` from `path`: its media, or that media's editing proxy. `looped` is an animated picture's loop length.
+    fn start(
+        project: &Project,
+        clip: &Clip,
+        path: &Path,
+        source: f64,
+        looped: Option<f64>,
+    ) -> Self {
         let (width, height) = decode_size(project);
         let stream = FrameStream::start(
             path,
@@ -39,6 +45,7 @@ impl Playing {
             height,
             clip.picture(),
             clip.speed,
+            looped,
         );
         Self {
             clip_id: clip.id.clone(),
@@ -163,7 +170,7 @@ impl Preview {
         self.blank = false;
         let source = clip.source_time(t);
         let (width, height) = decode_size(project);
-        if playing && media.kind == MediaKind::Video {
+        if playing && (media.kind == MediaKind::Video || media.loop_length().is_some()) {
             self.waiting = None;
             let transition = project.crossfade_at(t);
             let restart = match &self.playing {
@@ -186,7 +193,13 @@ impl Preview {
                     self.transition = self.playing.take().filter(|p| p.clip_id == outgoing.id);
                 }
                 self.playing = Some(preloaded.unwrap_or_else(|| {
-                    Playing::start(project, clip, playback_path(&self.proxies, media), source)
+                    Playing::start(
+                        project,
+                        clip,
+                        playback_path(&self.proxies, media),
+                        source,
+                        media.loop_length(),
+                    )
                 }));
             }
             let half_frame = 0.5 * clip.speed / project.fps as f64;
@@ -206,6 +219,7 @@ impl Preview {
                         outgoing,
                         playback_path(&self.proxies, outgoing_media),
                         old_source,
+                        outgoing_media.loop_length(),
                     ));
                 }
                 self.transition
@@ -234,11 +248,14 @@ impl Preview {
         }
         self.playing = None;
         self.transition = None;
-        let frame_number = if media.kind == MediaKind::Image {
-            0
-        } else {
-            (source * project.fps as f64).round() as i64
+        // A still picture has one frame; an animated one shows where its loop has got to.
+        let shows = match media.kind {
+            MediaKind::Image => media
+                .loop_length()
+                .map_or(0.0, |length| source.rem_euclid(length)),
+            _ => source,
         };
+        let frame_number = (shows * project.fps as f64).round() as i64;
         // Stills are kept by how they're shown, so changing a clip's framing or color fetches it again.
         let picture = clip.picture();
         let blend = project
@@ -259,11 +276,7 @@ impl Preview {
         };
         let key: StillKey = (framed, frame_number);
         if self.shown.as_ref() != Some(&key) && self.waiting.as_ref() != Some(&key) {
-            let at = if media.kind == MediaKind::Image {
-                0.0
-            } else {
-                frame_number as f64 / project.fps as f64
-            };
+            let at = frame_number as f64 / project.fps as f64;
             worker.send(Job::Still {
                 key: key.clone(),
                 path: media.path.clone(),
@@ -306,7 +319,7 @@ impl Preview {
         let Some((at, clip, media)) = upcoming else {
             return;
         };
-        if media.kind != MediaKind::Video
+        if (media.kind != MediaKind::Video && media.loop_length().is_none())
             || self
                 .next
                 .as_ref()
@@ -319,6 +332,7 @@ impl Preview {
             clip,
             playback_path(&self.proxies, media),
             clip.source_time(at),
+            media.loop_length(),
         ));
     }
 

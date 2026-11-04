@@ -25,6 +25,11 @@ pub struct StillBlend {
 
 pub enum Job {
     Probe(PathBuf),
+    /// How long a GIF takes to play once, for media added before GIFs were animated.
+    Loop {
+        media_id: String,
+        path: PathBuf,
+    },
     Thumbnail {
         media_id: String,
         path: PathBuf,
@@ -95,6 +100,8 @@ pub enum Job {
 
 pub enum Done {
     Probed(PathBuf, Result<Media, String>),
+    /// A GIF's loop length and frame rate; `None` when it's a still.
+    Looped(String, Option<(f64, f64)>),
     Thumbnail(String, Result<Frame, String>),
     Still(StillKey, Result<Frame, String>),
     Waveform(String, Result<Waveform, String>),
@@ -192,6 +199,9 @@ impl Worker {
                     };
                     let result = match job {
                         Job::Probe(path) => Done::Probed(path.clone(), ffmpeg::probe(&path)),
+                        Job::Loop { media_id, path } => {
+                            Done::Looped(media_id, ffmpeg::gif_loop(&path))
+                        }
                         Job::Thumbnail { media_id, path, at } => {
                             Done::Thumbnail(media_id, ffmpeg::thumbnail(&path, at))
                         }

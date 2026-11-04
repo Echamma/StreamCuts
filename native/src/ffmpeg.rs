@@ -78,6 +78,54 @@ fn is_image(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+pub fn is_gif(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.to_string_lossy().eq_ignore_ascii_case("gif"))
+}
+
+/// A stream's frame rate from FFprobe: "30000/1001" and the like.
+fn frame_rate(stream: &serde_json::Value) -> f64 {
+    stream["avg_frame_rate"]
+        .as_str()
+        .or(stream["r_frame_rate"].as_str())
+        .and_then(|rate| {
+            let (n, d) = rate.split_once('/')?;
+            let (n, d) = (n.parse::<f64>().ok()?, d.parse::<f64>().ok()?);
+            (d > 0.0).then(|| n / d)
+        })
+        .unwrap_or(0.0)
+}
+
+/// How long an animated GIF takes to play once, and its frame rate. `None` for a GIF of one frame, or one FFprobe
+/// can't read: that's a still picture.
+pub fn gif_loop(path: &Path) -> Option<(f64, f64)> {
+    let output = command(&ffprobe())
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "format=duration:stream=nb_frames,avg_frame_rate,r_frame_rate",
+            "-print_format",
+            "json",
+        ])
+        .arg(path)
+        .output()
+        .ok()?;
+    let info: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    let stream = &info["streams"][0];
+    let frames = stream["nb_frames"]
+        .as_str()
+        .and_then(|n| n.parse::<u64>().ok())
+        .unwrap_or(0);
+    let duration = info["format"]["duration"]
+        .as_str()
+        .and_then(|d| d.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    (frames > 1 && duration > 0.0).then(|| (duration, frame_rate(stream)))
+}
+
 /// Reads what a media file holds (length, size, sound) into a [`Media`] the project can use.
 pub fn probe(path: &Path) -> Result<Media, String> {
     let name = path
@@ -87,16 +135,22 @@ pub fn probe(path: &Path) -> Result<Media, String> {
     if is_image(path) {
         let (width, height) =
             image::image_dimensions(path).map_err(|e| format!("{name} couldn't be read: {e}"))?;
+        // An animated GIF keeps the length of one play-through: its clips loop it (`Media::loop_length`).
+        let (duration, frame_rate) = if is_gif(path) {
+            gif_loop(path).unwrap_or_default()
+        } else {
+            (0.0, 0.0)
+        };
         return Ok(Media {
             id: new_id(),
             path: path.to_path_buf(),
             name,
             kind: MediaKind::Image,
-            duration: 0.0,
+            duration,
             width,
             height,
             has_audio: false,
-            frame_rate: 0.0,
+            frame_rate,
             attributes: Default::default(),
         });
     }
@@ -141,16 +195,7 @@ pub fn probe(path: &Path) -> Result<Media, String> {
             width: v["width"].as_u64().unwrap_or(0) as u32,
             height: v["height"].as_u64().unwrap_or(0) as u32,
             has_audio,
-            // "30000/1001" and the like.
-            frame_rate: v["avg_frame_rate"]
-                .as_str()
-                .or(v["r_frame_rate"].as_str())
-                .and_then(|rate| {
-                    let (n, d) = rate.split_once('/')?;
-                    let (n, d) = (n.parse::<f64>().ok()?, d.parse::<f64>().ok()?);
-                    (d > 0.0).then(|| n / d)
-                })
-                .unwrap_or(0.0),
+            frame_rate: frame_rate(v),
             attributes: Default::default(),
         }),
         None if has_audio => Ok(Media {
@@ -542,8 +587,13 @@ pub fn still(
     height: u32,
     picture: Picture,
 ) -> Result<Frame, String> {
-    // Pictures are read directly unless they have a color grade, which FFmpeg applies exactly as exports do.
-    if is_image(path) && picture.grade.is_neutral() && picture.effects.is_neutral() {
+    // Pictures are read directly unless they have a color grade, which FFmpeg applies exactly as exports do. Past its
+    // first frame a GIF is an animation, and FFmpeg finds the frame.
+    if is_image(path)
+        && !(at > 0.0 && is_gif(path))
+        && picture.grade.is_neutral()
+        && picture.effects.is_neutral()
+    {
         let framing = picture.framing;
         let image = image::open(path).map_err(|e| e.to_string())?;
         let (iw, ih) = (image.width().max(1) as f32, image.height().max(1) as f32);
@@ -675,7 +725,8 @@ pub struct FrameStream {
 }
 
 impl FrameStream {
-    /// `speed` plays the source faster or slower; frame times stay in source seconds.
+    /// `speed` plays the source faster or slower; frame times stay in source seconds. A source that loops (an animated
+    /// picture: `Media::loop_length`) plays over and over, its frame times counting on from `from`.
     pub fn start(
         path: &Path,
         from: f64,
@@ -684,19 +735,31 @@ impl FrameStream {
         height: u32,
         picture: Picture,
         speed: f64,
+        looped: Option<f64>,
     ) -> Self {
         // Start on a frame, so each frame's time is exactly the source time it shows.
         let from = (from * fps as f64 - 1e-6).ceil().max(0.0) / fps as f64;
         let mut command = command(&ffmpeg());
+        command.args(["-v", "error"]);
+        // Each time round, a loop starts from its first frame, so the way into the first one is trimmed off instead.
+        let trim = match looped {
+            Some(length) => {
+                command.args(["-stream_loop", "-1"]);
+                format!("trim=start={:.3},", from.rem_euclid(length))
+            }
+            None => {
+                command.args(["-ss", &seek_to(from)]);
+                String::new()
+            }
+        };
         command
-            .args(["-v", "error", "-ss", &seek_to(from)])
             .arg("-i")
             .arg(path)
             .args([
                 "-an",
                 "-vf",
                 &format!(
-                    "setpts=(PTS-STARTPTS)/{speed:.4},fps={fps},{}",
+                    "{trim}setpts=(PTS-STARTPTS)/{speed:.4},fps={fps},{}",
                     picture.filter_at(width, height, from, speed)
                 ),
                 "-pix_fmt",
@@ -887,6 +950,80 @@ mod tests {
             at(&midway, 38, 50) > at(&dissolved, 38, 50),
             "the edge spreads beyond a plain dissolve's"
         );
+    }
+
+    /// Needs FFmpeg on PATH: an animated GIF plays round and round; a GIF of one frame is a still.
+    #[test]
+    fn animated_gifs_loop() {
+        let dir = std::env::temp_dir().join(format!("streamcuts-gif-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (animated, single) = (dir.join("animated.gif"), dir.join("single.gif"));
+        let make = |source: &str, path: &Path| {
+            command(&ffmpeg())
+                .args(["-v", "error", "-y", "-f", "lavfi", "-i", source])
+                .arg(path)
+                .status()
+                .unwrap()
+                .success()
+        };
+        // Red turning once round the color wheel, in a second at 10 frames a second.
+        assert!(make("color=c=red:s=80x40:r=10:d=1,hue=h=360*t", &animated));
+        assert!(make("color=c=orange:s=80x40:r=1:d=1", &single));
+        let media = probe(&animated).unwrap();
+        let length = media.loop_length().expect("an animated GIF loops");
+        assert!((length - 1.0).abs() < 0.05, "loop length {length}");
+        assert!(
+            media.info().starts_with("Animated picture · 80×40 · 10 fps · loops every 1.00 s"),
+            "{}",
+            media.info()
+        );
+        assert_eq!(probe(&single).unwrap().loop_length(), None);
+        let difference = |a: &Frame, b: &Frame| {
+            a.rgba
+                .iter()
+                .zip(&b.rgba)
+                .map(|(x, y)| x.abs_diff(*y) as f64)
+                .sum::<f64>()
+                / a.rgba.len() as f64
+        };
+        // Paused, the preview asks for frames inside the loop.
+        let early = still(&animated, 0.25, 80, 40, Picture::default()).unwrap();
+        let later = still(&animated, 0.65, 80, 40, Picture::default()).unwrap();
+        assert!(difference(&early, &later) > 20.0, "it animates");
+        // Playing, the stream goes on past the end of the GIF, counting time on, and shows the same frames again.
+        let stream = FrameStream::start(
+            &animated,
+            0.2,
+            10,
+            80,
+            40,
+            Picture::default(),
+            1.0,
+            Some(length),
+        );
+        let frames: Vec<Frame> = (0..25)
+            .map_while(|_| {
+                stream
+                    .frames
+                    .recv_timeout(std::time::Duration::from_secs(20))
+                    .ok()
+            })
+            .collect();
+        assert_eq!(frames.len(), 25, "the loop doesn't stop after one go");
+        let at = |t: f64| {
+            frames
+                .iter()
+                .find(|f| (f.time - t).abs() < 0.01)
+                .unwrap_or_else(|| panic!("no frame at {t}"))
+        };
+        assert!(
+            difference(at(0.3), at(1.3)) < 1.0,
+            "a second on, it's the same frame"
+        );
+        assert!(difference(at(0.3), at(0.7)) > 20.0, "in between, it's not");
+        // The looping FFmpeg is stopped, but may not have let go of the GIF yet.
+        drop(stream);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// Needs FFmpeg on PATH: makes a 2-second clip with sound, then reads it back.
@@ -1120,7 +1257,7 @@ mod tests {
             "sharpen should change the decoded picture"
         );
         // Streamed frames carry their real source time: each looks like the still at its time, not its neighbors'.
-        let stream = FrameStream::start(&clip, 0.5, 30, 160, 90, Picture::default(), 1.0);
+        let stream = FrameStream::start(&clip, 0.5, 30, 160, 90, Picture::default(), 1.0, None);
         let frames: Vec<Frame> = stream.frames.iter().take(16).collect();
         assert!((frames[0].time - 0.5).abs() < 1e-9 && frames[0].rgba.len() == 160 * 90 * 4);
         for frame in [&frames[0], &frames[15]] {
