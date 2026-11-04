@@ -221,6 +221,97 @@ pub struct Clip {
     /// How fast the source plays: 2 is twice as fast (the clip covers twice the source in its length).
     #[serde(default = "normal_speed")]
     pub speed: f64,
+    /// Where its picture sits in the frame, how big, and what's cropped off (dragged on the preview).
+    #[serde(default, skip_serializing_if = "Placement::is_full")]
+    pub place: Placement,
+}
+
+/// Where a clip's framed picture sits in the frame, moved, resized and cropped on the preview like a picture in a photo
+/// editor. The picture (frame-sized once framed) is `scale` times the frame, its middle at `x`, `y` (fractions of the
+/// frame), and `crop` cuts fractions of it off its left, top, right and bottom, leaving the rest where it was.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Placement {
+    pub x: f32,
+    pub y: f32,
+    pub scale: f32,
+    pub crop: [f32; 4],
+}
+
+impl Default for Placement {
+    fn default() -> Self {
+        Self {
+            x: 0.5,
+            y: 0.5,
+            scale: 1.0,
+            crop: [0.0; 4],
+        }
+    }
+}
+
+/// The smallest a placed picture gets, and the least of it a crop leaves, as fractions of the frame or picture.
+pub const MIN_SCALE: f32 = 0.05;
+pub const MIN_KEPT: f32 = 0.05;
+
+impl Placement {
+    /// Filling the frame as it always did: nothing moved, resized or cropped.
+    pub fn is_full(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// The part of the picture that shows, as fractions of the frame: left, top, right, bottom (may reach past it).
+    pub fn shown(&self) -> [f32; 4] {
+        let [l, t, r, b] = self.crop;
+        let (left, top) = (self.x - self.scale / 2.0, self.y - self.scale / 2.0);
+        [
+            left + self.scale * l,
+            top + self.scale * t,
+            left + self.scale * (1.0 - r),
+            top + self.scale * (1.0 - b),
+        ]
+    }
+
+    /// Keeps it usable: not vanishingly small, and some of the picture left after cropping.
+    pub fn tidy(mut self) -> Self {
+        self.scale = self.scale.clamp(MIN_SCALE, 10.0);
+        for c in &mut self.crop {
+            *c = c.clamp(0.0, 1.0 - MIN_KEPT);
+        }
+        let [l, t, r, b] = &mut self.crop;
+        if *l + *r > 1.0 - MIN_KEPT {
+            *r = 1.0 - MIN_KEPT - *l;
+        }
+        if *t + *b > 1.0 - MIN_KEPT {
+            *b = 1.0 - MIN_KEPT - *t;
+        }
+        self
+    }
+
+    /// The FFmpeg filters that cut and size a framed `width`x`height` picture this way, and where it then goes on the
+    /// frame (its top-left in pixels), or None when it fills the frame unchanged.
+    pub fn filter(&self, width: u32, height: u32) -> Option<(String, i64, i64)> {
+        if self.is_full() {
+            return None;
+        }
+        let [l, t, r, b] = self.crop;
+        let even = |v: f32| ((v / 2.0).round() as i64 * 2).max(2);
+        let (w, h) = (width as f32, height as f32);
+        let (out_w, out_h) = (
+            even(w * self.scale * (1.0 - l - r)),
+            even(h * self.scale * (1.0 - t - b)),
+        );
+        let [left, top, ..] = self.shown();
+        let mut chain = String::new();
+        if self.crop != [0.0; 4] {
+            chain.push_str(&format!(
+                "crop=iw*{:.4}:ih*{:.4}:iw*{l:.4}:ih*{t:.4},",
+                1.0 - l - r,
+                1.0 - t - b
+            ));
+        }
+        chain.push_str(&format!("scale={out_w}:{out_h}"));
+        Some((chain, (left * w).round() as i64, (top * h).round() as i64))
+    }
 }
 
 fn normal_speed() -> f64 {
@@ -984,6 +1075,12 @@ pub struct Project {
     /// The gap under captions, as a fraction of the frame's height (shorts often want them higher).
     #[serde(default = "caption_gap")]
     pub caption_bottom: f32,
+    /// Where the middle of captions sits across the frame (0 left, 1 right), and their text size as a fraction of the
+    /// frame's height.
+    #[serde(default = "middle")]
+    pub caption_x: f32,
+    #[serde(default = "caption_size")]
+    pub caption_size: f32,
     /// Captions light up each word as it's said (the web StreamCuts' word-by-word captions), where they have word times.
     #[serde(default)]
     pub caption_words: bool,
@@ -998,9 +1095,12 @@ pub struct Title {
     pub start: f64,
     pub end: f64,
     pub text: String,
-    /// Where the middle of the text sits, from the top (0) to the bottom (1) of the frame.
+    /// Where the middle of the text sits, from the top (0) to the bottom (1) of the frame, and from its left (0) to its
+    /// right (1).
     #[serde(default = "middle")]
     pub y: f32,
+    #[serde(default = "middle")]
+    pub x: f32,
     /// Text size as a fraction of the frame's height.
     #[serde(default = "title_size")]
     pub size: f32,
@@ -1008,6 +1108,10 @@ pub struct Title {
 
 fn caption_gap() -> f32 {
     0.08
+}
+
+pub fn caption_size() -> f32 {
+    0.055
 }
 
 fn middle() -> f32 {
@@ -1138,6 +1242,8 @@ impl Project {
             even_loudness: false,
             export_format: ExportFormat::default(),
             caption_bottom: caption_gap(),
+            caption_x: middle(),
+            caption_size: caption_size(),
             caption_words: false,
             saved_at: 0,
         }
@@ -1151,6 +1257,7 @@ impl Project {
             end: at + 3.0,
             text: "Your title".into(),
             y: middle(),
+            x: middle(),
             size: title_size(),
         };
         let id = title.id.clone();
@@ -1476,6 +1583,7 @@ impl Project {
             follow: Vec::new(),
             link: None,
             speed: 1.0,
+            place: Placement::default(),
         };
         let id = clip.id.clone();
         self.tracks[track].clips.push(clip);
@@ -2078,6 +2186,31 @@ impl Project {
             .filter(|track| track.kind == TrackKind::Video && !track.hidden)
             .find_map(|track| track.clips.iter().find(|c| c.contains(t)))
             .and_then(|clip| self.media(&clip.media_id).map(|m| (clip, m)))
+    }
+
+    /// The clip showing on video track `track` at `t`, if the track is shown.
+    pub fn clip_on(&self, track: usize, t: f64) -> Option<(&Clip, &Media)> {
+        let track = self.tracks.get(track)?;
+        if track.kind != TrackKind::Video || track.hidden {
+            return None;
+        }
+        let clip = track.clips.iter().find(|c| c.contains(t))?;
+        self.media(&clip.media_id).map(|m| (clip, m))
+    }
+
+    /// The video tracks whose clips show at `t`, front first: down to the first that fills the frame (it hides the rest,
+    /// as exports stack them).
+    pub fn layers_at(&self, t: f64) -> Vec<usize> {
+        let mut layers = Vec::new();
+        for track in 0..self.tracks.len() {
+            if let Some((clip, _)) = self.clip_on(track, t) {
+                layers.push(track);
+                if clip.place.is_full() {
+                    break;
+                }
+            }
+        }
+        layers
     }
 
     /// Every clip that makes sound, with its track muted state taken into account.
@@ -2717,6 +2850,69 @@ mod tests {
         assert!(!project.remove_media(&video), "a clip uses it");
         assert!(project.remove_media(&spare));
         assert_eq!(project.media.len(), 1);
+    }
+
+    #[test]
+    fn a_placed_picture_is_cut_sized_and_put_where_it_shows() {
+        let full = Placement::default();
+        assert!(full.is_full());
+        assert_eq!(full.shown(), [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(
+            full.filter(1920, 1080),
+            None,
+            "a full picture keeps its old graph"
+        );
+        // Half size in the top-right quarter, a quarter cut off its left.
+        let place = Placement {
+            x: 0.75,
+            y: 0.25,
+            scale: 0.5,
+            crop: [0.25, 0.0, 0.0, 0.0],
+        };
+        assert_eq!(place.shown(), [0.625, 0.0, 1.0, 0.5]);
+        let (chain, x, y) = place.filter(1920, 1080).unwrap();
+        assert_eq!(
+            chain,
+            "crop=iw*0.7500:ih*1.0000:iw*0.2500:ih*0.0000,scale=720:540"
+        );
+        assert_eq!((x, y), (1200, 0));
+        // Tidy keeps some picture and a usable size.
+        let wild = Placement {
+            scale: 0.0,
+            crop: [0.7, 0.0, 0.7, 2.0],
+            ..full
+        }
+        .tidy();
+        assert_eq!(wild.scale, MIN_SCALE);
+        assert!(wild.crop[0] + wild.crop[2] <= 1.0 - MIN_KEPT + 1e-6);
+        assert!(wild.crop[3] <= 1.0 - MIN_KEPT);
+    }
+
+    #[test]
+    fn tracks_below_a_placed_clip_show_until_one_fills_the_frame() {
+        let (mut project, video) = project_with(10.0);
+        let below = project.place(&video, None, 0.0).unwrap();
+        let top = project.add_track(TrackKind::Video);
+        let upper = project.place(&video, Some(top), 0.0).unwrap();
+        let lower = project
+            .tracks
+            .iter()
+            .position(|t| t.clips.iter().any(|c| c.id == below))
+            .unwrap();
+        assert_eq!(
+            project.layers_at(1.0),
+            vec![top],
+            "a full clip hides what's below"
+        );
+        project.clip_mut(&upper).unwrap().place.scale = 0.5;
+        assert_eq!(project.layers_at(1.0), vec![top, lower]);
+        assert_eq!(project.clip_on(lower, 1.0).unwrap().0.id, below);
+        project.tracks[lower].hidden = true;
+        assert_eq!(
+            project.layers_at(1.0),
+            vec![top],
+            "hidden tracks don't show"
+        );
     }
 
     #[test]

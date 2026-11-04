@@ -9,7 +9,8 @@ use crate::ffmpeg::Frame;
 use crate::filmstrip::Strip;
 use crate::preview::{Clock, Preview};
 use crate::project::{
-    Effects, ExportFormat, Framing, Grade, History, MediaKind, Picture, Project, SPEEDS, Sound,
+    Effects, ExportFormat, Framing, Grade, History, MediaKind, Picture, Placement, Project, SPEEDS,
+    Sound,
 };
 use crate::storage;
 use crate::timeline::{Looks, MediaDrag, Timeline, timecode};
@@ -20,8 +21,8 @@ use canopy_ui::{
     pane_frame, pill, primary_button, quiet_button,
 };
 use egui::{
-    Align2, Color32, ColorImage, Key, Modifiers, Rect, Sense, TextureHandle, TextureOptions, Ui,
-    UiBuilder, pos2, vec2,
+    Align2, Color32, ColorImage, Key, Modifiers, Pos2, Rect, Sense, Stroke, TextureHandle,
+    TextureOptions, Ui, UiBuilder, pos2, vec2,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -79,6 +80,10 @@ pub struct StreamCuts {
     looks_asked: HashSet<String>,
     pending: HashMap<PathBuf, Pending>,
     preview: Preview,
+    /// Previews of the video tracks showing below a placed clip, by track (see `Project::layers_at`).
+    under: HashMap<usize, Preview>,
+    /// A drag on the picture: what it moves or sizes, and how things were when it began.
+    picture_drag: Option<PictureDrag>,
     clock: Clock,
     audio: Audio,
     playhead: f64,
@@ -94,6 +99,60 @@ pub struct StreamCuts {
     show_projects: bool,
     toasts: Vec<String>,
     exported: Vec<PathBuf>,
+}
+
+/// Something on the preview that can be moved and sized there.
+#[derive(Clone, Debug, PartialEq)]
+enum Target {
+    Clip(String),
+    Title(String),
+    /// The captions (all of them move and size together); the id is the one showing.
+    Captions(String),
+}
+
+impl Target {
+    fn id(&self) -> &str {
+        match self {
+            Target::Clip(id) | Target::Title(id) | Target::Captions(id) => id,
+        }
+    }
+}
+
+/// Where a picture drag took hold: inside (move), a corner (resize) or a clip's edge (crop: 0 left, 1 top, 2 right,
+/// 3 bottom).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Grip {
+    Move,
+    Corner(i8, i8),
+    Edge(usize),
+}
+
+/// A drag on the picture, with how things were when it began: the pointer, a clip's place, a title's or the captions'
+/// x, y and size, and the middle of what was grabbed.
+#[derive(Clone)]
+struct PictureDrag {
+    target: Target,
+    grip: Grip,
+    start: Pos2,
+    place: Placement,
+    text: (f32, f32, f32),
+    center: Pos2,
+}
+
+/// Where a clip's picture goes on the preview `screen` and which part of its frame shows (`Place`).
+fn placed(screen: Rect, place: &Placement) -> (Rect, Rect) {
+    let [left, top, right, bottom] = place.shown();
+    let at = |x: f32, y: f32| {
+        pos2(
+            screen.left() + x * screen.width(),
+            screen.top() + y * screen.height(),
+        )
+    };
+    let [l, t, r, b] = place.crop;
+    (
+        Rect::from_min_max(at(left, top), at(right, bottom)),
+        Rect::from_min_max(pos2(l, t), pos2(1.0 - r, 1.0 - b)),
+    )
 }
 
 impl StreamCuts {
@@ -126,6 +185,8 @@ impl StreamCuts {
             looks_asked: HashSet::new(),
             pending: HashMap::new(),
             preview: Preview::default(),
+            under: HashMap::new(),
+            picture_drag: None,
             clock: Clock::default(),
             audio: Audio::default(),
             playhead: 0.0,
@@ -203,7 +264,7 @@ impl StreamCuts {
         self.timeline = Timeline::default();
         self.playhead = 0.0;
         self.pause();
-        self.preview.reset();
+        self.reset_preview();
         self.request_looks();
     }
 
@@ -254,7 +315,12 @@ impl StreamCuts {
                     self.looks.thumbnails.insert(id, texture);
                 }
                 Done::Thumbnail(_, Err(_)) => {}
-                Done::Still(key, frame) => self.preview.still_done(ctx, key, frame),
+                Done::Still(key, frame) => {
+                    for layer in self.under.values_mut() {
+                        layer.still_done(ctx, key.clone(), frame.clone());
+                    }
+                    self.preview.still_done(ctx, key, frame);
+                }
                 Done::Waveform(id, Ok(wave)) => {
                     self.looks.waveforms.insert(id, Arc::new(wave));
                 }
@@ -443,6 +509,12 @@ impl StreamCuts {
         self.edited();
     }
 
+    /// Forgets what the previews show, so they fetch it again (after the project's shape or a proxy changes).
+    fn reset_preview(&mut self) {
+        self.preview.reset();
+        self.under.clear();
+    }
+
     /// Takes a file out of the project, with the clips that use it (the file stays on disk; Ctrl+Z brings it back).
     fn remove_media(&mut self, id: &str) {
         let Some(name) = self.project.media(id).map(|m| m.name.clone()) else {
@@ -619,7 +691,7 @@ impl StreamCuts {
             if let Some(i) = shape {
                 self.history.record(&self.project);
                 (_, self.project.width, self.project.height) = SHAPES[i];
-                self.preview.reset();
+                self.reset_preview();
                 self.edited();
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -821,7 +893,7 @@ impl StreamCuts {
         }
         self.looks.thumbnails.remove(id);
         self.looks_asked.remove(id);
-        self.preview.reset();
+        self.reset_preview();
         self.request_looks();
         self.edited();
     }
@@ -1140,19 +1212,34 @@ impl StreamCuts {
                     })
             };
             let tint = Color32::from_gray((fade * 255.0).round() as u8);
-            ui.painter().image(
-                texture.id(),
-                screen,
-                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-                tint,
-            );
+            // Tracks below show where a moved, resized or cropped clip leaves the frame open, bottom first.
+            let painter = ui.painter().with_clip_rect(screen);
+            let layers = self.project.layers_at(self.playhead);
+            for track in layers.iter().skip(1).rev() {
+                if let (Some(layer), Some((clip, _))) = (
+                    self.under.get(track).filter(|l| !l.blank),
+                    self.project.clip_on(*track, self.playhead),
+                ) {
+                    if let Some(texture) = &layer.texture {
+                        let (rect, uv) = placed(screen, &clip.place);
+                        painter.image(texture.id(), rect, uv, Color32::WHITE);
+                    }
+                }
+            }
+            let front = self
+                .project
+                .front_clip(self.playhead)
+                .map(|(clip, _)| clip.place)
+                .unwrap_or_default();
+            let (rect, uv) = placed(screen, &front);
+            painter.image(texture.id(), rect, uv, tint);
             // Scrubbing: until the exact still arrives (a static FFmpeg takes half a second to start), show the nearest
             // filmstrip frame, which is there at once. Only when it looks the same: a 16:9 frame, fitted, ungraded.
             if self.preview.waiting() && self.project.width * 9 == self.project.height * 16 {
-                if let Some((clip, media)) = self
-                    .project
-                    .front_clip(self.playhead)
-                    .filter(|(clip, _)| clip.picture() == Picture::default())
+                if let Some((clip, media)) =
+                    self.project.front_clip(self.playhead).filter(|(clip, _)| {
+                        clip.picture() == Picture::default() && clip.place.is_full()
+                    })
                 {
                     if let Some(strip) = self.looks.filmstrips.get(&media.id) {
                         ui.painter().image(
@@ -1165,6 +1252,8 @@ impl StreamCuts {
                 }
             }
         }
+        // What's on the picture and where, front first, for picking and dragging (see `edit_on_picture`).
+        let mut elements: Vec<(Target, Rect)> = Vec::new();
         let over_picture = ui.painter().with_clip_rect(screen);
         for title in self
             .project
@@ -1172,7 +1261,8 @@ impl StreamCuts {
             .iter()
             .filter(|t| self.playhead >= t.start && self.playhead < t.end)
         {
-            captions::draw_title(&over_picture, screen, title);
+            let rect = captions::draw_title(&over_picture, screen, title);
+            elements.insert(0, (Target::Title(title.id.clone()), rect));
         }
         if let Some(caption) = self.project.caption_at(self.playhead) {
             let word = self
@@ -1180,13 +1270,15 @@ impl StreamCuts {
                 .caption_words
                 .then(|| caption.word_at(self.playhead))
                 .flatten();
-            captions::draw(
-                &over_picture,
-                screen,
-                &caption.text,
-                word,
-                self.project.caption_bottom,
-            );
+            let rect = captions::draw(&over_picture, screen, &caption.text, word, &self.project);
+            elements.insert(0, (Target::Captions(caption.id.clone()), rect));
+        }
+        if !self.preview.blank {
+            for track in self.project.layers_at(self.playhead) {
+                if let Some((clip, _)) = self.project.clip_on(track, self.playhead) {
+                    elements.push((Target::Clip(clip.id.clone()), placed(screen, &clip.place).0));
+                }
+            }
         }
         if self.preview.scopes.on {
             self.preview.scopes.draw(
@@ -1197,7 +1289,7 @@ impl StreamCuts {
                 ),
             );
         }
-        self.drag_text(ui, screen);
+        self.edit_on_picture(ui, screen, &elements);
         if self.project.duration() == 0.0 {
             ui.painter().text(
                 screen.center(),
@@ -1263,44 +1355,286 @@ impl StreamCuts {
                     self.preview.scopes.on = !on;
                     // Measured from the next picture shown: ask for the one here again.
                     if !on {
-                        self.preview.reset();
+                        self.reset_preview();
                     }
                 }
             });
         });
     }
 
-    /// Dragging up or down on the picture moves the selected title, or with a caption selected, where captions sit.
-    fn drag_text(&mut self, ui: &mut Ui, screen: Rect) {
-        let [id] = self.timeline.selection.as_slice() else {
-            return;
+    /// Moving, resizing and cropping on the picture, as in a photo editor. A click picks what's under the pointer (a
+    /// title, the captions, or a clip, front first); the picked one gets a box: drag inside to move it, a corner to
+    /// resize it, and, for clips, an edge to crop it. `elements` is what's on the picture and where, front first.
+    fn edit_on_picture(&mut self, ui: &mut Ui, screen: Rect, elements: &[(Target, Rect)]) {
+        let response = ui.interact(
+            screen,
+            ui.scope_id().with("edit-on-picture"),
+            Sense::click_and_drag(),
+        );
+        let selected = self.timeline.selection.as_slice();
+        let chosen = match selected {
+            [id] => elements
+                .iter()
+                .find(|(target, _)| target.id() == id)
+                .cloned(),
+            _ => None,
         };
-        let title = self.project.titles.iter().any(|t| &t.id == id);
-        if !title && !self.project.captions.iter().any(|c| &c.id == id) {
-            return;
-        }
-        let id = id.clone();
-        let response = ui
-            .interact(screen, ui.scope_id().with("drag-text"), Sense::drag())
-            .on_hover_cursor(egui::CursorIcon::ResizeVertical)
-            .on_hover_text(if title {
-                "Drag up or down to move the title"
-            } else {
-                "Drag up or down to move the captions"
-            });
-        if response.drag_started() {
-            self.history.record(&self.project);
-        }
-        let dy = response.drag_delta().y / screen.height();
-        if response.dragged() && dy != 0.0 {
-            if title {
-                if let Some(title) = self.project.title_mut(&id) {
-                    title.y = (title.y + dy).clamp(0.05, 0.95);
+        // While a drag is on, its element stays chosen even if the selection list hasn't caught up.
+        let chosen = chosen.or_else(|| {
+            let drag = self.picture_drag.as_ref()?;
+            elements
+                .iter()
+                .find(|(target, _)| *target == drag.target)
+                .cloned()
+        });
+        let handle = 9.0;
+        let grip_at = |p: Pos2, target: &Target, rect: Rect| -> Option<Grip> {
+            for sx in [-1i8, 1] {
+                for sy in [-1i8, 1] {
+                    let corner = pos2(
+                        if sx < 0 { rect.left() } else { rect.right() },
+                        if sy < 0 { rect.top() } else { rect.bottom() },
+                    );
+                    if corner.distance(p) <= handle {
+                        return Some(Grip::Corner(sx, sy));
+                    }
                 }
-            } else {
-                self.project.caption_bottom = (self.project.caption_bottom - dy).clamp(0.02, 0.8);
             }
-            self.edited();
+            if matches!(target, Target::Clip(_)) {
+                let near_x = (rect.top()..=rect.bottom()).contains(&p.y);
+                let near_y = (rect.left()..=rect.right()).contains(&p.x);
+                for (side, hit) in [
+                    (0, near_x && (p.x - rect.left()).abs() <= handle / 1.5),
+                    (2, near_x && (p.x - rect.right()).abs() <= handle / 1.5),
+                    (1, near_y && (p.y - rect.top()).abs() <= handle / 1.5),
+                    (3, near_y && (p.y - rect.bottom()).abs() <= handle / 1.5),
+                ] {
+                    if hit {
+                        return Some(Grip::Edge(side));
+                    }
+                }
+            }
+            rect.contains(p).then_some(Grip::Move)
+        };
+        let topmost = |p: Pos2| elements.iter().find(|(_, rect)| rect.contains(p)).cloned();
+        // The chosen element's box: corners resize; a clip's edge bars crop.
+        if let Some((target, rect)) = &chosen {
+            let painter = ui.painter().with_clip_rect(screen.expand(handle));
+            painter.rect_stroke(
+                *rect,
+                0.0,
+                Stroke::new(1.5, color::SUN),
+                egui::StrokeKind::Middle,
+            );
+            for corner in [
+                rect.left_top(),
+                rect.right_top(),
+                rect.left_bottom(),
+                rect.right_bottom(),
+            ] {
+                painter.rect(
+                    Rect::from_center_size(corner, vec2(9.0, 9.0)),
+                    2,
+                    Color32::WHITE,
+                    Stroke::new(1.0, color::SUN),
+                    egui::StrokeKind::Middle,
+                );
+            }
+            if matches!(target, Target::Clip(_)) {
+                for (at, size) in [
+                    (rect.left_center(), vec2(4.0, 16.0)),
+                    (rect.right_center(), vec2(4.0, 16.0)),
+                    (rect.center_top(), vec2(16.0, 4.0)),
+                    (rect.center_bottom(), vec2(16.0, 4.0)),
+                ] {
+                    painter.rect_filled(Rect::from_center_size(at, size), 2, color::SUN);
+                }
+            }
+        }
+        if let Some(p) = response.hover_pos() {
+            let grip = self
+                .picture_drag
+                .as_ref()
+                .map(|d| d.grip)
+                .or_else(|| chosen.as_ref().and_then(|(t, r)| grip_at(p, t, *r)));
+            let cursor = match grip {
+                Some(Grip::Corner(sx, sy)) if sx == sy => Some(egui::CursorIcon::ResizeNwSe),
+                Some(Grip::Corner(..)) => Some(egui::CursorIcon::ResizeNeSw),
+                Some(Grip::Edge(0 | 2)) => Some(egui::CursorIcon::ResizeHorizontal),
+                Some(Grip::Edge(_)) => Some(egui::CursorIcon::ResizeVertical),
+                Some(Grip::Move) => Some(egui::CursorIcon::Move),
+                None => topmost(p).map(|_| egui::CursorIcon::PointingHand),
+            };
+            if let Some(cursor) = cursor {
+                ui.ctx().set_cursor_icon(cursor);
+            }
+        }
+        if response.clicked() {
+            if let Some(p) = response.interact_pointer_pos() {
+                if !chosen
+                    .as_ref()
+                    .is_some_and(|(t, r)| grip_at(p, t, *r).is_some())
+                {
+                    self.timeline.selection = topmost(p)
+                        .map(|(t, _)| t.id().to_owned())
+                        .into_iter()
+                        .collect();
+                    self.media_selected = None;
+                }
+            }
+        }
+        if response.drag_started() {
+            if let Some(p) = ui.input(|i| i.pointer.press_origin()) {
+                // Grab the chosen element by a handle or inside it, else whatever is under the pointer, to move it.
+                let grabbed = chosen
+                    .as_ref()
+                    .and_then(|(t, r)| grip_at(p, t, *r).map(|g| (t.clone(), *r, g)))
+                    .or_else(|| topmost(p).map(|(t, r)| (t, r, Grip::Move)));
+                if let Some((target, rect, grip)) = grabbed {
+                    self.timeline.selection = vec![target.id().to_owned()];
+                    self.media_selected = None;
+                    self.history.record(&self.project);
+                    let (place, text) = match &target {
+                        Target::Clip(id) => (
+                            self.project.clip(id).map(|c| c.place).unwrap_or_default(),
+                            (0.0, 0.0, 0.0),
+                        ),
+                        Target::Title(id) => (
+                            Placement::default(),
+                            self.project
+                                .titles
+                                .iter()
+                                .find(|t| &t.id == id)
+                                .map_or((0.5, 0.5, 0.09), |t| (t.x, t.y, t.size)),
+                        ),
+                        Target::Captions(_) => (
+                            Placement::default(),
+                            (
+                                self.project.caption_x,
+                                self.project.caption_bottom,
+                                self.project.caption_size,
+                            ),
+                        ),
+                    };
+                    self.picture_drag = Some(PictureDrag {
+                        target,
+                        grip,
+                        start: p,
+                        place,
+                        text,
+                        center: rect.center(),
+                    });
+                }
+            }
+        }
+        if let (true, Some(drag), Some(p)) = (
+            response.dragged(),
+            self.picture_drag.clone(),
+            response.interact_pointer_pos(),
+        ) {
+            let d = (p - drag.start) / screen.size();
+            let frac = |q: Pos2| {
+                (
+                    (q.x - screen.left()) / screen.width(),
+                    (q.y - screen.top()) / screen.height(),
+                )
+            };
+            let (px, py) = frac(p);
+            match &drag.target {
+                Target::Clip(id) => {
+                    let mut place = drag.place;
+                    let [l, t, r, b] = place.crop;
+                    let [left, top, right, bottom] = place.shown();
+                    match drag.grip {
+                        Grip::Move => {
+                            place.x += d.x;
+                            place.y += d.y;
+                        }
+                        Grip::Corner(sx, sy) => {
+                            // The opposite corner stays; the picture keeps its shape.
+                            let (ox, oy) = (
+                                if sx < 0 { right } else { left },
+                                if sy < 0 { bottom } else { top },
+                            );
+                            let ratio = ((px - ox).abs() / (right - left))
+                                .max((py - oy).abs() / (bottom - top));
+                            place.scale =
+                                (place.scale * ratio).clamp(crate::project::MIN_SCALE, 10.0);
+                            let s = place.scale;
+                            place.x = if sx > 0 {
+                                ox + s / 2.0 - s * l
+                            } else {
+                                ox + s / 2.0 - s * (1.0 - r)
+                            };
+                            place.y = if sy > 0 {
+                                oy + s / 2.0 - s * t
+                            } else {
+                                oy + s / 2.0 - s * (1.0 - b)
+                            };
+                        }
+                        Grip::Edge(side) => {
+                            // The picture stays put; the edge cuts into it (or gives back what was cut).
+                            let (s, picture_left, picture_top) = (
+                                place.scale,
+                                place.x - place.scale / 2.0,
+                                place.y - place.scale / 2.0,
+                            );
+                            match side {
+                                0 => place.crop[0] = (px - picture_left) / s,
+                                2 => place.crop[2] = 1.0 - (px - picture_left) / s,
+                                1 => place.crop[1] = (py - picture_top) / s,
+                                _ => place.crop[3] = 1.0 - (py - picture_top) / s,
+                            }
+                        }
+                    }
+                    let place = place.tidy();
+                    if let Some(clip) = self.project.clip_mut(id) {
+                        if clip.place != place {
+                            clip.place = place;
+                            self.edited();
+                        }
+                    }
+                }
+                target => {
+                    let (x0, y0, size0) = drag.text;
+                    let (x, y, size) = match drag.grip {
+                        Grip::Corner(..) => {
+                            // Bigger or smaller by how far the corner goes from the middle of the text.
+                            let ratio =
+                                drag.center.distance(p) / drag.center.distance(drag.start).max(1.0);
+                            (x0, y0, (size0 * ratio).clamp(0.02, 0.4))
+                        }
+                        _ => (
+                            x0 + d.x,
+                            y0 + if matches!(target, Target::Captions(_)) {
+                                -d.y
+                            } else {
+                                d.y
+                            },
+                            size0,
+                        ),
+                    };
+                    let (x, y) = (x.clamp(0.02, 0.98), y.clamp(0.02, 0.98));
+                    match target {
+                        Target::Title(id) => {
+                            if let Some(title) = self.project.title_mut(id) {
+                                (title.x, title.y, title.size) = (x, y, size);
+                            }
+                        }
+                        _ => {
+                            (
+                                self.project.caption_x,
+                                self.project.caption_bottom,
+                                self.project.caption_size,
+                            ) = (x, y.min(0.9), size);
+                        }
+                    }
+                    self.edited();
+                }
+            }
+        }
+        if response.drag_stopped() {
+            self.picture_drag = None;
         }
     }
 
@@ -1556,6 +1890,13 @@ impl StreamCuts {
                         ui.label(canopy_ui::muted("The crop follows the action."));
                     }
                 }
+                // Moved, resized or cropped on the picture (`Place`): back to filling the frame.
+                ui.horizontal(|ui| {
+                    ui.label(canopy_ui::muted("On the picture: drag to move, corners to resize, edges to crop."));
+                });
+                if !changed.place.is_full() && ui.button("Reset size, place and crop").clicked() {
+                    changed.place = crate::project::Placement::default();
+                }
                 // The web StreamCuts' auto-reframe: fill the frame and keep the crop on where things move.
                 if kind == MediaKind::Video {
                     let busy = self.focus_jobs.contains(&clip.id);
@@ -1693,7 +2034,7 @@ impl StreamCuts {
             (Some(false), _) => {
                 if let Some(file) = self.preview.proxies.remove(&clip.media_id) {
                     // Stop playing from it before deleting it.
-                    self.preview.reset();
+                    self.reset_preview();
                     if std::fs::remove_file(&file).is_err() {
                         self.toasts.push(format!(
                             "Couldn't delete the proxy; it's at {}",
@@ -2212,6 +2553,28 @@ impl CanopyApp for StreamCuts {
             self.clock.playing,
             &self.worker,
         );
+        // Tracks that show below a moved, resized or cropped clip get previews of their own.
+        let below: Vec<usize> = self
+            .project
+            .layers_at(self.playhead)
+            .into_iter()
+            .skip(1)
+            .collect();
+        self.under.retain(|track, _| below.contains(track));
+        for track in below {
+            let layer = self
+                .under
+                .entry(track)
+                .or_insert_with(|| crate::preview::Preview::of_track(track));
+            layer.proxies.clone_from(&self.preview.proxies);
+            layer.update(
+                &ctx,
+                &self.project,
+                self.playhead,
+                self.clock.playing,
+                &self.worker,
+            );
+        }
         if self
             .edited_at
             .is_some_and(|at| at.elapsed() > Duration::from_millis(800))

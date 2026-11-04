@@ -232,9 +232,14 @@ pub fn arguments(project: &Project, output: &Path) -> Result<Vec<String>, String
                 } else {
                     String::new()
                 };
+                // A placed clip is cut and sized after framing, then laid on the frame at its place (see `Place`).
+                let placed = clip.place.filter(w, h);
                 let mut chain = format!(
-                    "[{input}:v]{trim}{},fps={fps},format=yuva420p,setpts={pace}",
-                    clip.picture().filter_at(w, h, clip.source_in, 1.0)
+                    "[{input}:v]{trim}{}{},fps={fps},format=yuva420p,setpts={pace}",
+                    clip.picture().filter_at(w, h, clip.source_in, 1.0),
+                    placed
+                        .as_ref()
+                        .map_or(String::new(), |(cut, ..)| format!(",{cut}"))
                 );
                 // A blur-through mixes each side towards a blurred copy of itself across the crossfade (`K`, 0 sharp to
                 // 1 blurred, by the clip's own time T): the outgoing clip on its way out, the incoming one in reverse.
@@ -279,8 +284,9 @@ pub fn arguments(project: &Project, output: &Path) -> Result<Vec<String>, String
                     "{chain},setpts=PTS+{start:.3}/TB[v{input}]",
                     start = clip.start
                 ));
+                let at = placed.map_or(String::new(), |(_, x, y)| format!("x={x}:y={y}:"));
                 filters.push(format!(
-                    "[base{base}][v{input}]overlay=eof_action=pass[base{}]",
+                    "[base{base}][v{input}]overlay={at}eof_action=pass[base{}]",
                     base + 1
                 ));
                 base += 1;
@@ -643,6 +649,72 @@ mod tests {
         assert!(
             difference(&frame(0.25), &frame(1.25)) < 8.0,
             "and goes round again after a second"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Needs FFmpeg on PATH: a clip moved, resized and cropped over another shows where the preview puts it.
+    #[test]
+    fn renders_a_placed_clip_over_the_track_below() {
+        let dir =
+            std::env::temp_dir().join(format!("streamcuts-export-place-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (red, blue) = (dir.join("red.png"), dir.join("blue.png"));
+        for (color, path) in [("red", &red), ("blue", &blue)] {
+            assert!(
+                command(&ffmpeg())
+                    .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+                    .arg(format!("color=c={color}:s=160x90:d=1"))
+                    .args(["-frames:v", "1"])
+                    .arg(path)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let mut project = Project::new("Placed");
+        (project.width, project.height) = (160, 90);
+        let red = project.add_media(crate::ffmpeg::probe(&red).unwrap());
+        let blue = project.add_media(crate::ffmpeg::probe(&blue).unwrap());
+        project.place(&red, None, 0.0).unwrap();
+        let top = project.add_track(crate::project::TrackKind::Video);
+        let placed = project.place(&blue, Some(top), 0.0).unwrap();
+        // Half size, its middle at the top-right quarter's middle, a quarter of it cut off its left.
+        project.clip_mut(&placed).unwrap().place = crate::project::Placement {
+            x: 0.75,
+            y: 0.25,
+            scale: 0.5,
+            crop: [0.25, 0.0, 0.0, 0.0],
+        };
+        let output = dir.join("out.mp4");
+        let run = start(&project, &output, egui::Context::default()).unwrap();
+        assert_eq!(run.result.recv().unwrap(), Ok(()));
+        let frame = crate::ffmpeg::still(&output, 0.5, 160, 90, Default::default()).unwrap();
+        let at = |x: f32, y: f32| {
+            let i = ((y * 90.0) as usize * 160 + (x * 160.0) as usize) * 4;
+            (frame.rgba[i], frame.rgba[i + 2])
+        };
+        let blueish = |(r, b): (u8, u8)| b > 150 && r < 100;
+        let reddish = |(r, b): (u8, u8)| r > 150 && b < 100;
+        assert!(
+            blueish(at(0.85, 0.25)),
+            "the placed picture: {:?}",
+            at(0.85, 0.25)
+        );
+        assert!(
+            reddish(at(0.25, 0.75)),
+            "the track below shows around it: {:?}",
+            at(0.25, 0.75)
+        );
+        assert!(
+            reddish(at(0.56, 0.25)),
+            "the cropped-off part shows what's below: {:?}",
+            at(0.56, 0.25)
+        );
+        assert!(
+            reddish(at(0.85, 0.75)),
+            "below the placed picture: {:?}",
+            at(0.85, 0.75)
         );
         std::fs::remove_dir_all(dir).unwrap();
     }

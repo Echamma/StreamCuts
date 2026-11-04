@@ -446,6 +446,7 @@ pub fn scenes(path: &Path, threshold: f64) -> Result<Vec<f64>, String> {
 }
 
 /// One decoded picture, RGBA, at a source time.
+#[derive(Clone)]
 pub struct Frame {
     pub time: f64,
     pub size: [usize; 2],

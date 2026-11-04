@@ -98,6 +98,9 @@ pub struct Preview {
     pub proxies: HashMap<String, PathBuf>,
     /// The histogram and waveform of what's shown, while they're on.
     pub scopes: Scopes,
+    /// The video track this preview shows, or None for whichever clip is in front (the main preview). Tracks below
+    /// a placed clip get a preview of their own (see `Project::layers_at`).
+    pub track: Option<usize>,
 }
 
 /// What playback reads for `media`: its editing proxy when it has one.
@@ -114,6 +117,22 @@ pub fn decode_size(project: &Project) -> (u32, u32) {
 }
 
 impl Preview {
+    /// A preview of video track `track` only.
+    pub fn of_track(track: usize) -> Self {
+        Self {
+            track: Some(track),
+            ..Self::default()
+        }
+    }
+
+    /// The clip this preview shows at `t`.
+    fn clip<'a>(&self, project: &'a Project, t: f64) -> Option<(&'a Clip, &'a Media)> {
+        match self.track {
+            Some(track) => project.clip_on(track, t),
+            None => project.front_clip(t),
+        }
+    }
+
     fn show(
         texture: &mut Option<TextureHandle>,
         scopes: &mut Scopes,
@@ -159,7 +178,7 @@ impl Preview {
         } else {
             self.next = None;
         }
-        let Some((clip, media)) = project.front_clip(t) else {
+        let Some((clip, media)) = self.clip(project, t) else {
             self.blank = true;
             self.playing = None;
             self.transition = None;
@@ -300,7 +319,7 @@ impl Preview {
 
     /// Starts decoding the clip that comes in front next, if that happens within `PRELOAD` seconds.
     fn preload(&mut self, project: &Project, t: f64) {
-        let current = project.front_clip(t).map(|(clip, _)| clip.id.clone());
+        let current = self.clip(project, t).map(|(clip, _)| clip.id.clone());
         // What's in front changes only where a video clip starts or ends.
         let mut changes: Vec<f64> = project
             .tracks
@@ -311,8 +330,7 @@ impl Preview {
             .collect();
         changes.sort_by(f64::total_cmp);
         let upcoming = changes.into_iter().find_map(|at| {
-            project
-                .front_clip(at)
+            self.clip(project, at)
                 .filter(|(clip, _)| Some(&clip.id) != current.as_ref())
                 .map(|(clip, media)| (at, clip, media))
         });

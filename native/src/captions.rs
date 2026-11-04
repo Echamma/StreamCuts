@@ -6,8 +6,7 @@ use crate::project::{Project, Title, word_spans};
 use canopy_ui::{CAPTION_FONT, font};
 use egui::{Color32, Painter, Rect, pos2, vec2};
 
-/// Text size and widest line, as fractions of the frame's height and width. The gap under captions is the project's.
-const SIZE: f32 = 0.055;
+/// The widest line, as a fraction of the frame's width. Captions' size and place are the project's.
 const WIDTH: f32 = 0.86;
 /// Outline thickness as a fraction of the text size.
 const OUTLINE: f32 = 0.09;
@@ -19,28 +18,39 @@ const ASS_SIZE: f32 = 1.385;
 const HIGHLIGHT: Color32 = Color32::from_rgb(255, 212, 0);
 const HIGHLIGHT_ASS: &str = "&H00D4FF&";
 
-/// Draws a caption over a preview picture that fills `screen`, `bottom` (a fraction of its height) above the bottom,
-/// with its `word`th word lit up if given.
-pub fn draw(painter: &Painter, screen: Rect, text: &str, word: Option<usize>, bottom: f32) {
+/// Draws the project's captions' `text` over a preview picture that fills `screen`: their size, `caption_bottom` (a
+/// fraction of its height) above the bottom and centered at `caption_x`, with its `word`th word lit up if given.
+/// Returns where the text went.
+pub fn draw(
+    painter: &Painter,
+    screen: Rect,
+    text: &str,
+    word: Option<usize>,
+    project: &Project,
+) -> Rect {
     let lit = word.and_then(|i| word_spans(text).get(i).cloned());
-    outlined(painter, screen, text, lit, SIZE, |size| {
+    let x = screen.left() + screen.width() * project.caption_x;
+    outlined(painter, screen, text, lit, project.caption_size, |size| {
         pos2(
-            screen.center().x - size.x / 2.0,
-            screen.bottom() - screen.height() * bottom - size.y,
+            x - size.x / 2.0,
+            screen.bottom() - screen.height() * project.caption_bottom - size.y,
         )
-    });
+    })
 }
 
-/// Draws a title over a preview picture that fills `screen`, centered across and at its height.
-pub fn draw_title(painter: &Painter, screen: Rect, title: &Title) {
-    let y = screen.top() + screen.height() * title.y;
+/// Draws a title over a preview picture that fills `screen`, its middle at the title's place. Returns where it went.
+pub fn draw_title(painter: &Painter, screen: Rect, title: &Title) -> Rect {
+    let at = pos2(
+        screen.left() + screen.width() * title.x,
+        screen.top() + screen.height() * title.y,
+    );
     outlined(painter, screen, &title.text, None, title.size, |size| {
-        pos2(screen.center().x - size.x / 2.0, y - size.y / 2.0)
-    });
+        at - size / 2.0
+    })
 }
 
 /// White text with a black outline (the `lit` part of it highlighted), `size` a fraction of the picture's height, placed
-/// by `origin` from its size.
+/// by `origin` from its size. Returns the text's rectangle.
 fn outlined(
     painter: &Painter,
     screen: Rect,
@@ -48,7 +58,7 @@ fn outlined(
     lit: Option<std::ops::Range<usize>>,
     size: f32,
     origin: impl Fn(egui::Vec2) -> egui::Pos2,
-) {
+) -> Rect {
     let size = (screen.height() * size).max(8.0);
     let galley = match lit {
         Some(lit) => {
@@ -75,6 +85,7 @@ fn outlined(
         ),
     };
     let origin = origin(galley.size());
+    let bounds = Rect::from_min_size(origin, galley.size());
     let outline = (size * OUTLINE).max(1.0);
     for (dx, dy) in [
         (-1.0, -1.0),
@@ -93,6 +104,7 @@ fn outlined(
         );
     }
     painter.galley(origin, galley, Color32::WHITE);
+    bounds
 }
 
 /// The file name of the font exports hand to FFmpeg next to the ASS file.
@@ -124,16 +136,20 @@ fn ass_text(text: &str) -> String {
 /// The project's captions as an ASS subtitles file sized to its frame.
 pub fn ass(project: &Project) -> String {
     let (w, h) = (project.width as f32, project.height as f32);
-    let size = (h * SIZE * ASS_SIZE).round();
-    let side = (w * (1.0 - WIDTH) / 2.0).round();
+    let size = (h * project.caption_size * ASS_SIZE).round();
+    let side = w * (1.0 - WIDTH) / 2.0;
+    // Captions centered at `caption_x`: bottom-centered text sits midway between its side margins, so they shift.
+    let shift = ((project.caption_x - 0.5) * w).clamp(-side, side);
+    let (left, right) = ((side + shift).round(), (side - shift).round());
     let mut out = format!(
         "[Script Info]\nScriptType: v4.00+\nPlayResX: {w}\nPlayResY: {h}\nWrapStyle: 0\nScaledBorderAndShadow: yes\n\n\
          [V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n\
-         Style: Default,{font},{size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,{outline:.1},0,2,{side},{side},{bottom},1\n\
+         Style: Default,{font},{size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,{outline:.1},0,2,{left},{right},{bottom},1\n\
          Style: Title,{font},{size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,{outline:.1},0,5,{side},{side},0,1\n\n\
          [Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n",
         font = CAPTION_FONT.0,
-        outline = h * SIZE * OUTLINE,
+        side = side.round(),
+        outline = h * project.caption_size * OUTLINE,
         bottom = (h * project.caption_bottom).round(),
     );
     let line = |from: f64, to: f64, text: String| {
@@ -175,9 +191,9 @@ pub fn ass(project: &Project) -> String {
         }
     }
     for title in &project.titles {
-        // Placed and sized one by one: the middle of the text at the title's height, centered across.
+        // Placed and sized one by one: the middle of the text at the title's place.
         let (x, y, size) = (
-            (w / 2.0).round(),
+            (w * title.x).round(),
             (h * title.y).round(),
             (h * title.size * ASS_SIZE).round(),
         );
