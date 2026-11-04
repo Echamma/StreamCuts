@@ -752,22 +752,19 @@ impl FrameStream {
                 String::new()
             }
         };
-        command
-            .arg("-i")
-            .arg(path)
-            .args([
-                "-an",
-                "-vf",
-                &format!(
-                    "{trim}setpts=(PTS-STARTPTS)/{speed:.4},fps={fps},{}",
-                    picture.filter_at(width, height, from, speed)
-                ),
-                "-pix_fmt",
-                "rgba",
-                "-f",
-                "rawvideo",
-                "pipe:1",
-            ]);
+        command.arg("-i").arg(path).args([
+            "-an",
+            "-vf",
+            &format!(
+                "{trim}setpts=(PTS-STARTPTS)/{speed:.4},fps={fps},{}",
+                picture.filter_at(width, height, from, speed)
+            ),
+            "-pix_fmt",
+            "rgba",
+            "-f",
+            "rawvideo",
+            "pipe:1",
+        ]);
         let frame_bytes = (width * height * 4) as usize;
         let (ffmpeg, frames) = Background::start(command, 6, move |mut stdout, sender| {
             for index in 0.. {
@@ -973,7 +970,9 @@ mod tests {
         let length = media.loop_length().expect("an animated GIF loops");
         assert!((length - 1.0).abs() < 0.05, "loop length {length}");
         assert!(
-            media.info().starts_with("Animated picture · 80×40 · 10 fps · loops every 1.00 s"),
+            media
+                .info()
+                .starts_with("Animated picture · 80×40 · 10 fps · loops every 1.00 s"),
             "{}",
             media.info()
         );

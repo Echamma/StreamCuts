@@ -596,7 +596,8 @@ mod tests {
     /// Needs FFmpeg on PATH: an animated GIF and a GIF of one frame export, the animated one going round.
     #[test]
     fn renders_gifs_with_ffmpeg() {
-        let dir = std::env::temp_dir().join(format!("streamcuts-export-gif-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("streamcuts-export-gif-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let (animated, single) = (dir.join("animated.gif"), dir.join("single.gif"));
         for (source, path) in [
