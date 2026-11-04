@@ -10,10 +10,18 @@ use std::time::UNIX_EPOCH;
 /// Where the `kind` entry for `media` lives in `dir`; `None` when the file can't be read.
 pub fn entry(dir: &Path, media: &Path, kind: &str) -> Option<PathBuf> {
     let meta = std::fs::metadata(media).ok()?;
-    let modified = meta.modified().ok()?.duration_since(UNIX_EPOCH).ok()?.as_millis();
+    let modified = meta
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_millis();
     let mut hasher = DefaultHasher::new();
     (media, meta.len(), modified).hash(&mut hasher);
-    Some(dir.join("looks").join(format!("{:016x}.{kind}", hasher.finish())))
+    Some(
+        dir.join("looks")
+            .join(format!("{:016x}.{kind}", hasher.finish())),
+    )
 }
 
 pub fn read(entry: &Path) -> Option<Vec<u8>> {

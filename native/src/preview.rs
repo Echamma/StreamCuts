@@ -31,14 +31,34 @@ impl Playing {
     /// Plays `clip` from `path`: its media, or that media's editing proxy.
     fn start(project: &Project, clip: &Clip, path: &Path, source: f64) -> Self {
         let (width, height) = decode_size(project);
-        let stream = FrameStream::start(path, source, project.fps, width, height, clip.picture(), clip.speed);
-        Self { clip_id: clip.id.clone(), picture: clip.picture(), speed: clip.speed, stream, ahead: None, last: None, shown: source }
+        let stream = FrameStream::start(
+            path,
+            source,
+            project.fps,
+            width,
+            height,
+            clip.picture(),
+            clip.speed,
+        );
+        Self {
+            clip_id: clip.id.clone(),
+            picture: clip.picture(),
+            speed: clip.speed,
+            stream,
+            ahead: None,
+            last: None,
+            shown: source,
+        }
     }
 
     fn advance(&mut self, source: f64, half_frame: f64) -> bool {
         let mut changed = false;
         loop {
-            let frame = match self.ahead.take().or_else(|| self.stream.frames.try_recv().ok()) {
+            let frame = match self
+                .ahead
+                .take()
+                .or_else(|| self.stream.frames.try_recv().ok())
+            {
                 Some(frame) => frame,
                 None => break,
             };
@@ -87,18 +107,28 @@ pub fn decode_size(project: &Project) -> (u32, u32) {
 }
 
 impl Preview {
-    fn show(texture: &mut Option<TextureHandle>, scopes: &mut Scopes, ctx: &egui::Context, frame: &Frame) {
+    fn show(
+        texture: &mut Option<TextureHandle>,
+        scopes: &mut Scopes,
+        ctx: &egui::Context,
+        frame: &Frame,
+    ) {
         scopes.update(ctx, frame);
         let image = ColorImage::from_rgba_unmultiplied(frame.size, &frame.rgba);
         match texture {
             Some(texture) => texture.set(image, TextureOptions::LINEAR),
-            None => *texture = Some(ctx.load_texture("streamcuts-preview", image, TextureOptions::LINEAR)),
+            None => {
+                *texture =
+                    Some(ctx.load_texture("streamcuts-preview", image, TextureOptions::LINEAR))
+            }
         }
     }
 
     /// A still the worker finished.
     pub fn still_done(&mut self, ctx: &egui::Context, key: StillKey, frame: Result<Frame, String>) {
-        if self.waiting.as_ref() != Some(&key) { return; }
+        if self.waiting.as_ref() != Some(&key) {
+            return;
+        }
         self.waiting = None;
         if let Ok(frame) = frame {
             if self.playing.is_none() {
@@ -109,7 +139,14 @@ impl Preview {
     }
 
     /// Brings the preview to timeline time `t`.
-    pub fn update(&mut self, ctx: &egui::Context, project: &Project, t: f64, playing: bool, worker: &Worker) {
+    pub fn update(
+        &mut self,
+        ctx: &egui::Context,
+        project: &Project,
+        t: f64,
+        playing: bool,
+        worker: &Worker,
+    ) {
         if playing {
             self.preload(project, t);
         } else {
@@ -130,26 +167,57 @@ impl Preview {
             self.waiting = None;
             let transition = project.crossfade_at(t);
             let restart = match &self.playing {
-                Some(p) => p.clip_id != clip.id || p.picture != clip.picture() || p.speed != clip.speed || (source - p.shown).abs() > 0.75,
+                Some(p) => {
+                    p.clip_id != clip.id
+                        || p.picture != clip.picture()
+                        || p.speed != clip.speed
+                        || (source - p.shown).abs() > 0.75
+                }
                 None => true,
             };
             if restart {
-                let preloaded = self.next.take().filter(|next| next.clip_id == clip.id && next.picture == clip.picture() && next.speed == clip.speed && (source - next.shown).abs() <= 0.75);
+                let preloaded = self.next.take().filter(|next| {
+                    next.clip_id == clip.id
+                        && next.picture == clip.picture()
+                        && next.speed == clip.speed
+                        && (source - next.shown).abs() <= 0.75
+                });
                 if let Some((outgoing, _, _, _, _)) = transition {
                     self.transition = self.playing.take().filter(|p| p.clip_id == outgoing.id);
                 }
-                self.playing = Some(preloaded.unwrap_or_else(|| Playing::start(project, clip, playback_path(&self.proxies, media), source)));
+                self.playing = Some(preloaded.unwrap_or_else(|| {
+                    Playing::start(project, clip, playback_path(&self.proxies, media), source)
+                }));
             }
             let half_frame = 0.5 * clip.speed / project.fps as f64;
-            let changed = self.playing.as_mut().is_some_and(|p| p.advance(source, half_frame));
+            let changed = self
+                .playing
+                .as_mut()
+                .is_some_and(|p| p.advance(source, half_frame));
             if let Some((outgoing, outgoing_media, _, _, progress)) = transition {
                 let old_source = outgoing.source_time(t);
-                if self.transition.as_ref().is_none_or(|p| p.clip_id != outgoing.id) {
-                    self.transition = Some(Playing::start(project, outgoing, playback_path(&self.proxies, outgoing_media), old_source));
+                if self
+                    .transition
+                    .as_ref()
+                    .is_none_or(|p| p.clip_id != outgoing.id)
+                {
+                    self.transition = Some(Playing::start(
+                        project,
+                        outgoing,
+                        playback_path(&self.proxies, outgoing_media),
+                        old_source,
+                    ));
                 }
-                self.transition.as_mut().unwrap().advance(old_source, 0.5 * outgoing.speed / project.fps as f64);
-                if let (Some(old), Some(new)) = (self.transition.as_ref().and_then(|p| p.last.as_ref()), self.playing.as_ref().and_then(|p| p.last.as_ref())) {
-                    let frame = ffmpeg::crossfade_frames(old, new, progress as f32, clip.transition);
+                self.transition
+                    .as_mut()
+                    .unwrap()
+                    .advance(old_source, 0.5 * outgoing.speed / project.fps as f64);
+                if let (Some(old), Some(new)) = (
+                    self.transition.as_ref().and_then(|p| p.last.as_ref()),
+                    self.playing.as_ref().and_then(|p| p.last.as_ref()),
+                ) {
+                    let frame =
+                        ffmpeg::crossfade_frames(old, new, progress as f32, clip.transition);
                     Self::show(&mut self.texture, &mut self.scopes, ctx, &frame);
                     self.shown = None;
                 }
@@ -166,18 +234,45 @@ impl Preview {
         }
         self.playing = None;
         self.transition = None;
-        let frame_number = if media.kind == MediaKind::Image { 0 } else { (source * project.fps as f64).round() as i64 };
+        let frame_number = if media.kind == MediaKind::Image {
+            0
+        } else {
+            (source * project.fps as f64).round() as i64
+        };
         // Stills are kept by how they're shown, so changing a clip's framing or color fetches it again.
         let picture = clip.picture();
-        let blend = project.crossfade_at(t).map(|(outgoing, outgoing_media, _, _, progress)| StillBlend {
-            path: outgoing_media.path.clone(), at: outgoing.source_time(t), picture: outgoing.picture(), progress: progress as f32, transition: clip.transition,
-        });
-        let framed = if blend.is_some() { format!("{} {picture:?} {:?} {:.3}", media.id, clip.transition, t) }
-            else if picture == Picture::default() { media.id.clone() } else { format!("{} {picture:?}", media.id) };
+        let blend = project
+            .crossfade_at(t)
+            .map(|(outgoing, outgoing_media, _, _, progress)| StillBlend {
+                path: outgoing_media.path.clone(),
+                at: outgoing.source_time(t),
+                picture: outgoing.picture(),
+                progress: progress as f32,
+                transition: clip.transition,
+            });
+        let framed = if blend.is_some() {
+            format!("{} {picture:?} {:?} {:.3}", media.id, clip.transition, t)
+        } else if picture == Picture::default() {
+            media.id.clone()
+        } else {
+            format!("{} {picture:?}", media.id)
+        };
         let key: StillKey = (framed, frame_number);
         if self.shown.as_ref() != Some(&key) && self.waiting.as_ref() != Some(&key) {
-            let at = if media.kind == MediaKind::Image { 0.0 } else { frame_number as f64 / project.fps as f64 };
-            worker.send(Job::Still { key: key.clone(), path: media.path.clone(), at, width, height, picture, blend });
+            let at = if media.kind == MediaKind::Image {
+                0.0
+            } else {
+                frame_number as f64 / project.fps as f64
+            };
+            worker.send(Job::Still {
+                key: key.clone(),
+                path: media.path.clone(),
+                at,
+                width,
+                height,
+                picture,
+                blend,
+            });
             self.waiting = Some(key);
             self.asked_at = Some(Instant::now());
         }
@@ -194,26 +289,45 @@ impl Preview {
     fn preload(&mut self, project: &Project, t: f64) {
         let current = project.front_clip(t).map(|(clip, _)| clip.id.clone());
         // What's in front changes only where a video clip starts or ends.
-        let mut changes: Vec<f64> = project.tracks.iter()
+        let mut changes: Vec<f64> = project
+            .tracks
+            .iter()
             .filter(|track| track.kind == TrackKind::Video)
             .flat_map(|track| track.clips.iter().flat_map(|clip| [clip.start, clip.end()]))
             .filter(|&at| at > t && at <= t + PRELOAD)
             .collect();
         changes.sort_by(f64::total_cmp);
         let upcoming = changes.into_iter().find_map(|at| {
-            project.front_clip(at).filter(|(clip, _)| Some(&clip.id) != current.as_ref()).map(|(clip, media)| (at, clip, media))
+            project
+                .front_clip(at)
+                .filter(|(clip, _)| Some(&clip.id) != current.as_ref())
+                .map(|(clip, media)| (at, clip, media))
         });
-        let Some((at, clip, media)) = upcoming else { return };
-        if media.kind != MediaKind::Video || self.next.as_ref().is_some_and(|next| next.clip_id == clip.id) {
+        let Some((at, clip, media)) = upcoming else {
+            return;
+        };
+        if media.kind != MediaKind::Video
+            || self
+                .next
+                .as_ref()
+                .is_some_and(|next| next.clip_id == clip.id)
+        {
             return;
         }
-        self.next = Some(Playing::start(project, clip, playback_path(&self.proxies, media), clip.source_time(at)));
+        self.next = Some(Playing::start(
+            project,
+            clip,
+            playback_path(&self.proxies, media),
+            clip.source_time(at),
+        ));
     }
 
     /// Whether a still has been on its way for a while (the picture shown is from somewhere else). Quick stills don't
     /// count, so a fast FFmpeg doesn't flicker between a stand-in and the real picture.
     pub fn waiting(&self) -> bool {
-        self.waiting.is_some() && self.playing.is_none() && self.asked_at.is_some_and(|at| at.elapsed() > SLOW_STILL)
+        self.waiting.is_some()
+            && self.playing.is_none()
+            && self.asked_at.is_some_and(|at| at.elapsed() > SLOW_STILL)
     }
 
     /// Forgets the picture so the next update fetches it again (after the project's shape changes).
@@ -236,7 +350,11 @@ pub struct Clock {
 
 impl Default for Clock {
     fn default() -> Self {
-        Self { playing: false, from: 0.0, since: Instant::now() }
+        Self {
+            playing: false,
+            from: 0.0,
+            since: Instant::now(),
+        }
     }
 }
 
@@ -261,8 +379,15 @@ mod tests {
     #[test]
     fn an_old_still_cannot_replace_the_requested_frame() {
         let ctx = egui::Context::default();
-        let mut preview = Preview { waiting: Some(("clip".into(), 12)), ..Default::default() };
-        let frame = || Frame { time: 0.0, size: [1, 1], rgba: vec![0, 0, 0, 255] };
+        let mut preview = Preview {
+            waiting: Some(("clip".into(), 12)),
+            ..Default::default()
+        };
+        let frame = || Frame {
+            time: 0.0,
+            size: [1, 1],
+            rgba: vec![0, 0, 0, 255],
+        };
         preview.still_done(&ctx, ("clip".into(), 11), Ok(frame()));
         assert_eq!(preview.waiting, Some(("clip".into(), 12)));
         assert!(preview.texture.is_none());

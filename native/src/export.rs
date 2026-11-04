@@ -27,7 +27,14 @@ pub struct Preset {
 impl Preset {
     /// The web StreamCuts' platform presets.
     pub fn built_in() -> Vec<Preset> {
-        let preset = |name: &str, width, height, fps| Preset { name: name.into(), width, height, fps, format: ExportFormat::Mp4, even_loudness: true };
+        let preset = |name: &str, width, height, fps| Preset {
+            name: name.into(),
+            width,
+            height,
+            fps,
+            format: ExportFormat::Mp4,
+            even_loudness: true,
+        };
         vec![
             preset("TikTok", 1080, 1920, 30),
             preset("Instagram Reels", 1080, 1920, 30),
@@ -41,34 +48,73 @@ impl Preset {
 
     /// The project's own settings, under `name`.
     pub fn of(project: &Project, name: &str) -> Preset {
-        let (width, height, fps, format, even_loudness) = (project.width, project.height, project.fps, project.export_format, project.even_loudness);
-        Preset { name: name.trim().into(), width, height, fps, format, even_loudness }
+        let (width, height, fps, format, even_loudness) = (
+            project.width,
+            project.height,
+            project.fps,
+            project.export_format,
+            project.even_loudness,
+        );
+        Preset {
+            name: name.trim().into(),
+            width,
+            height,
+            fps,
+            format,
+            even_loudness,
+        }
     }
 
     /// The project as this preset renders it.
     pub fn apply(&self, project: &Project) -> Project {
         let mut out = project.clone();
-        (out.width, out.height, out.fps, out.export_format, out.even_loudness) = (self.width, self.height, self.fps, self.format, self.even_loudness);
+        (
+            out.width,
+            out.height,
+            out.fps,
+            out.export_format,
+            out.even_loudness,
+        ) = (
+            self.width,
+            self.height,
+            self.fps,
+            self.format,
+            self.even_loudness,
+        );
         out
     }
 
     pub fn describe(&self) -> String {
-        let sound = if self.even_loudness && self.format != ExportFormat::Audio { " · even loudness" } else { "" };
+        let sound = if self.even_loudness && self.format != ExportFormat::Audio {
+            " · even loudness"
+        } else {
+            ""
+        };
         match self.format {
             ExportFormat::Audio => format!("{}{sound}", self.format.label()),
-            _ => format!("{}×{} · {} fps · {}{sound}", self.width, self.height, self.fps, self.format.label()),
+            _ => format!(
+                "{}×{} · {} fps · {}{sound}",
+                self.width,
+                self.height,
+                self.fps,
+                self.format.label()
+            ),
         }
     }
 
     /// Your saved presets, from `dir` (none when there are none yet).
     pub fn load(dir: &Path) -> Vec<Preset> {
-        std::fs::read(dir.join(PRESETS)).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default()
+        std::fs::read(dir.join(PRESETS))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
     }
 
     pub fn save(dir: &Path, presets: &[Preset]) -> Result<(), String> {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         let json = serde_json::to_vec_pretty(presets).map_err(|e| e.to_string())?;
-        std::fs::write(dir.join(PRESETS), json).map_err(|e| format!("Couldn't save the preset ({e})."))
+        std::fs::write(dir.join(PRESETS), json)
+            .map_err(|e| format!("Couldn't save the preset ({e})."))
     }
 }
 
@@ -93,7 +139,12 @@ pub enum Status {
 
 impl Queued {
     pub fn new(project: &Project, preset: &Preset) -> Self {
-        Queued { id: new_id(), name: format!("{} - {}", project.name, preset.name), project: preset.apply(project), status: Status::Waiting }
+        Queued {
+            id: new_id(),
+            name: format!("{} - {}", project.name, preset.name),
+            project: preset.apply(project),
+            status: Status::Waiting,
+        }
     }
 }
 
@@ -107,71 +158,150 @@ pub fn arguments(project: &Project, output: &Path) -> Result<Vec<String>, String
         return Err("Add something to the timeline first.".into());
     }
     let (w, h, fps) = (project.width, project.height, project.fps);
-    let mut args: Vec<String> = ["-v", "error", "-y"].iter().map(|s| s.to_string()).collect();
-    let mut filters: Vec<String> = vec![format!("color=c=black:s={w}x{h}:r={fps}:d={total:.3}[base0]")];
+    let mut args: Vec<String> = ["-v", "error", "-y"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let mut filters: Vec<String> = vec![format!(
+        "color=c=black:s={w}x{h}:r={fps}:d={total:.3}[base0]"
+    )];
     let mut audio_labels = Vec::new();
     let mut input = 0;
     let mut base = 0;
     // Bottom video track first, so tracks higher up end up in front.
-    let video_tracks: Vec<_> = project.tracks.iter().filter(|t| t.kind == TrackKind::Video).rev().collect();
-    let audio_tracks: Vec<_> = project.tracks.iter().filter(|t| t.kind == TrackKind::Audio).collect();
+    let video_tracks: Vec<_> = project
+        .tracks
+        .iter()
+        .filter(|t| t.kind == TrackKind::Video)
+        .rev()
+        .collect();
+    let audio_tracks: Vec<_> = project
+        .tracks
+        .iter()
+        .filter(|t| t.kind == TrackKind::Audio)
+        .collect();
     for track in video_tracks.iter().chain(audio_tracks.iter()) {
         for clip in &track.clips {
-            let Some(media) = project.media(&clip.media_id) else { continue };
+            let Some(media) = project.media(&clip.media_id) else {
+                continue;
+            };
             let crossfade_out = project.crossfade_after(&clip.id);
             let crossfade_in = project.crossfade_before(&clip.id).map_or(0.0, |(_, d)| d);
             if media.kind == MediaKind::Image {
-                args.extend(["-loop".into(), "1".into(), "-t".into(), format!("{:.3}", clip.duration + crossfade_out)]);
+                args.extend([
+                    "-loop".into(),
+                    "1".into(),
+                    "-t".into(),
+                    format!("{:.3}", clip.duration + crossfade_out),
+                ]);
             } else {
-                args.extend(["-ss".into(), format!("{:.3}", clip.source_in), "-t".into(), format!("{:.3}", (clip.duration + crossfade_out) * clip.speed)]);
+                args.extend([
+                    "-ss".into(),
+                    format!("{:.3}", clip.source_in),
+                    "-t".into(),
+                    format!("{:.3}", (clip.duration + crossfade_out) * clip.speed),
+                ]);
             }
             args.extend(["-i".into(), media.path.to_string_lossy().into_owned()]);
-            let shows = track.kind == TrackKind::Video && !track.hidden && media.kind != MediaKind::Audio;
+            let shows =
+                track.kind == TrackKind::Video && !track.hidden && media.kind != MediaKind::Audio;
             if shows {
                 // Fades work on the picture's alpha, so a clip fades to whatever is below it (black when nothing is).
-                let pace = if (clip.speed - 1.0).abs() < 1e-6 { "PTS-STARTPTS".to_string() } else { format!("(PTS-STARTPTS)/{:.4}", clip.speed) };
-                let mut chain = format!("[{input}:v]{},fps={fps},format=yuva420p,setpts={pace}", clip.picture().filter_at(w, h, clip.source_in, 1.0));
+                let pace = if (clip.speed - 1.0).abs() < 1e-6 {
+                    "PTS-STARTPTS".to_string()
+                } else {
+                    format!("(PTS-STARTPTS)/{:.4}", clip.speed)
+                };
+                let mut chain = format!(
+                    "[{input}:v]{},fps={fps},format=yuva420p,setpts={pace}",
+                    clip.picture().filter_at(w, h, clip.source_in, 1.0)
+                );
                 // A blur-through mixes each side towards a blurred copy of itself across the crossfade (`K`, 0 sharp to
                 // 1 blurred, by the clip's own time T): the outgoing clip on its way out, the incoming one in reverse.
                 let blur = |chain: &mut String, side: &str, k: String| {
                     let sigma = crate::project::BLUR_THROUGH * h as f32;
                     chain.push_str(&format!(",split[s{input}{side}][b{input}{side}];[b{input}{side}]gblur=sigma={sigma:.2}:steps=3[g{input}{side}];[s{input}{side}][g{input}{side}]blend=all_expr='A*(1-{k})+B*{k}'"));
                 };
-                if crossfade_out > 0.0 && project.transition_after(&clip.id) == Some(crate::project::Transition::BlurThrough) {
-                    blur(&mut chain, "out", format!("clip((T-{:.3})/{crossfade_out:.3},0,1)", clip.duration));
+                if crossfade_out > 0.0
+                    && project.transition_after(&clip.id)
+                        == Some(crate::project::Transition::BlurThrough)
+                {
+                    blur(
+                        &mut chain,
+                        "out",
+                        format!("clip((T-{:.3})/{crossfade_out:.3},0,1)", clip.duration),
+                    );
                 }
-                if crossfade_in > 0.0 && clip.transition == crate::project::Transition::BlurThrough {
-                    blur(&mut chain, "in", format!("(1-clip(T/{crossfade_in:.3},0,1))"));
+                if crossfade_in > 0.0 && clip.transition == crate::project::Transition::BlurThrough
+                {
+                    blur(
+                        &mut chain,
+                        "in",
+                        format!("(1-clip(T/{crossfade_in:.3},0,1))"),
+                    );
                 }
-                let fade_in = if crossfade_in > 0.0 { crossfade_in } else { clip.fade_in };
+                let fade_in = if crossfade_in > 0.0 {
+                    crossfade_in
+                } else {
+                    clip.fade_in
+                };
                 if fade_in > 0.0 {
                     chain.push_str(&format!(",fade=t=in:st=0:d={fade_in:.3}:alpha=1"));
                 }
                 if clip.fade_out > 0.0 && crossfade_out == 0.0 {
-                    chain.push_str(&format!(",fade=t=out:st={:.3}:d={:.3}:alpha=1", (clip.duration - clip.fade_out).max(0.0), clip.fade_out));
+                    chain.push_str(&format!(
+                        ",fade=t=out:st={:.3}:d={:.3}:alpha=1",
+                        (clip.duration - clip.fade_out).max(0.0),
+                        clip.fade_out
+                    ));
                 }
-                filters.push(format!("{chain},setpts=PTS+{start:.3}/TB[v{input}]", start = clip.start));
-                filters.push(format!("[base{base}][v{input}]overlay=eof_action=pass[base{}]", base + 1));
+                filters.push(format!(
+                    "{chain},setpts=PTS+{start:.3}/TB[v{input}]",
+                    start = clip.start
+                ));
+                filters.push(format!(
+                    "[base{base}][v{input}]overlay=eof_action=pass[base{}]",
+                    base + 1
+                ));
                 base += 1;
             }
             let hidden_video = track.kind == TrackKind::Video && track.hidden;
-            if media.has_audio && !track.muted && !hidden_video && clip.volume > 0.0 && !project.sounds_elsewhere(clip) {
+            if media.has_audio
+                && !track.muted
+                && !hidden_video
+                && clip.volume > 0.0
+                && !project.sounds_elsewhere(clip)
+            {
                 let delay = (clip.start * 1000.0).round() as u64;
-                let mut chain = format!("[{input}:a]asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo,volume={:.3}", clip.volume);
+                let mut chain = format!(
+                    "[{input}:a]asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo,volume={:.3}",
+                    clip.volume
+                );
                 if let Some(sound) = clip.sound.filter() {
                     chain.push_str(&format!(",{sound}"));
                 }
                 if let Some(tempo) = crate::ffmpeg::atempo(clip.speed) {
                     chain.push_str(&format!(",{tempo}"));
                 }
-                let fade_in = if crossfade_in > 0.0 { crossfade_in } else { clip.fade_in };
+                let fade_in = if crossfade_in > 0.0 {
+                    crossfade_in
+                } else {
+                    clip.fade_in
+                };
                 if fade_in > 0.0 {
                     chain.push_str(&format!(",afade=t=in:st=0:d={fade_in:.3}"));
                 }
                 if crossfade_out > 0.0 {
-                    chain.push_str(&format!(",afade=t=out:st={:.3}:d={crossfade_out:.3}", clip.duration));
+                    chain.push_str(&format!(
+                        ",afade=t=out:st={:.3}:d={crossfade_out:.3}",
+                        clip.duration
+                    ));
                 } else if clip.fade_out > 0.0 {
-                    chain.push_str(&format!(",afade=t=out:st={:.3}:d={:.3}", (clip.duration - clip.fade_out).max(0.0), clip.fade_out));
+                    chain.push_str(&format!(
+                        ",afade=t=out:st={:.3}:d={:.3}",
+                        (clip.duration - clip.fade_out).max(0.0),
+                        clip.fade_out
+                    ));
                 }
                 filters.push(format!("{chain},adelay={delay}|{delay}[a{input}]"));
                 audio_labels.push(format!("[a{input}]"));
@@ -179,10 +309,18 @@ pub fn arguments(project: &Project, output: &Path) -> Result<Vec<String>, String
             input += 1;
         }
     }
-    let captions = if project.has_text() { format!("subtitles={CAPTIONS}:fontsdir=.,") } else { String::new() };
+    let captions = if project.has_text() {
+        format!("subtitles={CAPTIONS}:fontsdir=.,")
+    } else {
+        String::new()
+    };
     filters.push(format!("[base{base}]{captions}format=yuv420p[vout]"));
     if !audio_labels.is_empty() {
-        let mix = format!("{}amix=inputs={}:normalize=0:duration=longest", audio_labels.join(""), audio_labels.len());
+        let mix = format!(
+            "{}amix=inputs={}:normalize=0:duration=longest",
+            audio_labels.join(""),
+            audio_labels.len()
+        );
         if project.even_loudness {
             // One pass of loudnorm to -14 LUFS (what social apps play at); it works at 192 kHz, so come back to 48.
             filters.push(format!("{mix}[mixed]"));
@@ -212,10 +350,39 @@ pub fn arguments(project: &Project, output: &Path) -> Result<Vec<String>, String
         args.extend(sound.iter().map(|s| s.to_string()));
     }
     let picture: &[&str] = match format {
-        ExportFormat::Mp4 => &["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", "-movflags", "+faststart"],
+        ExportFormat::Mp4 => &[
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "20",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+        ],
         // ProRes 422 HQ, 10-bit.
-        ExportFormat::Prores => &["-c:v", "prores_ks", "-profile:v", "3", "-pix_fmt", "yuv422p10le"],
-        ExportFormat::Av1 => &["-c:v", "libsvtav1", "-preset", "8", "-crf", "32", "-pix_fmt", "yuv420p", "-movflags", "+faststart"],
+        ExportFormat::Prores => &[
+            "-c:v",
+            "prores_ks",
+            "-profile:v",
+            "3",
+            "-pix_fmt",
+            "yuv422p10le",
+        ],
+        ExportFormat::Av1 => &[
+            "-c:v",
+            "libsvtav1",
+            "-preset",
+            "8",
+            "-crf",
+            "32",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+        ],
         ExportFormat::Audio => &[],
     };
     args.extend(picture.iter().map(|s| s.to_string()));
@@ -253,11 +420,16 @@ pub fn start(project: &Project, output: &Path, ctx: egui::Context) -> Result<Exp
         Some(folder)
     };
     let mut ffmpeg_run = command(&ffmpeg());
-    ffmpeg_run.args(&args).stdout(Stdio::piped()).stderr(Stdio::piped());
+    ffmpeg_run
+        .args(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     if let Some(folder) = &folder {
         ffmpeg_run.current_dir(folder);
     }
-    let mut child = ffmpeg_run.spawn().map_err(|e| format!("FFmpeg couldn't start ({e})."))?;
+    let mut child = ffmpeg_run
+        .spawn()
+        .map_err(|e| format!("FFmpeg couldn't start ({e})."))?;
     let (progress_out, cancel_in) = (progress.clone(), cancel.clone());
     let output = output.to_path_buf();
     std::thread::spawn(move || {
@@ -273,8 +445,14 @@ pub fn start(project: &Project, output: &Path, ctx: egui::Context) -> Result<Exp
                 let _ = child.kill();
                 break;
             }
-            if let Some(us) = line.strip_prefix("out_time_us=").and_then(|v| v.trim().parse::<f64>().ok()) {
-                progress_out.store(((us / 1e6 / total) * 1000.0).clamp(0.0, 1000.0) as u32, Ordering::Relaxed);
+            if let Some(us) = line
+                .strip_prefix("out_time_us=")
+                .and_then(|v| v.trim().parse::<f64>().ok())
+            {
+                progress_out.store(
+                    ((us / 1e6 / total) * 1000.0).clamp(0.0, 1000.0) as u32,
+                    Ordering::Relaxed,
+                );
                 ctx.request_repaint();
             }
         }
@@ -286,7 +464,10 @@ pub fn start(project: &Project, output: &Path, ctx: egui::Context) -> Result<Exp
         } else {
             match status {
                 Ok(s) if s.success() => Ok(()),
-                _ => Err(format!("Export failed: {}", errors.lines().last().unwrap_or("FFmpeg stopped"))),
+                _ => Err(format!(
+                    "Export failed: {}",
+                    errors.lines().last().unwrap_or("FFmpeg stopped")
+                )),
             }
         };
         if let Some(folder) = folder {
@@ -295,7 +476,11 @@ pub fn start(project: &Project, output: &Path, ctx: egui::Context) -> Result<Exp
         let _ = send.send(outcome);
         ctx.request_repaint();
     });
-    Ok(Export { progress, cancel, result })
+    Ok(Export {
+        progress,
+        cancel,
+        result,
+    })
 }
 
 #[cfg(test)]
@@ -305,7 +490,18 @@ mod tests {
     use std::path::PathBuf;
 
     fn media(kind: MediaKind, duration: f64, has_audio: bool) -> Media {
-        Media { id: new_id(), path: PathBuf::from(format!("C:/m/{}.mp4", new_id())), name: "m".into(), kind, duration, width: 1280, height: 720, has_audio, frame_rate: 30.0, attributes: Default::default() }
+        Media {
+            id: new_id(),
+            path: PathBuf::from(format!("C:/m/{}.mp4", new_id())),
+            name: "m".into(),
+            kind,
+            duration,
+            width: 1280,
+            height: 720,
+            has_audio,
+            frame_rate: 30.0,
+            attributes: Default::default(),
+        }
     }
 
     #[test]
@@ -327,13 +523,22 @@ mod tests {
         let args = arguments(&project, Path::new("C:/out/cut.mp4")).unwrap();
         let joined = args.join(" ");
         assert_eq!(args.iter().filter(|a| *a == "-i").count(), 3);
-        assert!(joined.contains("-ss 2.000 -t 8.000 -i"), "the trimmed clip seeks into its source: {joined}");
-        assert!(joined.contains("-loop 1 -t 5.000 -i"), "stills loop for their length");
+        assert!(
+            joined.contains("-ss 2.000 -t 8.000 -i"),
+            "the trimmed clip seeks into its source: {joined}"
+        );
+        assert!(
+            joined.contains("-loop 1 -t 5.000 -i"),
+            "stills loop for their length"
+        );
         let graph = &args[args.iter().position(|a| a == "-filter_complex").unwrap() + 1];
         assert!(graph.starts_with("color=c=black:s=1920x1080:r=30:d=30.000[base0]"));
         let video_at = graph.find("setpts=PTS+2.000/TB").unwrap();
         let still_at = graph.find("setpts=PTS+3.000/TB").unwrap();
-        assert!(video_at < still_at, "the lower track is laid down before the upper one");
+        assert!(
+            video_at < still_at,
+            "the lower track is laid down before the upper one"
+        );
         assert!(graph.contains("adelay=2000|2000"));
         assert!(graph.contains("amix=inputs=2:normalize=0:duration=longest[aout]"));
         project.even_loudness = true;
@@ -350,17 +555,64 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let clip = dir.join("clip.mp4");
         let still = dir.join("still.png");
-        assert!(command(&ffmpeg()).args(["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=30:duration=2", "-f", "lavfi", "-i", "sine=duration=2", "-shortest", "-pix_fmt", "yuv420p"]).arg(&clip).status().unwrap().success());
-        assert!(command(&ffmpeg()).args(["-v", "error", "-y", "-f", "lavfi", "-i", "color=c=orange:s=64x64", "-frames:v", "1"]).arg(&still).status().unwrap().success());
+        assert!(
+            command(&ffmpeg())
+                .args([
+                    "-v",
+                    "error",
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc2=size=320x180:rate=30:duration=2",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=duration=2",
+                    "-shortest",
+                    "-pix_fmt",
+                    "yuv420p"
+                ])
+                .arg(&clip)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            command(&ffmpeg())
+                .args([
+                    "-v",
+                    "error",
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=c=orange:s=64x64",
+                    "-frames:v",
+                    "1"
+                ])
+                .arg(&still)
+                .status()
+                .unwrap()
+                .success()
+        );
         let mut project = Project::new("Render");
         project.width = 320;
         project.height = 180;
         let video = project.add_media(crate::ffmpeg::probe(&clip).unwrap());
         let picture = project.add_media(crate::ffmpeg::probe(&still).unwrap());
         let first = project.place(&video, None, 0.0).unwrap();
-        (project.clip_mut(&first).unwrap().fade_in, project.clip_mut(&first).unwrap().fade_out) = (0.5, 0.5);
+        (
+            project.clip_mut(&first).unwrap().fade_in,
+            project.clip_mut(&first).unwrap().fade_out,
+        ) = (0.5, 0.5);
         // Its sound shaped and its color graded on the wheels: FFmpeg has to take those filters in the graph too.
-        project.clip_mut(&first).unwrap().sound = crate::project::Sound { pan: -0.5, low: 4.0, mid: -2.0, high: 3.0 };
+        project.clip_mut(&first).unwrap().sound = crate::project::Sound {
+            pan: -0.5,
+            low: 4.0,
+            mid: -2.0,
+            high: 3.0,
+        };
         project.clip_mut(&first).unwrap().grade.wheels.gain.r = 0.2;
         // Twice as fast: the 2-second clip covers 1 second, and FFmpeg has to take setpts and atempo.
         project.set_speed(&first, 2.0);
@@ -368,14 +620,30 @@ mod tests {
         let still_clip = project.place(&picture, Some(upper), 1.0).unwrap();
         project.trim_end(&still_clip, 2.5);
         project.even_loudness = true;
-        let caption = crate::project::Caption { id: new_id(), start: 0.2, end: 2.0, text: "Burned in".into(), words: Vec::new(), clip: None };
+        let caption = crate::project::Caption {
+            id: new_id(),
+            start: 0.2,
+            end: 2.0,
+            text: "Burned in".into(),
+            words: Vec::new(),
+            clip: None,
+        };
         project.add_captions(0.0, 2.5, vec![caption]);
-        assert!(arguments(&project, Path::new("o.mp4")).unwrap().iter().any(|a| a.contains("subtitles=captions.ass:fontsdir=.,format=yuv420p[vout]")));
+        assert!(
+            arguments(&project, Path::new("o.mp4"))
+                .unwrap()
+                .iter()
+                .any(|a| a.contains("subtitles=captions.ass:fontsdir=.,format=yuv420p[vout]"))
+        );
         let output = dir.join("out.mp4");
         let run = start(&project, &output, egui::Context::default()).unwrap();
         assert_eq!(run.result.recv().unwrap(), Ok(()));
         let rendered = crate::ffmpeg::probe(&output).unwrap();
-        assert!((rendered.duration - 2.5).abs() < 0.15, "rendered {}", rendered.duration);
+        assert!(
+            (rendered.duration - 2.5).abs() < 0.15,
+            "rendered {}",
+            rendered.duration
+        );
         assert!(rendered.has_audio && rendered.width == 320);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -384,11 +652,28 @@ mod tests {
     fn presets_render_the_project_their_way() {
         let mut project = Project::new("Stream");
         project.even_loudness = false;
-        let shorts = Preset::built_in().into_iter().find(|p| p.name == "YouTube Shorts").unwrap();
+        let shorts = Preset::built_in()
+            .into_iter()
+            .find(|p| p.name == "YouTube Shorts")
+            .unwrap();
         let queued = Queued::new(&project, &shorts);
-        assert_eq!((queued.project.width, queued.project.height, queued.project.fps, queued.project.even_loudness), (1080, 1920, 60, true));
-        assert_eq!((queued.name.as_str(), &queued.status), ("Stream - YouTube Shorts", &Status::Waiting));
-        assert_eq!(shorts.describe(), "1080×1920 · 60 fps · MP4 (H.264) · even loudness");
+        assert_eq!(
+            (
+                queued.project.width,
+                queued.project.height,
+                queued.project.fps,
+                queued.project.even_loudness
+            ),
+            (1080, 1920, 60, true)
+        );
+        assert_eq!(
+            (queued.name.as_str(), &queued.status),
+            ("Stream - YouTube Shorts", &Status::Waiting)
+        );
+        assert_eq!(
+            shorts.describe(),
+            "1080×1920 · 60 fps · MP4 (H.264) · even loudness"
+        );
         // Your own presets keep across runs.
         let dir = std::env::temp_dir().join(format!("streamcuts-presets-{}", new_id()));
         assert!(Preset::load(&dir).is_empty());
@@ -411,11 +696,21 @@ mod tests {
         project.set_speed(&id, 2.0);
         let args = arguments(&project, Path::new("o.mp4")).unwrap();
         let graph = &args[args.iter().position(|a| a == "-filter_complex").unwrap() + 1];
-        assert!(graph.contains("force_original_aspect_ratio=increase,crop=1080:1920:(iw-ow)*0.250:(ih-oh)*0.500"), "{graph}");
+        assert!(
+            graph.contains(
+                "force_original_aspect_ratio=increase,crop=1080:1920:(iw-ow)*0.250:(ih-oh)*0.500"
+            ),
+            "{graph}"
+        );
         assert!(graph.contains("crop=1080:1920:(iw-ow)*0.250:(ih-oh)*0.500,eq=brightness=0.000:contrast=1.000:saturation=1.500,fps="));
         assert!(graph.contains("setpts=(PTS-STARTPTS)/2.0000,fade=t=in:st=0:d=0.500:alpha=1,fade=t=out:st=4.000:d=1.000:alpha=1"), "{graph}");
-        assert!(graph.contains("atempo=2.0000,afade=t=in:st=0:d=0.500,afade=t=out:st=4.000:d=1.000,adelay=0|0"));
-        assert!(args.join(" ").contains("-ss 0.000 -t 10.000 -i"), "the whole source still goes in");
+        assert!(graph.contains(
+            "atempo=2.0000,afade=t=in:st=0:d=0.500,afade=t=out:st=4.000:d=1.000,adelay=0|0"
+        ));
+        assert!(
+            args.join(" ").contains("-ss 0.000 -t 10.000 -i"),
+            "the whole source still goes in"
+        );
     }
 
     #[test]
@@ -434,19 +729,65 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("streamcuts-formats-{}", new_id()));
         std::fs::create_dir_all(&dir).unwrap();
         let source = dir.join("tone.mp4");
-        assert!(command(&ffmpeg()).args(["-v", "error", "-y", "-f", "lavfi", "-i", "color=c=red:s=64x64:r=30:d=1", "-f", "lavfi", "-i", "sine=frequency=440:duration=1", "-shortest", "-pix_fmt", "yuv420p", "-c:a", "aac"]).arg(&source).status().unwrap().success());
+        assert!(
+            command(&ffmpeg())
+                .args([
+                    "-v",
+                    "error",
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=c=red:s=64x64:r=30:d=1",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=440:duration=1",
+                    "-shortest",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-c:a",
+                    "aac"
+                ])
+                .arg(&source)
+                .status()
+                .unwrap()
+                .success()
+        );
         let mut project = Project::new("Formats");
         (project.width, project.height) = (64, 64);
         let id = project.add_media(crate::ffmpeg::probe(&source).unwrap());
         project.place(&id, None, 0.0).unwrap();
-        for (format, video, audio) in [(ExportFormat::Prores, Some("prores"), "pcm_s16le"), (ExportFormat::Av1, Some("av1"), "aac"), (ExportFormat::Audio, None, "pcm_s16le")] {
+        for (format, video, audio) in [
+            (ExportFormat::Prores, Some("prores"), "pcm_s16le"),
+            (ExportFormat::Av1, Some("av1"), "aac"),
+            (ExportFormat::Audio, None, "pcm_s16le"),
+        ] {
             project.export_format = format;
             let output = dir.join(format!("out.{}", format.extension()));
             let run = start(&project, &output, egui::Context::default()).unwrap();
             assert_eq!(run.result.recv().unwrap(), Ok(()), "{format:?}");
-            let probe = command(&crate::ffmpeg::ffprobe()).args(["-v", "error", "-show_entries", "stream=codec_name", "-of", "csv=p=0"]).arg(&output).output().unwrap();
-            let codecs = String::from_utf8_lossy(&probe.stdout).split_whitespace().map(str::to_owned).collect::<Vec<_>>();
-            let expected: Vec<String> = video.into_iter().chain([audio]).map(str::to_owned).collect();
+            let probe = command(&crate::ffmpeg::ffprobe())
+                .args([
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "stream=codec_name",
+                    "-of",
+                    "csv=p=0",
+                ])
+                .arg(&output)
+                .output()
+                .unwrap();
+            let codecs = String::from_utf8_lossy(&probe.stdout)
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            let expected: Vec<String> = video
+                .into_iter()
+                .chain([audio])
+                .map(str::to_owned)
+                .collect();
             assert_eq!(codecs, expected, "{format:?}");
         }
         std::fs::remove_dir_all(dir).unwrap();
@@ -459,7 +800,24 @@ mod tests {
         let red = dir.join("red.mp4");
         let blue = dir.join("blue.mp4");
         for (path, color, duration) in [(&red, "red", "3"), (&blue, "blue", "2")] {
-            assert!(command(&ffmpeg()).args(["-v", "error", "-y", "-f", "lavfi", "-i", &format!("color=c={color}:s=64x64:r=30:d={duration}"), "-pix_fmt", "yuv420p"]).arg(path).status().unwrap().success());
+            assert!(
+                command(&ffmpeg())
+                    .args([
+                        "-v",
+                        "error",
+                        "-y",
+                        "-f",
+                        "lavfi",
+                        "-i",
+                        &format!("color=c={color}:s=64x64:r=30:d={duration}"),
+                        "-pix_fmt",
+                        "yuv420p"
+                    ])
+                    .arg(path)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
         }
         let mut project = Project::new("Blend");
         project.width = 64;
@@ -473,19 +831,31 @@ mod tests {
         let output = dir.join("blend.mp4");
         let run = start(&project, &output, egui::Context::default()).unwrap();
         assert_eq!(run.result.recv().unwrap(), Ok(()));
-        let frame = crate::ffmpeg::still(&output, 2.5, 64, 64, crate::project::Picture::default()).unwrap();
+        let frame =
+            crate::ffmpeg::still(&output, 2.5, 64, 64, crate::project::Picture::default()).unwrap();
         let pixel = &frame.rgba[4 * (32 * 64 + 32)..][..4];
-        assert!(pixel[0] > 45 && pixel[2] > 45, "both colors should be visible: {pixel:?}");
+        assert!(
+            pixel[0] > 45 && pixel[2] > 45,
+            "both colors should be visible: {pixel:?}"
+        );
         // The same as a blur-through: FFmpeg takes the blurs in the graph, and the plain colors still blend.
         project.clip_mut(&incoming).unwrap().transition = crate::project::Transition::BlurThrough;
         let args = arguments(&project, Path::new("o.mp4")).unwrap();
         let graph = &args[args.iter().position(|a| a == "-filter_complex").unwrap() + 1];
-        assert_eq!(graph.matches("gblur=sigma=1.28:steps=3").count(), 2, "{graph}");
+        assert_eq!(
+            graph.matches("gblur=sigma=1.28:steps=3").count(),
+            2,
+            "{graph}"
+        );
         let run = start(&project, &output, egui::Context::default()).unwrap();
         assert_eq!(run.result.recv().unwrap(), Ok(()));
-        let frame = crate::ffmpeg::still(&output, 2.5, 64, 64, crate::project::Picture::default()).unwrap();
+        let frame =
+            crate::ffmpeg::still(&output, 2.5, 64, 64, crate::project::Picture::default()).unwrap();
         let pixel = &frame.rgba[4 * (32 * 64 + 32)..][..4];
-        assert!(pixel[0] > 45 && pixel[2] > 45, "both colors should be visible through the blur: {pixel:?}");
+        assert!(
+            pixel[0] > 45 && pixel[2] > 45,
+            "both colors should be visible through the blur: {pixel:?}"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -42,21 +42,36 @@ struct SpokenWord {
 
 /// `STREAMCUTS_TRANSCRIBE`, else the script in the StreamCuts checkout this binary was built in or ships with.
 pub fn script() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("STREAMCUTS_TRANSCRIBE").map(PathBuf::from).filter(|p| p.is_file()) {
+    if let Some(path) = std::env::var_os("STREAMCUTS_TRANSCRIBE")
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+    {
         return Some(path);
     }
     let exe = std::env::current_exe().ok()?;
-    exe.ancestors().skip(1).map(|dir| dir.join(SCRIPT)).find(|path| path.is_file())
+    exe.ancestors()
+        .skip(1)
+        .map(|dir| dir.join(SCRIPT))
+        .find(|path| path.is_file())
 }
 
 /// `STREAMCUTS_PYTHON`, else `python` on PATH.
 pub fn python() -> PathBuf {
-    std::env::var_os("STREAMCUTS_PYTHON").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("python"))
+    std::env::var_os("STREAMCUTS_PYTHON")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("python"))
 }
 
 /// Captions for `length` seconds of `media` from source time `from`, played at `speed` on the timeline from `at`.
 /// Blocking and slow (the speech model loads first): run it on a thread of its own.
-pub fn captions(clip: &str, media: &Path, from: f64, length: f64, speed: f64, at: f64) -> Result<Vec<Caption>, String> {
+pub fn captions(
+    clip: &str,
+    media: &Path,
+    from: f64,
+    length: f64,
+    speed: f64,
+    at: f64,
+) -> Result<Vec<Caption>, String> {
     let script = script().ok_or("Captions need StreamCuts' transcription script (set STREAMCUTS_TRANSCRIBE to transcribe.py).")?;
     let dir = std::env::temp_dir().join(format!("streamcuts-captions-{}", new_id()));
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -71,20 +86,25 @@ pub fn captions(clip: &str, media: &Path, from: f64, length: f64, speed: f64, at
 
 /// Transcribes a full source in ten-minute pieces, keeping timestamps absolute. Run off the UI thread.
 pub fn source_transcript(media: &Path, duration: f64) -> Result<Vec<SourceSegment>, String> {
-    let script = script().ok_or("Boss AI needs StreamCuts' transcription script (set STREAMCUTS_TRANSCRIBE).")?;
+    let script = script()
+        .ok_or("Boss AI needs StreamCuts' transcription script (set STREAMCUTS_TRANSCRIBE).")?;
     let dir = std::env::temp_dir().join(format!("streamcuts-boss-{}", new_id()));
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let result = (|| {
         let mut segments = Vec::new();
         for (from, length) in chunks(duration) {
             let transcript = transcribe_in(&dir, &script, media, from, length)?;
-            segments.extend(transcript.segments.into_iter()
-                .filter(|segment| !segment.text.trim().is_empty())
-                .map(|segment| SourceSegment {
-                    start: from + segment.start.clamp(0.0, length),
-                    end: from + segment.end.clamp(0.0, length),
-                    text: segment.text.trim().to_owned(),
-                }));
+            segments.extend(
+                transcript
+                    .segments
+                    .into_iter()
+                    .filter(|segment| !segment.text.trim().is_empty())
+                    .map(|segment| SourceSegment {
+                        start: from + segment.start.clamp(0.0, length),
+                        end: from + segment.end.clamp(0.0, length),
+                        text: segment.text.trim().to_owned(),
+                    }),
+            );
         }
         Ok(segments)
     })();
@@ -103,13 +123,27 @@ fn chunks(duration: f64) -> Vec<(f64, f64)> {
     chunks
 }
 
-fn transcribe_in(dir: &Path, script: &Path, media: &Path, from: f64, length: f64) -> Result<Transcript, String> {
+fn transcribe_in(
+    dir: &Path,
+    script: &Path,
+    media: &Path,
+    from: f64,
+    length: f64,
+) -> Result<Transcript, String> {
     let sound = dir.join("sound.wav");
     let cut = ffmpeg::command(&ffmpeg::ffmpeg())
         .args(["-v", "error", "-y", "-ss", &format!("{from:.3}")])
         .arg("-i")
         .arg(media)
-        .args(["-t", &format!("{length:.3}"), "-vn", "-ac", "1", "-ar", "16000"])
+        .args([
+            "-t",
+            &format!("{length:.3}"),
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+        ])
         .arg(&sound)
         .output()
         .map_err(|e| format!("FFmpeg couldn't start ({e})."))?;
@@ -126,9 +160,17 @@ fn transcribe_in(dir: &Path, script: &Path, media: &Path, from: f64, length: f64
         .map_err(|e| format!("Python couldn't start ({e}). Install Python with faster-whisper, or set STREAMCUTS_PYTHON."))?;
     if !output.status.success() {
         let error = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Transcription failed: {}", error.lines().filter(|l| !l.trim().is_empty()).last().unwrap_or("no details")));
+        return Err(format!(
+            "Transcription failed: {}",
+            error
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .last()
+                .unwrap_or("no details")
+        ));
     }
-    serde_json::from_slice(&output.stdout).map_err(|e| format!("Transcription said something unexpected ({e})."))
+    serde_json::from_slice(&output.stdout)
+        .map_err(|e| format!("Transcription said something unexpected ({e})."))
 }
 
 /// Turns segments timed from the start of the cut-out sound (source seconds) into captions on the timeline.
@@ -143,7 +185,15 @@ fn place(transcript: Transcript, at: f64, length: f64, speed: f64) -> Vec<Captio
             start: timeline(segment.start),
             end: timeline(segment.end.max(segment.start)),
             text: segment.text.trim().to_owned(),
-            words: segment.words.into_iter().map(|w| Word { text: w.word, start: timeline(w.start), end: timeline(w.end) }).collect(),
+            words: segment
+                .words
+                .into_iter()
+                .map(|w| Word {
+                    text: w.word,
+                    start: timeline(w.start),
+                    end: timeline(w.end),
+                })
+                .collect(),
             clip: None,
         })
         .collect()
@@ -161,11 +211,28 @@ mod tests {
             {"text":"bye","start":3.0,"end":9.0}]}"#;
         let captions = place(serde_json::from_str(json).unwrap(), 10.0, 4.0, 1.0);
         assert_eq!(captions.len(), 2, "blank segments are dropped");
-        assert_eq!((captions[0].start, captions[0].end, captions[0].text.as_str()), (10.5, 11.75, "hi there."));
-        assert_eq!((captions[0].words[1].start, captions[0].words[1].text.as_str()), (11.0, "there."));
+        assert_eq!(
+            (
+                captions[0].start,
+                captions[0].end,
+                captions[0].text.as_str()
+            ),
+            (10.5, 11.75, "hi there.")
+        );
+        assert_eq!(
+            (
+                captions[0].words[1].start,
+                captions[0].words[1].text.as_str()
+            ),
+            (11.0, "there.")
+        );
         assert_eq!(captions[1].end, 14.0, "kept inside the clip");
         let fast = place(serde_json::from_str(json).unwrap(), 10.0, 4.0, 2.0);
-        assert_eq!((fast[0].start, fast[1].end), (10.25, 12.0), "a clip at 2x says it all in half the time");
+        assert_eq!(
+            (fast[0].start, fast[1].end),
+            (10.25, 12.0),
+            "a clip at 2x says it all in half the time"
+        );
     }
 
     #[test]
@@ -176,6 +243,9 @@ mod tests {
 
     #[test]
     fn long_sources_are_cut_without_gaps_or_overrun() {
-        assert_eq!(chunks(1205.0), vec![(0.0, 600.0), (600.0, 600.0), (1200.0, 5.0)]);
+        assert_eq!(
+            chunks(1205.0),
+            vec![(0.0, 600.0), (600.0, 600.0), (1200.0, 5.0)]
+        );
     }
 }

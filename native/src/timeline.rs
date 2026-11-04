@@ -5,7 +5,10 @@ use crate::filmstrip::Strip;
 use crate::project::{History, MediaKind, Project, TrackKind};
 use crate::waveform::Waveform;
 use canopy_ui::{DraggedFiles, Icon, SharedFile, color, font, icon_button};
-use egui::{Align2, Color32, CursorIcon, DragAndDrop, Rect, Sense, Stroke, StrokeKind, TextureHandle, Ui, UiBuilder, pos2, vec2};
+use egui::{
+    Align2, Color32, CursorIcon, DragAndDrop, Rect, Sense, Stroke, StrokeKind, TextureHandle, Ui,
+    UiBuilder, pos2, vec2,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -28,16 +31,29 @@ pub struct Looks {
 }
 
 enum Gesture {
-    Move { clip: String, grab: f64 },
+    Move {
+        clip: String,
+        grab: f64,
+    },
     TrimStart(String),
     TrimEnd(String),
     /// Ctrl-drag on the cut between two touching clips: the first ends and the second starts where the pointer is.
-    Roll { left: String, right: String },
+    Roll {
+        left: String,
+        right: String,
+    },
     /// Ctrl-drag inside a clip that touches another: it moves, playing the same footage, and the clips touching it
     /// give or take the difference.
-    Slide { clip: String, grab: f64 },
+    Slide {
+        clip: String,
+        grab: f64,
+    },
     /// Alt-drag: the clip stays put and plays another stretch of its source (where the drag began, from `source_in`).
-    Slip { clip: String, from: f64, source_in: f64 },
+    Slip {
+        clip: String,
+        from: f64,
+        source_in: f64,
+    },
 }
 
 pub struct Timeline {
@@ -61,7 +77,14 @@ enum Grab {
 
 impl Default for Timeline {
     fn default() -> Self {
-        Self { pps: 60.0, scroll: 0.0, selection: Vec::new(), snap: true, gesture: None, title_grab: None }
+        Self {
+            pps: 60.0,
+            scroll: 0.0,
+            selection: Vec::new(),
+            snap: true,
+            gesture: None,
+            title_grab: None,
+        }
     }
 }
 
@@ -74,7 +97,12 @@ pub struct Output {
 }
 
 fn tick_step(pps: f32) -> f64 {
-    [0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0].into_iter().find(|s| s * pps as f64 >= 70.0).unwrap_or(3600.0)
+    [
+        0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0,
+    ]
+    .into_iter()
+    .find(|s| s * pps as f64 >= 70.0)
+    .unwrap_or(3600.0)
 }
 
 pub fn timecode(seconds: f64, fps: u32) -> String {
@@ -82,7 +110,13 @@ pub fn timecode(seconds: f64, fps: u32) -> String {
     let s = total.floor() as u64;
     let frames = ((total - s as f64) * fps as f64).floor() as u64;
     if s >= 3600 {
-        format!("{}:{:02}:{:02}.{:02}", s / 3600, s / 60 % 60, s % 60, frames)
+        format!(
+            "{}:{:02}:{:02}.{:02}",
+            s / 3600,
+            s / 60 % 60,
+            s % 60,
+            frames
+        )
     } else {
         format!("{:02}:{:02}.{:02}", s / 60, s % 60, frames)
     }
@@ -107,7 +141,11 @@ impl Timeline {
         let reach = (SNAP_PX / self.pps) as f64;
         let mut points = project.snap_points(ignore);
         points.push(playhead);
-        points.into_iter().filter(|p| (p - t).abs() <= reach).min_by(|a, b| (a - t).abs().total_cmp(&(b - t).abs())).unwrap_or(t)
+        points
+            .into_iter()
+            .filter(|p| (p - t).abs() <= reach)
+            .min_by(|a, b| (a - t).abs().total_cmp(&(b - t).abs()))
+            .unwrap_or(t)
     }
 
     pub fn ui(
@@ -126,20 +164,37 @@ impl Timeline {
         let (pps, scroll) = (self.pps, self.scroll);
         let x_of = |t: f64| lanes.left() + ((t - scroll) as f32) * pps;
         let t_of = |x: f32| scroll + ((x - lanes.left()) / pps) as f64;
-        let row = |i: usize| Rect::from_min_size(pos2(rect.left(), rect.top() + RULER + i as f32 * ROW), vec2(rect.width(), ROW));
+        let row = |i: usize| {
+            Rect::from_min_size(
+                pos2(rect.left(), rect.top() + RULER + i as f32 * ROW),
+                vec2(rect.width(), ROW),
+            )
+        };
         let pointer = ui.input(|i| i.pointer.hover_pos());
         let row_at = |y: f32| ((y - rect.top() - RULER) / ROW).floor();
 
         // Ruler
-        let ruler = Rect::from_min_max(pos2(lanes.left(), rect.top()), pos2(rect.right(), rect.top() + RULER));
+        let ruler = Rect::from_min_max(
+            pos2(lanes.left(), rect.top()),
+            pos2(rect.right(), rect.top() + RULER),
+        );
         painter.rect_filled(ruler, 0, color::VEIL);
         let step = tick_step(pps);
         let mut t = (scroll / step).floor() * step;
         while x_of(t) < rect.right() {
             let x = x_of(t);
             if x >= lanes.left() {
-                painter.line_segment([pos2(x, ruler.bottom() - 7.0), pos2(x, ruler.bottom())], Stroke::new(1.0, color::INK_FAINT));
-                painter.text(pos2(x + 4.0, ruler.center().y - 2.0), Align2::LEFT_CENTER, timecode(t, project.fps).trim_end_matches(".00"), font::ui(11.0), color::INK_MUTED);
+                painter.line_segment(
+                    [pos2(x, ruler.bottom() - 7.0), pos2(x, ruler.bottom())],
+                    Stroke::new(1.0, color::INK_FAINT),
+                );
+                painter.text(
+                    pos2(x + 4.0, ruler.center().y - 2.0),
+                    Align2::LEFT_CENTER,
+                    timecode(t, project.fps).trim_end_matches(".00"),
+                    font::ui(11.0),
+                    color::INK_MUTED,
+                );
             }
             t += step;
         }
@@ -150,10 +205,31 @@ impl Timeline {
             if x < lanes.left() || x > rect.right() {
                 continue;
             }
-            painter.line_segment([pos2(x, ruler.bottom()), pos2(x, rect.bottom())], Stroke::new(1.0, color::SUN.gamma_multiply(0.35)));
-            painter.add(egui::Shape::convex_polygon(vec![pos2(x - 5.0, ruler.top() + 3.0), pos2(x + 5.0, ruler.top() + 3.0), pos2(x + 5.0, ruler.top() + 10.0), pos2(x, ruler.top() + 14.0), pos2(x - 5.0, ruler.top() + 10.0)], color::SUN, Stroke::NONE));
-            let hit = ui.interact(Rect::from_center_size(pos2(x, ruler.top() + 8.0), vec2(12.0, 14.0)), ui.scope_id().with(("marker", &marker.id)), Sense::click());
-            let hit = if marker.label.is_empty() { hit } else { hit.on_hover_text(&marker.label) };
+            painter.line_segment(
+                [pos2(x, ruler.bottom()), pos2(x, rect.bottom())],
+                Stroke::new(1.0, color::SUN.gamma_multiply(0.35)),
+            );
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    pos2(x - 5.0, ruler.top() + 3.0),
+                    pos2(x + 5.0, ruler.top() + 3.0),
+                    pos2(x + 5.0, ruler.top() + 10.0),
+                    pos2(x, ruler.top() + 14.0),
+                    pos2(x - 5.0, ruler.top() + 10.0),
+                ],
+                color::SUN,
+                Stroke::NONE,
+            ));
+            let hit = ui.interact(
+                Rect::from_center_size(pos2(x, ruler.top() + 8.0), vec2(12.0, 14.0)),
+                ui.scope_id().with(("marker", &marker.id)),
+                Sense::click(),
+            );
+            let hit = if marker.label.is_empty() {
+                hit
+            } else {
+                hit.on_hover_text(&marker.label)
+            };
             if hit.clicked() {
                 output.seek = Some(marker.t);
             }
@@ -170,24 +246,65 @@ impl Timeline {
         // Tracks
         for (index, track) in project.tracks.iter().enumerate() {
             let r = row(index);
-            painter.line_segment([pos2(rect.left(), r.bottom()), pos2(rect.right(), r.bottom())], Stroke::new(1.0, color::HAIRLINE));
-            painter.text(pos2(r.left() + 10.0, r.top() + 14.0), Align2::LEFT_CENTER, &track.name, font::ui(12.0), color::INK_SOFT);
+            painter.line_segment(
+                [
+                    pos2(rect.left(), r.bottom()),
+                    pos2(rect.right(), r.bottom()),
+                ],
+                Stroke::new(1.0, color::HAIRLINE),
+            );
+            painter.text(
+                pos2(r.left() + 10.0, r.top() + 14.0),
+                Align2::LEFT_CENTER,
+                &track.name,
+                font::ui(12.0),
+                color::INK_SOFT,
+            );
         }
         let mut toggles = Vec::new();
         let mut locks = Vec::new();
         for (index, track) in project.tracks.iter().enumerate() {
             let r = row(index);
-            let buttons = Rect::from_min_size(pos2(r.left() + 6.0, r.top() + 22.0), vec2(HEADER - 12.0, 30.0));
+            let buttons = Rect::from_min_size(
+                pos2(r.left() + 6.0, r.top() + 22.0),
+                vec2(HEADER - 12.0, 30.0),
+            );
             ui.scope_builder(UiBuilder::new().max_rect(buttons), |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
-                    if icon_button(ui, Icon::Audio, if track.muted { "Unmute" } else { "Mute" }, track.muted).clicked() {
+                    if icon_button(
+                        ui,
+                        Icon::Audio,
+                        if track.muted { "Unmute" } else { "Mute" },
+                        track.muted,
+                    )
+                    .clicked()
+                    {
                         toggles.push((index, true));
                     }
-                    if track.kind == TrackKind::Video && icon_button(ui, Icon::Video, if track.hidden { "Show" } else { "Hide" }, track.hidden).clicked() {
+                    if track.kind == TrackKind::Video
+                        && icon_button(
+                            ui,
+                            Icon::Video,
+                            if track.hidden { "Show" } else { "Hide" },
+                            track.hidden,
+                        )
+                        .clicked()
+                    {
                         toggles.push((index, false));
                     }
-                    if icon_button(ui, Icon::Lock, if track.locked { "Unlock" } else { "Lock: keep its clips as they are" }, track.locked).clicked() {
+                    if icon_button(
+                        ui,
+                        Icon::Lock,
+                        if track.locked {
+                            "Unlock"
+                        } else {
+                            "Lock: keep its clips as they are"
+                        },
+                        track.locked,
+                    )
+                    .clicked()
+                    {
                         locks.push(index);
                     }
                 });
@@ -210,47 +327,86 @@ impl Timeline {
             history.record(project);
             for (index, mute) in toggles {
                 let track = &mut project.tracks[index];
-                if mute { track.muted = !track.muted } else { track.hidden = !track.hidden }
+                if mute {
+                    track.muted = !track.muted
+                } else {
+                    track.hidden = !track.hidden
+                }
             }
             output.changed = true;
         }
         let add_row = row(project.tracks.len());
-        painter.text(pos2(add_row.left() + 10.0, add_row.top() + 16.0), Align2::LEFT_CENTER, "Drop media to add a track", font::ui(11.0), color::INK_FAINT);
+        painter.text(
+            pos2(add_row.left() + 10.0, add_row.top() + 16.0),
+            Align2::LEFT_CENTER,
+            "Drop media to add a track",
+            font::ui(11.0),
+            color::INK_FAINT,
+        );
 
         // Clips
-        let lane_painter = painter.with_clip_rect(Rect::from_min_max(pos2(lanes.left(), rect.top() + RULER), rect.max));
+        let lane_painter = painter.with_clip_rect(Rect::from_min_max(
+            pos2(lanes.left(), rect.top() + RULER),
+            rect.max,
+        ));
         let mut clicked_clip = false;
-        let clips: Vec<(usize, crate::project::Clip)> = project.tracks.iter().enumerate().flat_map(|(i, t)| t.clips.iter().map(move |c| (i, c.clone()))).collect();
+        let clips: Vec<(usize, crate::project::Clip)> = project
+            .tracks
+            .iter()
+            .enumerate()
+            .flat_map(|(i, t)| t.clips.iter().map(move |c| (i, c.clone())))
+            .collect();
         for (track_index, clip) in clips {
-            let Some(media) = project.media(&clip.media_id).cloned() else { continue };
+            let Some(media) = project.media(&clip.media_id).cloned() else {
+                continue;
+            };
             let r = row(track_index);
-            let clip_rect = Rect::from_min_max(pos2(x_of(clip.start), r.top() + 4.0), pos2(x_of(clip.end()), r.bottom() - 4.0));
+            let clip_rect = Rect::from_min_max(
+                pos2(x_of(clip.start), r.top() + 4.0),
+                pos2(x_of(clip.end()), r.bottom() - 4.0),
+            );
             let visible = clip_rect.intersect(lanes);
             if visible.width() <= 0.0 {
                 continue;
             }
             let selected = self.selection.contains(&clip.id);
             // A clip on an audio track is all sound, whatever its media (a video's detached sound).
-            let kind = if project.tracks[track_index].kind == TrackKind::Audio { MediaKind::Audio } else { media.kind };
+            let kind = if project.tracks[track_index].kind == TrackKind::Audio {
+                MediaKind::Audio
+            } else {
+                media.kind
+            };
             lane_painter.rect_filled(clip_rect, 6, clip_fill(kind));
             // Pictures across the top of the clip's body and its sound mirrored along the bottom; a sound clip is all sound.
-            let body = Rect::from_min_max(pos2(clip_rect.left() + 2.0, clip_rect.top() + 16.0), clip_rect.max - vec2(2.0, 2.0));
+            let body = Rect::from_min_max(
+                pos2(clip_rect.left() + 2.0, clip_rect.top() + 16.0),
+                clip_rect.max - vec2(2.0, 2.0),
+            );
             // A video clip whose sound was detached shows no sound of its own.
-            let wave = looks.waveforms.get(&media.id).filter(|_| !project.sounds_elsewhere(&clip));
+            let wave = looks
+                .waveforms
+                .get(&media.id)
+                .filter(|_| !project.sounds_elsewhere(&clip));
             let (pictures, sound) = match (kind, wave.is_some()) {
                 (MediaKind::Audio, _) => (None, Some(body)),
                 (_, true) => {
                     let split = body.top() + body.height() * 0.62;
-                    (Some(Rect::from_min_max(body.min, pos2(body.right(), split))), Some(Rect::from_min_max(pos2(body.left(), split), body.max)))
+                    (
+                        Some(Rect::from_min_max(body.min, pos2(body.right(), split))),
+                        Some(Rect::from_min_max(pos2(body.left(), split), body.max)),
+                    )
                 }
                 (_, false) => (Some(body), None),
             };
             if let Some(area) = pictures {
                 if let Some(strip) = looks.filmstrips.get(&media.id) {
                     let width = area.height() * 16.0 / 9.0;
-                    let mut x = area.left() + ((visible.left() - area.left()) / width).floor().max(0.0) * width;
+                    let mut x = area.left()
+                        + ((visible.left() - area.left()) / width).floor().max(0.0) * width;
                     while x < visible.right().min(area.right()) {
-                        let shown = Rect::from_min_size(pos2(x, area.top()), vec2(width, area.height())).intersect(area);
+                        let shown =
+                            Rect::from_min_size(pos2(x, area.top()), vec2(width, area.height()))
+                                .intersect(area);
                         let mut uv = strip.uv(clip.source_time(t_of(x + width / 2.0)));
                         // A tile cut off at the clip's end shows the left part of its frame.
                         uv.max.x = uv.min.x + uv.width() * shown.width() / width;
@@ -258,9 +414,20 @@ impl Timeline {
                         x += width;
                     }
                 } else if let Some(texture) = looks.thumbnails.get(&media.id) {
-                    let thumb = Rect::from_min_size(area.min, vec2((area.height() * 16.0 / 9.0).min(area.width()), area.height()));
+                    let thumb = Rect::from_min_size(
+                        area.min,
+                        vec2(
+                            (area.height() * 16.0 / 9.0).min(area.width()),
+                            area.height(),
+                        ),
+                    );
                     if thumb.width() > 8.0 {
-                        lane_painter.image(texture.id(), thumb, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                        lane_painter.image(
+                            texture.id(),
+                            thumb,
+                            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                            Color32::WHITE,
+                        );
                     }
                 }
             }
@@ -270,17 +437,45 @@ impl Timeline {
                 let mut x = visible.left().max(area.left());
                 while x < visible.right().min(area.right()) {
                     // Square root, so quiet sound (speech sits around a tenth of full scale) still shows.
-                    let loud = (wave.peak(clip.source_time(t_of(x)), clip.source_time(t_of(x + step))) as f32 / 255.0 * clip.volume).min(1.0).sqrt();
+                    let loud = (wave
+                        .peak(clip.source_time(t_of(x)), clip.source_time(t_of(x + step)))
+                        as f32
+                        / 255.0
+                        * clip.volume)
+                        .min(1.0)
+                        .sqrt();
                     let h = (loud * half).max(0.5);
-                    lane_painter.line_segment([pos2(x, area.center().y - h), pos2(x, area.center().y + h)], Stroke::new(1.2, ink));
+                    lane_painter.line_segment(
+                        [pos2(x, area.center().y - h), pos2(x, area.center().y + h)],
+                        Stroke::new(1.2, ink),
+                    );
                     x += step;
                 }
             }
-            let name = if clip.link.is_some() { format!("{} · linked", media.name) } else { media.name.clone() };
-            lane_painter.with_clip_rect(visible.shrink(2.0)).text(pos2(clip_rect.left() + 6.0, clip_rect.top() + 8.0), Align2::LEFT_CENTER, name, font::ui(11.0), color::INK);
+            let name = if clip.link.is_some() {
+                format!("{} · linked", media.name)
+            } else {
+                media.name.clone()
+            };
+            lane_painter.with_clip_rect(visible.shrink(2.0)).text(
+                pos2(clip_rect.left() + 6.0, clip_rect.top() + 8.0),
+                Align2::LEFT_CENTER,
+                name,
+                font::ui(11.0),
+                color::INK,
+            );
             // The clip linked to a selected one is outlined lightly: it goes wherever the selected one does.
-            let partner_selected = clip.link.as_ref().is_some_and(|id| self.selection.contains(id));
-            let stroke = if selected { Stroke::new(2.0, color::SELECT_INK) } else if partner_selected { Stroke::new(1.5, color::SELECT_INK.gamma_multiply(0.5)) } else { Stroke::new(1.0, color::HAIRLINE_STRONG) };
+            let partner_selected = clip
+                .link
+                .as_ref()
+                .is_some_and(|id| self.selection.contains(id));
+            let stroke = if selected {
+                Stroke::new(2.0, color::SELECT_INK)
+            } else if partner_selected {
+                Stroke::new(1.5, color::SELECT_INK.gamma_multiply(0.5))
+            } else {
+                Stroke::new(1.0, color::HAIRLINE_STRONG)
+            };
             lane_painter.rect_stroke(clip_rect, 6, stroke, StrokeKind::Inside);
 
             // A locked track's clips are shown dimmed and take no clicks or drags.
@@ -288,44 +483,95 @@ impl Timeline {
             if locked {
                 lane_painter.rect_filled(clip_rect, 6, color::VEIL_STRONG);
             }
-            let response = ui.interact(visible, ui.scope_id().with(("clip", &clip.id)), if locked { Sense::hover() } else { Sense::click_and_drag() });
-            let near_edge = |x: f32| (x - clip_rect.left()).abs() <= EDGE || (x - clip_rect.right()).abs() <= EDGE;
+            let response = ui.interact(
+                visible,
+                ui.scope_id().with(("clip", &clip.id)),
+                if locked {
+                    Sense::hover()
+                } else {
+                    Sense::click_and_drag()
+                },
+            );
+            let near_edge = |x: f32| {
+                (x - clip_rect.left()).abs() <= EDGE || (x - clip_rect.right()).abs() <= EDGE
+            };
             if response.hovered() {
-                ui.ctx().set_cursor_icon(if locked { CursorIcon::NotAllowed } else if pointer.map(|p| near_edge(p.x)).unwrap_or(false) { CursorIcon::ResizeHorizontal } else { CursorIcon::Grab });
+                ui.ctx().set_cursor_icon(if locked {
+                    CursorIcon::NotAllowed
+                } else if pointer.map(|p| near_edge(p.x)).unwrap_or(false) {
+                    CursorIcon::ResizeHorizontal
+                } else {
+                    CursorIcon::Grab
+                });
             }
             if response.clicked() {
                 clicked_clip = true;
                 if ui.input(|i| i.modifiers.shift) {
-                    if selected { self.selection.retain(|id| id != &clip.id) } else { self.selection.push(clip.id.clone()) }
+                    if selected {
+                        self.selection.retain(|id| id != &clip.id)
+                    } else {
+                        self.selection.push(clip.id.clone())
+                    }
                 } else {
                     self.selection = vec![clip.id.clone()];
                 }
             }
             if response.drag_started() {
                 // Where the button went down: a quick drag has already left a clip's edge when the drag begins.
-                if let Some(p) = ui.input(|i| i.pointer.press_origin()).or(response.interact_pointer_pos()) {
+                if let Some(p) = ui
+                    .input(|i| i.pointer.press_origin())
+                    .or(response.interact_pointer_pos())
+                {
                     history.record(project);
                     let (alt, ctrl) = ui.input(|i| (i.modifiers.alt, i.modifiers.command));
                     // Ctrl on an edge that touches another clip rolls the cut between them; Ctrl inside slides.
-                    let (at_start, at_end) = ((p.x - clip_rect.left()).abs() <= EDGE, (p.x - clip_rect.right()).abs() <= EDGE);
+                    let (at_start, at_end) = (
+                        (p.x - clip_rect.left()).abs() <= EDGE,
+                        (p.x - clip_rect.right()).abs() <= EDGE,
+                    );
                     // Linked clips don't roll or slide: their partner's neighbors would fall out of step.
                     let alone = clip.link.is_none();
-                    let (left, right) = (project.left_neighbor(&clip.id).filter(|_| alone), project.right_neighbor(&clip.id).filter(|_| alone));
-                    self.gesture = Some(if let (true, true, Some(left)) = (ctrl, at_start, left.clone()) {
-                        Gesture::Roll { left, right: clip.id.clone() }
-                    } else if let (true, true, Some(right)) = (ctrl, at_end, right.clone()) {
-                        Gesture::Roll { left: clip.id.clone(), right }
-                    } else if alt {
-                        Gesture::Slip { clip: clip.id.clone(), from: t_of(p.x), source_in: clip.source_in }
-                    } else if ctrl && !at_start && !at_end && (left.is_some() || right.is_some()) {
-                        Gesture::Slide { clip: clip.id.clone(), grab: t_of(p.x) - clip.start }
-                    } else if (p.x - clip_rect.left()).abs() <= EDGE {
-                        Gesture::TrimStart(clip.id.clone())
-                    } else if (p.x - clip_rect.right()).abs() <= EDGE {
-                        Gesture::TrimEnd(clip.id.clone())
-                    } else {
-                        Gesture::Move { clip: clip.id.clone(), grab: t_of(p.x) - clip.start }
-                    });
+                    let (left, right) = (
+                        project.left_neighbor(&clip.id).filter(|_| alone),
+                        project.right_neighbor(&clip.id).filter(|_| alone),
+                    );
+                    self.gesture = Some(
+                        if let (true, true, Some(left)) = (ctrl, at_start, left.clone()) {
+                            Gesture::Roll {
+                                left,
+                                right: clip.id.clone(),
+                            }
+                        } else if let (true, true, Some(right)) = (ctrl, at_end, right.clone()) {
+                            Gesture::Roll {
+                                left: clip.id.clone(),
+                                right,
+                            }
+                        } else if alt {
+                            Gesture::Slip {
+                                clip: clip.id.clone(),
+                                from: t_of(p.x),
+                                source_in: clip.source_in,
+                            }
+                        } else if ctrl
+                            && !at_start
+                            && !at_end
+                            && (left.is_some() || right.is_some())
+                        {
+                            Gesture::Slide {
+                                clip: clip.id.clone(),
+                                grab: t_of(p.x) - clip.start,
+                            }
+                        } else if (p.x - clip_rect.left()).abs() <= EDGE {
+                            Gesture::TrimStart(clip.id.clone())
+                        } else if (p.x - clip_rect.right()).abs() <= EDGE {
+                            Gesture::TrimEnd(clip.id.clone())
+                        } else {
+                            Gesture::Move {
+                                clip: clip.id.clone(),
+                                grab: t_of(p.x) - clip.start,
+                            }
+                        },
+                    );
                     if !selected {
                         self.selection = vec![clip.id.clone()];
                     }
@@ -338,27 +584,71 @@ impl Timeline {
         if !project.titles.is_empty() {
             let lane = row(next_lane);
             next_lane += 1;
-            painter.text(pos2(lane.left() + 10.0, lane.top() + 14.0), Align2::LEFT_CENTER, "Titles", font::ui(12.0), color::INK_SOFT);
+            painter.text(
+                pos2(lane.left() + 10.0, lane.top() + 14.0),
+                Align2::LEFT_CENTER,
+                "Titles",
+                font::ui(12.0),
+                color::INK_SOFT,
+            );
             let (mut grabbed, mut moved) = (false, None);
             for title in &project.titles {
-                let block = Rect::from_min_max(pos2(x_of(title.start), lane.top() + 6.0), pos2(x_of(title.end).max(x_of(title.start) + 3.0), lane.top() + 34.0));
+                let block = Rect::from_min_max(
+                    pos2(x_of(title.start), lane.top() + 6.0),
+                    pos2(
+                        x_of(title.end).max(x_of(title.start) + 3.0),
+                        lane.top() + 34.0,
+                    ),
+                );
                 let visible = block.intersect(lanes);
                 if visible.width() <= 0.0 {
                     continue;
                 }
                 let selected = self.selection.contains(&title.id);
                 lane_painter.rect_filled(block, 5, TITLE_FILL);
-                lane_painter.rect_stroke(block, 5, Stroke::new(if selected { 2.0 } else { 1.0 }, if selected { color::SELECT_INK } else { color::HAIRLINE_STRONG }), StrokeKind::Inside);
-                lane_painter.with_clip_rect(visible.shrink(3.0)).text(pos2(block.left() + 6.0, block.center().y), Align2::LEFT_CENTER, &title.text, font::ui(11.0), color::INK);
-                let response = ui.interact(visible, ui.scope_id().with(("title", &title.id)), Sense::click_and_drag());
-                let near_edge = |x: f32| (x - block.left()).abs() <= EDGE || (x - block.right()).abs() <= EDGE;
+                lane_painter.rect_stroke(
+                    block,
+                    5,
+                    Stroke::new(
+                        if selected { 2.0 } else { 1.0 },
+                        if selected {
+                            color::SELECT_INK
+                        } else {
+                            color::HAIRLINE_STRONG
+                        },
+                    ),
+                    StrokeKind::Inside,
+                );
+                lane_painter.with_clip_rect(visible.shrink(3.0)).text(
+                    pos2(block.left() + 6.0, block.center().y),
+                    Align2::LEFT_CENTER,
+                    &title.text,
+                    font::ui(11.0),
+                    color::INK,
+                );
+                let response = ui.interact(
+                    visible,
+                    ui.scope_id().with(("title", &title.id)),
+                    Sense::click_and_drag(),
+                );
+                let near_edge =
+                    |x: f32| (x - block.left()).abs() <= EDGE || (x - block.right()).abs() <= EDGE;
                 if response.hovered() {
-                    ui.ctx().set_cursor_icon(if pointer.is_some_and(|p| near_edge(p.x)) { CursorIcon::ResizeHorizontal } else { CursorIcon::Grab });
+                    ui.ctx()
+                        .set_cursor_icon(if pointer.is_some_and(|p| near_edge(p.x)) {
+                            CursorIcon::ResizeHorizontal
+                        } else {
+                            CursorIcon::Grab
+                        });
                 }
                 if response.clicked() {
                     clicked_clip = true;
                     if ui.input(|i| i.modifiers.shift) {
-                        if selected { self.selection.retain(|id| id != &title.id) } else { self.selection.push(title.id.clone()) }
+                        if selected {
+                            self.selection.retain(|id| id != &title.id)
+                        } else {
+                            self.selection.push(title.id.clone())
+                        }
                     } else {
                         self.selection = vec![title.id.clone()];
                     }
@@ -387,7 +677,11 @@ impl Timeline {
                 history.record(project);
             }
             if let Some((id, dt)) = moved {
-                let grab = self.title_grab.as_ref().filter(|(grabbed, _)| grabbed == &id).map_or(Grab::Move, |(_, grab)| *grab);
+                let grab = self
+                    .title_grab
+                    .as_ref()
+                    .filter(|(grabbed, _)| grabbed == &id)
+                    .map_or(Grab::Move, |(_, grab)| *grab);
                 if let Some(title) = project.title_mut(&id) {
                     const SHORTEST: f64 = 0.3;
                     match grab {
@@ -396,7 +690,9 @@ impl Timeline {
                             title.start += dt;
                             title.end += dt;
                         }
-                        Grab::Start => title.start = (title.start + dt).clamp(0.0, title.end - SHORTEST),
+                        Grab::Start => {
+                            title.start = (title.start + dt).clamp(0.0, title.end - SHORTEST)
+                        }
                         Grab::End => title.end = (title.end + dt).max(title.start + SHORTEST),
                     }
                     output.changed = true;
@@ -405,22 +701,62 @@ impl Timeline {
         }
         if !project.captions.is_empty() {
             let lane = row(next_lane);
-            painter.text(pos2(lane.left() + 10.0, lane.top() + 14.0), Align2::LEFT_CENTER, "Captions", font::ui(12.0), color::INK_SOFT);
+            painter.text(
+                pos2(lane.left() + 10.0, lane.top() + 14.0),
+                Align2::LEFT_CENTER,
+                "Captions",
+                font::ui(12.0),
+                color::INK_SOFT,
+            );
             for caption in &project.captions {
-                let block = Rect::from_min_max(pos2(x_of(caption.start), lane.top() + 6.0), pos2(x_of(caption.end).max(x_of(caption.start) + 3.0), lane.top() + 34.0));
+                let block = Rect::from_min_max(
+                    pos2(x_of(caption.start), lane.top() + 6.0),
+                    pos2(
+                        x_of(caption.end).max(x_of(caption.start) + 3.0),
+                        lane.top() + 34.0,
+                    ),
+                );
                 let visible = block.intersect(lanes);
                 if visible.width() <= 0.0 {
                     continue;
                 }
                 let selected = self.selection.contains(&caption.id);
                 lane_painter.rect_filled(block, 5, CAPTION_FILL);
-                lane_painter.rect_stroke(block, 5, Stroke::new(if selected { 2.0 } else { 1.0 }, if selected { color::SELECT_INK } else { color::HAIRLINE_STRONG }), StrokeKind::Inside);
-                lane_painter.with_clip_rect(visible.shrink(3.0)).text(pos2(block.left() + 6.0, block.center().y), Align2::LEFT_CENTER, &caption.text, font::ui(11.0), color::INK);
-                let response = ui.interact(visible, ui.scope_id().with(("caption", &caption.id)), Sense::click()).on_hover_text(&caption.text);
+                lane_painter.rect_stroke(
+                    block,
+                    5,
+                    Stroke::new(
+                        if selected { 2.0 } else { 1.0 },
+                        if selected {
+                            color::SELECT_INK
+                        } else {
+                            color::HAIRLINE_STRONG
+                        },
+                    ),
+                    StrokeKind::Inside,
+                );
+                lane_painter.with_clip_rect(visible.shrink(3.0)).text(
+                    pos2(block.left() + 6.0, block.center().y),
+                    Align2::LEFT_CENTER,
+                    &caption.text,
+                    font::ui(11.0),
+                    color::INK,
+                );
+                let response = ui
+                    .interact(
+                        visible,
+                        ui.scope_id().with(("caption", &caption.id)),
+                        Sense::click(),
+                    )
+                    .on_hover_text(&caption.text);
                 if response.clicked() {
                     clicked_clip = true;
                     if ui.input(|i| i.modifiers.shift) {
-                        if selected { self.selection.retain(|id| id != &caption.id) } else { self.selection.push(caption.id.clone()) }
+                        if selected {
+                            self.selection.retain(|id| id != &caption.id)
+                        } else {
+                            self.selection.push(caption.id.clone())
+                        }
                     } else {
                         self.selection = vec![caption.id.clone()];
                     }
@@ -437,35 +773,84 @@ impl Timeline {
                         if let Some(at) = project.find(clip) {
                             let duration = project.tracks[at.track].clips[at.index].duration;
                             let start = t - grab;
-                            let snapped_start = self.snap(project, &[clip.as_str()], playhead, start);
-                            let snapped_end = self.snap(project, &[clip.as_str()], playhead, start + duration) - duration;
-                            let start = if (snapped_start - start).abs() <= (snapped_end - start).abs() { snapped_start } else { snapped_end };
+                            let snapped_start =
+                                self.snap(project, &[clip.as_str()], playhead, start);
+                            let snapped_end =
+                                self.snap(project, &[clip.as_str()], playhead, start + duration)
+                                    - duration;
+                            let start =
+                                if (snapped_start - start).abs() <= (snapped_end - start).abs() {
+                                    snapped_start
+                                } else {
+                                    snapped_end
+                                };
                             let hovered = row_at(p.y);
-                            let track = if hovered >= 0.0 && (hovered as usize) < project.tracks.len() && project.tracks[hovered as usize].kind == project.tracks[at.track].kind && !project.tracks[hovered as usize].locked { hovered as usize } else { at.track };
+                            let track = if hovered >= 0.0
+                                && (hovered as usize) < project.tracks.len()
+                                && project.tracks[hovered as usize].kind
+                                    == project.tracks[at.track].kind
+                                && !project.tracks[hovered as usize].locked
+                            {
+                                hovered as usize
+                            } else {
+                                at.track
+                            };
                             output.changed |= project.move_clip(clip, start, track);
                         }
                     }
                     // The cut snaps to anything but the two clips it joins (their edges are the cut).
-                    Gesture::Roll { left, right } => output.changed |= project.roll(left, right, self.snap(project, &[left.as_str(), right.as_str()], playhead, t)),
+                    Gesture::Roll { left, right } => {
+                        output.changed |= project.roll(
+                            left,
+                            right,
+                            self.snap(project, &[left.as_str(), right.as_str()], playhead, t),
+                        )
+                    }
                     Gesture::Slide { clip, grab } => {
                         let duration = project.clip(clip).map_or(0.0, |c| c.duration);
-                        let (left, right) = (project.left_neighbor(clip), project.right_neighbor(clip));
-                        let ignore: Vec<&str> = [Some(clip.as_str()), left.as_deref(), right.as_deref()].into_iter().flatten().collect();
+                        let (left, right) =
+                            (project.left_neighbor(clip), project.right_neighbor(clip));
+                        let ignore: Vec<&str> =
+                            [Some(clip.as_str()), left.as_deref(), right.as_deref()]
+                                .into_iter()
+                                .flatten()
+                                .collect();
                         let start = t - grab;
                         let snapped_start = self.snap(project, &ignore, playhead, start);
-                        let snapped_end = self.snap(project, &ignore, playhead, start + duration) - duration;
-                        let start = if (snapped_start - start).abs() <= (snapped_end - start).abs() { snapped_start } else { snapped_end };
+                        let snapped_end =
+                            self.snap(project, &ignore, playhead, start + duration) - duration;
+                        let start = if (snapped_start - start).abs() <= (snapped_end - start).abs()
+                        {
+                            snapped_start
+                        } else {
+                            snapped_end
+                        };
                         output.changed |= project.slide(clip, start);
                     }
                     // Dragging right shows earlier footage, as the picture follows the pointer.
-                    Gesture::Slip { clip, from, source_in } => {
+                    Gesture::Slip {
+                        clip,
+                        from,
+                        source_in,
+                    } => {
                         let speed = project.clip(clip).map_or(1.0, |c| c.speed);
                         output.changed |= project.slip(clip, source_in - (t - from) * speed);
                     }
-                    Gesture::TrimStart(clip) => output.changed |= project.trim_start(clip, self.snap(project, &[clip.as_str()], playhead, t)),
-                    Gesture::TrimEnd(clip) => output.changed |= project.trim_end(clip, self.snap(project, &[clip.as_str()], playhead, t)),
+                    Gesture::TrimStart(clip) => {
+                        output.changed |= project
+                            .trim_start(clip, self.snap(project, &[clip.as_str()], playhead, t))
+                    }
+                    Gesture::TrimEnd(clip) => {
+                        output.changed |= project
+                            .trim_end(clip, self.snap(project, &[clip.as_str()], playhead, t))
+                    }
                 }
-                ui.ctx().set_cursor_icon(if matches!(gesture, Gesture::Move { .. }) { CursorIcon::Grabbing } else { CursorIcon::ResizeHorizontal });
+                ui.ctx()
+                    .set_cursor_icon(if matches!(gesture, Gesture::Move { .. }) {
+                        CursorIcon::Grabbing
+                    } else {
+                        CursorIcon::ResizeHorizontal
+                    });
             } else {
                 self.gesture = None;
             }
@@ -473,7 +858,10 @@ impl Timeline {
 
         // Clicking or dragging on the ruler or an empty lane moves the playhead.
         if self.gesture.is_none() && (background.clicked() || background.dragged()) {
-            if let Some(p) = background.interact_pointer_pos().filter(|p| p.x >= lanes.left()) {
+            if let Some(p) = background
+                .interact_pointer_pos()
+                .filter(|p| p.x >= lanes.left())
+            {
                 output.seek = Some(t_of(p.x).max(0.0));
                 if background.clicked() && !clicked_clip && p.y > ruler.bottom() {
                     self.selection.clear();
@@ -494,17 +882,26 @@ impl Timeline {
         }
 
         // Drops from the media bin or Canopy's sidebar land at the pointer, on the row under it.
-        let dragging = DragAndDrop::has_payload_of_type::<MediaDrag>(ui.ctx()) || DragAndDrop::has_payload_of_type::<DraggedFiles>(ui.ctx());
+        let dragging = DragAndDrop::has_payload_of_type::<MediaDrag>(ui.ctx())
+            || DragAndDrop::has_payload_of_type::<DraggedFiles>(ui.ctx());
         if let Some(p) = pointer.filter(|p| dragging && lanes.contains(*p)) {
-            painter.line_segment([pos2(p.x, rect.top() + RULER), pos2(p.x, rect.bottom())], Stroke::new(2.0, color::SELECT_LINE));
+            painter.line_segment(
+                [pos2(p.x, rect.top() + RULER), pos2(p.x, rect.bottom())],
+                Stroke::new(2.0, color::SELECT_LINE),
+            );
             if ui.input(|i| i.pointer.any_released()) {
                 let at = self.snap(project, &[], playhead, t_of(p.x).max(0.0));
                 let hovered = row_at(p.y);
-                let track = (hovered >= 0.0 && (hovered as usize) < project.tracks.len()).then_some(hovered as usize);
+                let track = (hovered >= 0.0 && (hovered as usize) < project.tracks.len())
+                    .then_some(hovered as usize);
                 // Nothing lands on a locked track.
                 let locked = track.is_some_and(|t| project.tracks[t].locked);
                 // take_payload clears whatever payload there is, even one of another type: ask for the right one.
-                if let Some(drag) = DragAndDrop::has_payload_of_type::<MediaDrag>(ui.ctx()).then(|| DragAndDrop::take_payload::<MediaDrag>(ui.ctx())).flatten().filter(|_| !locked) {
+                if let Some(drag) = DragAndDrop::has_payload_of_type::<MediaDrag>(ui.ctx())
+                    .then(|| DragAndDrop::take_payload::<MediaDrag>(ui.ctx()))
+                    .flatten()
+                    .filter(|_| !locked)
+                {
                     history.record(project);
                     if let Some(id) = project.place(&drag.0, track, at) {
                         self.selection = vec![id];
@@ -519,8 +916,19 @@ impl Timeline {
         // Playhead
         let x = x_of(playhead);
         if x >= lanes.left() && x <= rect.right() {
-            painter.line_segment([pos2(x, rect.top()), pos2(x, rect.bottom())], Stroke::new(1.5, color::SUN));
-            painter.add(egui::Shape::convex_polygon(vec![pos2(x - 5.0, rect.top()), pos2(x + 5.0, rect.top()), pos2(x, rect.top() + 7.0)], color::SUN, Stroke::NONE));
+            painter.line_segment(
+                [pos2(x, rect.top()), pos2(x, rect.bottom())],
+                Stroke::new(1.5, color::SUN),
+            );
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    pos2(x - 5.0, rect.top()),
+                    pos2(x + 5.0, rect.top()),
+                    pos2(x, rect.top() + 7.0),
+                ],
+                color::SUN,
+                Stroke::NONE,
+            ));
         }
         output
     }

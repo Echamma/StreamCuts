@@ -62,7 +62,13 @@ impl Media {
     /// Adds a tag, unless it's blank or already there (in any case). Returns whether it was added.
     pub fn add_tag(&mut self, tag: &str) -> bool {
         let tag = tag.trim();
-        if tag.is_empty() || self.attributes.tags.iter().any(|t| t.to_lowercase() == tag.to_lowercase()) {
+        if tag.is_empty()
+            || self
+                .attributes
+                .tags
+                .iter()
+                .any(|t| t.to_lowercase() == tag.to_lowercase())
+        {
             return false;
         }
         self.attributes.tags.push(tag.to_owned());
@@ -73,15 +79,30 @@ impl Media {
     /// and `3*` or `★★★` for at least that many stars. A blank search fits everything.
     pub fn matches(&self, query: &str) -> bool {
         let attributes = &self.attributes;
-        let haystack = format!("{}\n{}\n{}", self.name, attributes.notes, attributes.tags.join("\n")).to_lowercase();
+        let haystack = format!(
+            "{}\n{}\n{}",
+            self.name,
+            attributes.notes,
+            attributes.tags.join("\n")
+        )
+        .to_lowercase();
         query.split_whitespace().all(|word| {
-            let stars = word.strip_suffix('*').and_then(|n| n.parse::<u8>().ok())
-                .or_else(|| word.chars().all(|c| c == '★').then(|| word.chars().count() as u8));
+            let stars = word
+                .strip_suffix('*')
+                .and_then(|n| n.parse::<u8>().ok())
+                .or_else(|| {
+                    word.chars()
+                        .all(|c| c == '★')
+                        .then(|| word.chars().count() as u8)
+                });
             if let Some(stars) = stars {
                 return attributes.rating >= stars;
             }
             match word.strip_prefix('#').filter(|tag| !tag.is_empty()) {
-                Some(tag) => attributes.tags.iter().any(|t| t.to_lowercase() == tag.to_lowercase()),
+                Some(tag) => attributes
+                    .tags
+                    .iter()
+                    .any(|t| t.to_lowercase() == tag.to_lowercase()),
                 None => haystack.contains(&word.to_lowercase()),
             }
         })
@@ -89,7 +110,14 @@ impl Media {
 
     /// What the web StreamCuts' media info shows: kind, size, frame rate, length, sound, and the file's size.
     pub fn info(&self) -> String {
-        let mut parts = vec![match self.kind { MediaKind::Video => "Video", MediaKind::Audio => "Sound", MediaKind::Image => "Picture" }.to_owned()];
+        let mut parts = vec![
+            match self.kind {
+                MediaKind::Video => "Video",
+                MediaKind::Audio => "Sound",
+                MediaKind::Image => "Picture",
+            }
+            .to_owned(),
+        ];
         if self.kind != MediaKind::Audio {
             parts.push(format!("{}×{}", self.width, self.height));
         }
@@ -98,10 +126,22 @@ impl Media {
         }
         if self.kind != MediaKind::Image {
             let seconds = self.duration.round() as u64;
-            parts.push(format!("{}:{:02}:{:02}", seconds / 3600, seconds / 60 % 60, seconds % 60));
+            parts.push(format!(
+                "{}:{:02}:{:02}",
+                seconds / 3600,
+                seconds / 60 % 60,
+                seconds % 60
+            ));
         }
         if self.kind == MediaKind::Video {
-            parts.push(if self.has_audio { "with sound" } else { "no sound" }.into());
+            parts.push(
+                if self.has_audio {
+                    "with sound"
+                } else {
+                    "no sound"
+                }
+                .into(),
+            );
         }
         if let Ok(meta) = std::fs::metadata(&self.path) {
             parts.push(format!("{:.1} MB", meta.len() as f64 / 1_048_576.0));
@@ -110,7 +150,11 @@ impl Media {
     }
     /// How long a clip of this media can be.
     pub fn max_length(&self) -> f64 {
-        if self.kind == MediaKind::Image { f64::INFINITY } else { self.duration }
+        if self.kind == MediaKind::Image {
+            f64::INFINITY
+        } else {
+            self.duration
+        }
     }
 }
 
@@ -189,7 +233,12 @@ pub struct Grade {
 
 impl Default for Grade {
     fn default() -> Self {
-        Self { brightness: 0.0, contrast: 1.0, saturation: 1.0, wheels: Wheels::default() }
+        Self {
+            brightness: 0.0,
+            contrast: 1.0,
+            saturation: 1.0,
+            wheels: Wheels::default(),
+        }
     }
 }
 
@@ -200,7 +249,12 @@ impl Grade {
 
     pub fn filter(self) -> Option<String> {
         let eq = (self.brightness, self.contrast, self.saturation) != (0.0, 1.0, 1.0);
-        let eq = eq.then(|| format!("eq=brightness={:.3}:contrast={:.3}:saturation={:.3}", self.brightness, self.contrast, self.saturation));
+        let eq = eq.then(|| {
+            format!(
+                "eq=brightness={:.3}:contrast={:.3}:saturation={:.3}",
+                self.brightness, self.contrast, self.saturation
+            )
+        });
         match (eq, self.wheels.filter()) {
             (Some(eq), Some(wheels)) => Some(format!("{eq},{wheels}")),
             (eq, wheels) => eq.or(wheels),
@@ -280,10 +334,22 @@ impl Wheels {
             return None;
         }
         let curve = |c: usize| {
-            let (lift, gamma, gain) = (self.lift.channel(c), (1.0 + self.gamma.channel(c)).max(0.1), (1.0 + self.gain.channel(c)).max(0.0));
-            format!("'maxval*pow(clip(({gain:.4})*(val/maxval+({lift:.4})*(1-val/maxval)),0,1),{:.4})'", 1.0 / gamma)
+            let (lift, gamma, gain) = (
+                self.lift.channel(c),
+                (1.0 + self.gamma.channel(c)).max(0.1),
+                (1.0 + self.gain.channel(c)).max(0.0),
+            );
+            format!(
+                "'maxval*pow(clip(({gain:.4})*(val/maxval+({lift:.4})*(1-val/maxval)),0,1),{:.4})'",
+                1.0 / gamma
+            )
         };
-        Some(format!("lutrgb=r={}:g={}:b={}", curve(0), curve(1), curve(2)))
+        Some(format!(
+            "lutrgb=r={}:g={}:b={}",
+            curve(0),
+            curve(1),
+            curve(2)
+        ))
     }
 }
 
@@ -318,21 +384,35 @@ pub struct Curves {
 
 impl Default for Curves {
     fn default() -> Self {
-        Self { master: CURVE_KNOTS, red: CURVE_KNOTS, green: CURVE_KNOTS, blue: CURVE_KNOTS }
+        Self {
+            master: CURVE_KNOTS,
+            red: CURVE_KNOTS,
+            green: CURVE_KNOTS,
+            blue: CURVE_KNOTS,
+        }
     }
 }
 
 impl Curves {
     /// FFmpeg's `curves` with the channels that aren't straight; `None` when none is bent.
     pub fn filter(self) -> Option<String> {
-        let channels: Vec<String> = [("master", self.master), ("red", self.red), ("green", self.green), ("blue", self.blue)]
-            .into_iter()
-            .filter(|(_, points)| *points != CURVE_KNOTS)
-            .map(|(name, points)| {
-                let points: Vec<String> = CURVE_KNOTS.iter().zip(points).map(|(x, y)| format!("{x}/{:.3}", y.clamp(0.0, 1.0))).collect();
-                format!("{name}='{}'", points.join(" "))
-            })
-            .collect();
+        let channels: Vec<String> = [
+            ("master", self.master),
+            ("red", self.red),
+            ("green", self.green),
+            ("blue", self.blue),
+        ]
+        .into_iter()
+        .filter(|(_, points)| *points != CURVE_KNOTS)
+        .map(|(name, points)| {
+            let points: Vec<String> = CURVE_KNOTS
+                .iter()
+                .zip(points)
+                .map(|(x, y)| format!("{x}/{:.3}", y.clamp(0.0, 1.0)))
+                .collect();
+            format!("{name}='{}'", points.join(" "))
+        })
+        .collect();
         (!channels.is_empty()).then(|| format!("curves=interp=pchip:{}", channels.join(":")))
     }
 }
@@ -347,12 +427,19 @@ pub fn curve_at(points: &[f32; 5], x: f32) -> f32 {
     tangents[4] = slopes[3];
     for i in 1..4 {
         let (a, b) = (slopes[i - 1], slopes[i]);
-        tangents[i] = if a * b <= 0.0 { 0.0 } else { 2.0 * a * b / (a + b) };
+        tangents[i] = if a * b <= 0.0 {
+            0.0
+        } else {
+            2.0 * a * b / (a + b)
+        };
     }
     let i = ((x.clamp(0.0, 1.0) / h) as usize).min(3);
     let t = (x.clamp(0.0, 1.0) - k[i]) / h;
     let (t2, t3) = (t * t, t * t * t);
-    let y = (2.0 * t3 - 3.0 * t2 + 1.0) * points[i] + (t3 - 2.0 * t2 + t) * h * tangents[i] + (-2.0 * t3 + 3.0 * t2) * points[i + 1] + (t3 - t2) * h * tangents[i + 1];
+    let y = (2.0 * t3 - 3.0 * t2 + 1.0) * points[i]
+        + (t3 - 2.0 * t2 + t) * h * tangents[i]
+        + (-2.0 * t3 + 3.0 * t2) * points[i + 1]
+        + (t3 - t2) * h * tangents[i + 1];
     y.clamp(0.0, 1.0)
 }
 
@@ -370,7 +457,15 @@ pub enum Look {
 }
 
 impl Look {
-    pub const ALL: [Look; 7] = [Look::Lighter, Look::Darker, Look::MediumContrast, Look::StrongContrast, Look::Vintage, Look::CrossProcess, Look::Negative];
+    pub const ALL: [Look; 7] = [
+        Look::Lighter,
+        Look::Darker,
+        Look::MediumContrast,
+        Look::StrongContrast,
+        Look::Vintage,
+        Look::CrossProcess,
+        Look::Negative,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -398,14 +493,27 @@ impl Look {
 }
 
 impl Effects {
-    pub fn is_neutral(self) -> bool { self.blur == 0.0 && self.sharpen == 0.0 && self.look.is_none() && self.curves == Curves::default() }
+    pub fn is_neutral(self) -> bool {
+        self.blur == 0.0
+            && self.sharpen == 0.0
+            && self.look.is_none()
+            && self.curves == Curves::default()
+    }
 
     pub fn filter(self) -> String {
         let mut chain = String::new();
-        if let Some(look) = self.look { chain.push_str(&format!(",curves=preset={}", look.preset())); }
-        if let Some(curves) = self.curves.filter() { chain.push_str(&format!(",{curves}")); }
-        if self.blur > 0.0 { chain.push_str(&format!(",gblur=sigma={:.2}", self.blur.clamp(0.0, 20.0))); }
-        if self.sharpen > 0.0 { chain.push_str(&format!(",unsharp=5:5:{:.2}", self.sharpen.clamp(0.0, 2.0))); }
+        if let Some(look) = self.look {
+            chain.push_str(&format!(",curves=preset={}", look.preset()));
+        }
+        if let Some(curves) = self.curves.filter() {
+            chain.push_str(&format!(",{curves}"));
+        }
+        if self.blur > 0.0 {
+            chain.push_str(&format!(",gblur=sigma={:.2}", self.blur.clamp(0.0, 20.0)));
+        }
+        if self.sharpen > 0.0 {
+            chain.push_str(&format!(",unsharp=5:5:{:.2}", self.sharpen.clamp(0.0, 2.0)));
+        }
         chain
     }
 }
@@ -427,24 +535,46 @@ impl Project {
             return false;
         }
         let at = self.markers.partition_point(|m| m.t < t);
-        self.markers.insert(at, Marker { id: new_id(), t, label: label.into() });
+        self.markers.insert(
+            at,
+            Marker {
+                id: new_id(),
+                t,
+                label: label.into(),
+            },
+        );
         true
     }
 
     /// Marks where a media's scene changes (source seconds) show on the timeline, in every clip that plays them.
     /// Returns how many markers were added.
     pub fn mark_scenes(&mut self, media_id: &str, cuts: &[f64]) -> usize {
-        let times: Vec<f64> = self.tracks.iter().flat_map(|t| t.clips.iter()).filter(|c| c.media_id == media_id)
-            .flat_map(|c| cuts.iter().filter(|&&s| s > c.source_in && s < c.source_in + c.source_length()).map(move |&s| c.start + (s - c.source_in) / c.speed))
+        let times: Vec<f64> = self
+            .tracks
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .filter(|c| c.media_id == media_id)
+            .flat_map(|c| {
+                cuts.iter()
+                    .filter(|&&s| s > c.source_in && s < c.source_in + c.source_length())
+                    .map(move |&s| c.start + (s - c.source_in) / c.speed)
+            })
             .collect();
-        times.into_iter().filter(|&t| self.add_marker(t, "Scene")).count()
+        times
+            .into_iter()
+            .filter(|&t| self.add_marker(t, "Scene"))
+            .count()
     }
 
     /// The nearest marker after (or, `back`, before) `t`.
     pub fn next_marker(&self, t: f64, back: bool) -> Option<f64> {
         let frame = 0.5 / self.fps.max(1) as f64;
         if back {
-            self.markers.iter().rev().map(|m| m.t).find(|&m| m < t - frame)
+            self.markers
+                .iter()
+                .rev()
+                .map(|m| m.t)
+                .find(|&m| m < t - frame)
         } else {
             self.markers.iter().map(|m| m.t).find(|&m| m > t + frame)
         }
@@ -467,7 +597,12 @@ pub enum ExportFormat {
 }
 
 impl ExportFormat {
-    pub const ALL: [ExportFormat; 4] = [ExportFormat::Mp4, ExportFormat::Prores, ExportFormat::Av1, ExportFormat::Audio];
+    pub const ALL: [ExportFormat; 4] = [
+        ExportFormat::Mp4,
+        ExportFormat::Prores,
+        ExportFormat::Av1,
+        ExportFormat::Audio,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -540,22 +675,37 @@ pub struct FollowRef(usize);
 
 impl FollowRef {
     pub fn of(track: &[Focus]) -> Self {
-        let mut follows = FOLLOWS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        Self(follows.iter().position(|f| f.as_slice() == track).unwrap_or_else(|| {
-            follows.push(std::sync::Arc::new(track.to_vec()));
-            follows.len() - 1
-        }))
+        let mut follows = FOLLOWS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Self(
+            follows
+                .iter()
+                .position(|f| f.as_slice() == track)
+                .unwrap_or_else(|| {
+                    follows.push(std::sync::Arc::new(track.to_vec()));
+                    follows.len() - 1
+                }),
+        )
     }
 
     pub fn track(self) -> std::sync::Arc<Vec<Focus>> {
-        FOLLOWS.lock().unwrap_or_else(|poisoned| poisoned.into_inner())[self.0].clone()
+        FOLLOWS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())[self.0]
+            .clone()
     }
 }
 
 /// A focus track as an FFmpeg expression of a filter's frame time `t`: straight between its points, level before the
 /// first and after the last. `origin` is the source time of the filter's first frame, and `rate` how many source
 /// seconds a second of its frames covers (the clip's speed, once `setpts` has paced it).
-fn focus_expression(track: &[Focus], origin: f64, rate: f64, value: impl Fn(&Focus) -> f32) -> String {
+fn focus_expression(
+    track: &[Focus],
+    origin: f64,
+    rate: f64,
+    value: impl Fn(&Focus) -> f32,
+) -> String {
     let at = |focus: &Focus| (focus.t - origin) / rate.max(1e-6);
     let (first, last) = (&track[0], &track[track.len() - 1]);
     let mut terms = vec![format!("{:.4}*lt(t,{:.3})", value(first), at(first))];
@@ -566,7 +716,10 @@ fn focus_expression(track: &[Focus], origin: f64, rate: f64, value: impl Fn(&Foc
             continue;
         }
         let slope = (value(b) - value(a)) as f64 / (to - from);
-        terms.push(format!("({:.4}+{slope:.6}*(t-({from:.3})))*gte(t,{from:.3})*lt(t,{to:.3})", value(a)));
+        terms.push(format!(
+            "({:.4}+{slope:.6}*(t-({from:.3})))*gte(t,{from:.3})*lt(t,{to:.3})",
+            value(a)
+        ));
     }
     terms.push(format!("{:.4}*gte(t,{:.3})", value(last), at(last)));
     terms.join("+")
@@ -575,8 +728,13 @@ fn focus_expression(track: &[Focus], origin: f64, rate: f64, value: impl Fn(&Foc
 /// Fills a `width`x`height` frame like `Framing::Fill`, the crop's middle on the focus as it moves (or as near as the
 /// picture's edges allow).
 fn follow_filter(track: &[Focus], width: u32, height: u32, origin: f64, rate: f64) -> String {
-    let (x, y) = (focus_expression(track, origin, rate, |f| f.x), focus_expression(track, origin, rate, |f| f.y));
-    format!("scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height}:'clip(({x})*iw-ow/2,0,iw-ow)':'clip(({y})*ih-oh/2,0,ih-oh)'")
+    let (x, y) = (
+        focus_expression(track, origin, rate, |f| f.x),
+        focus_expression(track, origin, rate, |f| f.y),
+    );
+    format!(
+        "scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height}:'clip(({x})*iw-ow/2,0,iw-ow)':'clip(({y})*ih-oh/2,0,ih-oh)'"
+    )
 }
 
 /// Keeps the fewest points that stay within `tolerance` of the track (Ramer-Douglas-Peucker), loosening it until at
@@ -586,8 +744,14 @@ pub fn simplify_track(track: &[Focus], tolerance: f32, most: usize) -> Vec<Focus
         let (a, b) = (track[from], track[to]);
         let mut worst = (0.0f32, from);
         for (i, p) in track.iter().enumerate().take(to).skip(from + 1) {
-            let k = if b.t > a.t { ((p.t - a.t) / (b.t - a.t)) as f32 } else { 0.0 };
-            let off = (a.x + (b.x - a.x) * k - p.x).abs().max((a.y + (b.y - a.y) * k - p.y).abs());
+            let k = if b.t > a.t {
+                ((p.t - a.t) / (b.t - a.t)) as f32
+            } else {
+                0.0
+            };
+            let off = (a.x + (b.x - a.x) * k - p.x)
+                .abs()
+                .max((a.y + (b.y - a.y) * k - p.y).abs());
             if off > worst.0 {
                 worst = (off, i);
             }
@@ -606,7 +770,12 @@ pub fn simplify_track(track: &[Focus], tolerance: f32, most: usize) -> Vec<Focus
         let mut kept = vec![false; track.len()];
         (kept[0], kept[track.len() - 1]) = (true, true);
         keep(track, tolerance, &mut kept, 0, track.len() - 1);
-        let out: Vec<Focus> = track.iter().zip(&kept).filter(|(_, k)| **k).map(|(f, _)| *f).collect();
+        let out: Vec<Focus> = track
+            .iter()
+            .zip(&kept)
+            .filter(|(_, k)| **k)
+            .map(|(f, _)| *f)
+            .collect();
         if out.len() <= most.max(2) {
             return out;
         }
@@ -667,7 +836,9 @@ impl Picture {
     /// moving crop needs to know when each frame is).
     pub fn filter_at(self, width: u32, height: u32, origin: f64, rate: f64) -> String {
         let mut color = match (self.framing, self.follow.map(FollowRef::track)) {
-            (Framing::Fill { .. }, Some(track)) if !track.is_empty() => follow_filter(&track, width, height, origin, rate),
+            (Framing::Fill { .. }, Some(track)) if !track.is_empty() => {
+                follow_filter(&track, width, height, origin, rate)
+            }
             (framing, _) => framing.filter(width, height),
         };
         // The LUT first (it turns a camera's log footage into normal color), then the grade. A LUT file that's gone is
@@ -697,7 +868,9 @@ impl Framing {
     /// The FFmpeg filters that put a picture into a `width`x`height` frame this way.
     pub fn filter(self, width: u32, height: u32) -> String {
         match self {
-            Framing::Fit => format!("scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black"),
+            Framing::Fit => format!(
+                "scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black"
+            ),
             Framing::Fill { x, y } => format!(
                 "scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height}:(iw-ow)*{:.3}:(ih-oh)*{:.3}",
                 x.clamp(0.0, 1.0),
@@ -728,12 +901,26 @@ impl Clip {
     }
     pub fn picture(&self) -> Picture {
         let follow = (!self.follow.is_empty()).then(|| FollowRef::of(&self.follow));
-        Picture { framing: self.framing, follow, lut: self.lut.as_deref().map(LutRef::of), grade: self.grade, effects: self.effects }
+        Picture {
+            framing: self.framing,
+            follow,
+            lut: self.lut.as_deref().map(LutRef::of),
+            grade: self.grade,
+            effects: self.effects,
+        }
     }
     /// How far faded in the clip is at timeline time `t`: 0 is black (silent), 1 is full.
     pub fn fade_at(&self, t: f64) -> f64 {
-        let fade_in = if self.fade_in > 0.0 { (t - self.start) / self.fade_in } else { 1.0 };
-        let fade_out = if self.fade_out > 0.0 { (self.end() - t) / self.fade_out } else { 1.0 };
+        let fade_in = if self.fade_in > 0.0 {
+            (t - self.start) / self.fade_in
+        } else {
+            1.0
+        };
+        let fade_out = if self.fade_out > 0.0 {
+            (self.end() - t) / self.fade_out
+        } else {
+            1.0
+        };
         fade_in.min(fade_out).clamp(0.0, 1.0)
     }
 }
@@ -859,7 +1046,10 @@ impl Caption {
     /// Which of its words is being said at `t`: each from its start until the next one's, the last until the caption
     /// ends. `None` before the first, or when its word times don't match its text word for word.
     pub fn word_at(&self, t: f64) -> Option<usize> {
-        if self.words.is_empty() || self.words.len() != word_spans(&self.text).len() || t >= self.end {
+        if self.words.is_empty()
+            || self.words.len() != word_spans(&self.text).len()
+            || t >= self.end
+        {
             return None;
         }
         self.words.iter().rposition(|w| w.start <= t)
@@ -912,8 +1102,24 @@ impl Project {
             fps: 30,
             media: Vec::new(),
             tracks: vec![
-                Track { id: new_id(), kind: TrackKind::Video, name: "Video 1".into(), muted: false, hidden: false, locked: false, clips: Vec::new() },
-                Track { id: new_id(), kind: TrackKind::Audio, name: "Audio 1".into(), muted: false, hidden: false, locked: false, clips: Vec::new() },
+                Track {
+                    id: new_id(),
+                    kind: TrackKind::Video,
+                    name: "Video 1".into(),
+                    muted: false,
+                    hidden: false,
+                    locked: false,
+                    clips: Vec::new(),
+                },
+                Track {
+                    id: new_id(),
+                    kind: TrackKind::Audio,
+                    name: "Audio 1".into(),
+                    muted: false,
+                    hidden: false,
+                    locked: false,
+                    clips: Vec::new(),
+                },
             ],
             captions: Vec::new(),
             markers: Vec::new(),
@@ -929,7 +1135,14 @@ impl Project {
 
     /// Adds a three-second title in the middle of the frame at `at` and returns its id.
     pub fn add_title(&mut self, at: f64) -> String {
-        let title = Title { id: new_id(), start: at, end: at + 3.0, text: "Your title".into(), y: middle(), size: title_size() };
+        let title = Title {
+            id: new_id(),
+            start: at,
+            end: at + 3.0,
+            text: "Your title".into(),
+            y: middle(),
+            size: title_size(),
+        };
         let id = title.id.clone();
         self.titles.push(title);
         self.titles.sort_by(|a, b| a.start.total_cmp(&b.start));
@@ -959,7 +1172,10 @@ impl Project {
 
     /// Takes media out of the project, if no clip uses it.
     pub fn remove_media(&mut self, id: &str) -> bool {
-        let used = self.tracks.iter().any(|t| t.clips.iter().any(|c| c.media_id == id));
+        let used = self
+            .tracks
+            .iter()
+            .any(|t| t.clips.iter().any(|c| c.media_id == id));
         let before = self.media.len();
         if !used {
             self.media.retain(|m| m.id != id);
@@ -969,8 +1185,15 @@ impl Project {
 
     /// Media the timeline uses whose file isn't where the project says it is.
     pub fn missing_media(&self) -> Vec<&Media> {
-        let used: Vec<&str> = self.tracks.iter().flat_map(|t| t.clips.iter().map(|c| c.media_id.as_str())).collect();
-        self.media.iter().filter(|m| used.contains(&m.id.as_str()) && !m.path.is_file()).collect()
+        let used: Vec<&str> = self
+            .tracks
+            .iter()
+            .flat_map(|t| t.clips.iter().map(|c| c.media_id.as_str()))
+            .collect();
+        self.media
+            .iter()
+            .filter(|m| used.contains(&m.id.as_str()) && !m.path.is_file())
+            .collect()
     }
 
     pub fn media(&self, id: &str) -> Option<&Media> {
@@ -980,41 +1203,74 @@ impl Project {
     /// The end of the last clip.
     /// Where the last clip or title ends: a title after the clips shows over black (an end card).
     pub fn duration(&self) -> f64 {
-        let clips = self.tracks.iter().flat_map(|t| t.clips.iter().map(Clip::end)).fold(0.0, f64::max);
+        let clips = self
+            .tracks
+            .iter()
+            .flat_map(|t| t.clips.iter().map(Clip::end))
+            .fold(0.0, f64::max);
         self.titles.iter().map(|t| t.end).fold(clips, f64::max)
     }
 
     pub fn find(&self, clip_id: &str) -> Option<ClipRef> {
-        self.tracks.iter().enumerate().find_map(|(track, t)| t.clips.iter().position(|c| c.id == clip_id).map(|index| ClipRef { track, index }))
+        self.tracks.iter().enumerate().find_map(|(track, t)| {
+            t.clips
+                .iter()
+                .position(|c| c.id == clip_id)
+                .map(|index| ClipRef { track, index })
+        })
     }
 
     pub fn clip(&self, clip_id: &str) -> Option<&Clip> {
-        self.find(clip_id).map(|r| &self.tracks[r.track].clips[r.index])
+        self.find(clip_id)
+            .map(|r| &self.tracks[r.track].clips[r.index])
     }
 
     pub fn clip_mut(&mut self, clip_id: &str) -> Option<&mut Clip> {
-        self.find(clip_id).map(|r| &mut self.tracks[r.track].clips[r.index])
+        self.find(clip_id)
+            .map(|r| &mut self.tracks[r.track].clips[r.index])
     }
 
     /// The most this clip can crossfade from its immediate predecessor without reaching past the old source.
     pub fn crossfade_limit(&self, clip_id: &str) -> f64 {
-        let Some(at) = self.find(clip_id) else { return 0.0 };
-        if self.tracks[at.track].kind != TrackKind::Video || at.index == 0 { return 0.0; }
+        let Some(at) = self.find(clip_id) else {
+            return 0.0;
+        };
+        if self.tracks[at.track].kind != TrackKind::Video || at.index == 0 {
+            return 0.0;
+        }
         let incoming = &self.tracks[at.track].clips[at.index];
         let outgoing = &self.tracks[at.track].clips[at.index - 1];
-        if (outgoing.end() - incoming.start).abs() > 0.002 { return 0.0; }
-        let Some(media) = self.media(&outgoing.media_id) else { return 0.0 };
-        if media.kind != MediaKind::Video || self.media(&incoming.media_id).is_none_or(|m| m.kind != MediaKind::Video) { return 0.0; }
-        let tail = (media.max_length() - outgoing.source_in - outgoing.source_length()) / outgoing.speed;
-        tail.max(0.0).min(incoming.duration).min(outgoing.duration).min(3.0)
+        if (outgoing.end() - incoming.start).abs() > 0.002 {
+            return 0.0;
+        }
+        let Some(media) = self.media(&outgoing.media_id) else {
+            return 0.0;
+        };
+        if media.kind != MediaKind::Video
+            || self
+                .media(&incoming.media_id)
+                .is_none_or(|m| m.kind != MediaKind::Video)
+        {
+            return 0.0;
+        }
+        let tail =
+            (media.max_length() - outgoing.source_in - outgoing.source_length()) / outgoing.speed;
+        tail.max(0.0)
+            .min(incoming.duration)
+            .min(outgoing.duration)
+            .min(3.0)
     }
 
     pub fn crossfade_before(&self, clip_id: &str) -> Option<(&Clip, f64)> {
         let at = self.find(clip_id)?;
-        if at.index == 0 { return None; }
+        if at.index == 0 {
+            return None;
+        }
         let incoming = &self.tracks[at.track].clips[at.index];
         let outgoing = &self.tracks[at.track].clips[at.index - 1];
-        if incoming.crossfade_from.as_deref() != Some(outgoing.id.as_str()) { return None; }
+        if incoming.crossfade_from.as_deref() != Some(outgoing.id.as_str()) {
+            return None;
+        }
         let duration = incoming.crossfade_in.min(self.crossfade_limit(clip_id));
         (duration > 0.0).then_some((outgoing, duration))
     }
@@ -1036,8 +1292,12 @@ impl Project {
     }
 
     pub fn crossfade_after(&self, clip_id: &str) -> f64 {
-        let Some(at) = self.find(clip_id) else { return 0.0 };
-        self.tracks[at.track].clips.get(at.index + 1)
+        let Some(at) = self.find(clip_id) else {
+            return 0.0;
+        };
+        self.tracks[at.track]
+            .clips
+            .get(at.index + 1)
             .and_then(|next| self.crossfade_before(&next.id).map(|(_, d)| d))
             .unwrap_or(0.0)
     }
@@ -1046,9 +1306,17 @@ impl Project {
     pub fn crossfade_at(&self, t: f64) -> Option<(&Clip, &Media, &Clip, &Media, f64)> {
         let (incoming, incoming_media) = self.front_clip(t)?;
         let (outgoing, duration) = self.crossfade_before(&incoming.id)?;
-        if t >= incoming.start + duration { return None; }
+        if t >= incoming.start + duration {
+            return None;
+        }
         let outgoing_media = self.media(&outgoing.media_id)?;
-        Some((outgoing, outgoing_media, incoming, incoming_media, (t - incoming.start) / duration))
+        Some((
+            outgoing,
+            outgoing_media,
+            incoming,
+            incoming_media,
+            (t - incoming.start) / duration,
+        ))
     }
 
     /// Adds media, or returns the one already added from the same file.
@@ -1063,7 +1331,11 @@ impl Project {
 
     /// The track kind a medium's clips go on.
     pub fn track_kind_for(kind: MediaKind) -> TrackKind {
-        if kind == MediaKind::Audio { TrackKind::Audio } else { TrackKind::Video }
+        if kind == MediaKind::Audio {
+            TrackKind::Audio
+        } else {
+            TrackKind::Video
+        }
     }
 
     /// The first track of a kind, adding one if the project has none.
@@ -1081,7 +1353,15 @@ impl Project {
             TrackKind::Video => format!("Video {}", count + 1),
             TrackKind::Audio => format!("Audio {}", count + 1),
         };
-        let track = Track { id: new_id(), kind, name, muted: false, hidden: false, locked: false, clips: Vec::new() };
+        let track = Track {
+            id: new_id(),
+            kind,
+            name,
+            muted: false,
+            hidden: false,
+            locked: false,
+            clips: Vec::new(),
+        };
         match kind {
             TrackKind::Video => {
                 self.tracks.insert(0, track);
@@ -1095,13 +1375,19 @@ impl Project {
     }
 
     fn overlaps(track: &Track, start: f64, end: f64, ignore: Option<&str>) -> bool {
-        track.clips.iter().any(|c| Some(c.id.as_str()) != ignore && start < c.end() - 1e-9 && end > c.start + 1e-9)
+        track.clips.iter().any(|c| {
+            Some(c.id.as_str()) != ignore && start < c.end() - 1e-9 && end > c.start + 1e-9
+        })
     }
 
     /// The earliest start at or after `at` where a clip this long fits on the track.
     pub fn free_start(&self, track: usize, at: f64, duration: f64, ignore: Option<&str>) -> f64 {
         let mut start = at.max(0.0);
-        let mut clips: Vec<&Clip> = self.tracks[track].clips.iter().filter(|c| Some(c.id.as_str()) != ignore).collect();
+        let mut clips: Vec<&Clip> = self.tracks[track]
+            .clips
+            .iter()
+            .filter(|c| Some(c.id.as_str()) != ignore)
+            .collect();
         clips.sort_by(|a, b| a.start.total_cmp(&b.start));
         for clip in clips {
             if start + duration <= clip.start + 1e-9 {
@@ -1122,9 +1408,33 @@ impl Project {
             Some(t) if self.tracks.get(t).map(|t| t.kind) == Some(kind) => t,
             _ => self.track_of_kind(kind),
         };
-        let duration = if media.kind == MediaKind::Image { STILL_SECONDS } else { media.duration.max(MIN_CLIP) };
+        let duration = if media.kind == MediaKind::Image {
+            STILL_SECONDS
+        } else {
+            media.duration.max(MIN_CLIP)
+        };
         let start = self.free_start(track, at, duration, None);
-        let clip = Clip { id: new_id(), media_id: media.id.clone(), start, source_in: 0.0, duration, volume: 1.0, fade_in: 0.0, fade_out: 0.0, crossfade_in: 0.0, crossfade_from: None, transition: Transition::default(), framing: Framing::Fit, grade: Grade::default(), effects: Effects::default(), sound: Sound::default(), lut: None, follow: Vec::new(), link: None, speed: 1.0 };
+        let clip = Clip {
+            id: new_id(),
+            media_id: media.id.clone(),
+            start,
+            source_in: 0.0,
+            duration,
+            volume: 1.0,
+            fade_in: 0.0,
+            fade_out: 0.0,
+            crossfade_in: 0.0,
+            crossfade_from: None,
+            transition: Transition::default(),
+            framing: Framing::Fit,
+            grade: Grade::default(),
+            effects: Effects::default(),
+            sound: Sound::default(),
+            lut: None,
+            follow: Vec::new(),
+            link: None,
+            speed: 1.0,
+        };
         let id = clip.id.clone();
         self.tracks[track].clips.push(clip);
         self.sort_track(track);
@@ -1132,42 +1442,61 @@ impl Project {
     }
 
     fn sort_track(&mut self, track: usize) {
-        self.tracks[track].clips.sort_by(|a, b| a.start.total_cmp(&b.start));
+        self.tracks[track]
+            .clips
+            .sort_by(|a, b| a.start.total_cmp(&b.start));
     }
 
     /// The clip linked to `clip_id`, if it's still there.
     pub fn linked(&self, clip_id: &str) -> Option<String> {
-        self.clip(clip_id)?.link.clone().filter(|id| self.find(id).is_some())
+        self.clip(clip_id)?
+            .link
+            .clone()
+            .filter(|id| self.find(id).is_some())
     }
 
     /// Whether a video clip's sound plays from its linked clip on an audio track instead.
     pub fn sounds_elsewhere(&self, clip: &Clip) -> bool {
         let kind = |id: &str| self.find(id).map(|at| self.tracks[at.track].kind);
-        kind(&clip.id) == Some(TrackKind::Video) && clip.link.as_deref().and_then(kind) == Some(TrackKind::Audio)
+        kind(&clip.id) == Some(TrackKind::Video)
+            && clip.link.as_deref().and_then(kind) == Some(TrackKind::Audio)
     }
 
     /// Runs `edit` on a clip, then gives the clip linked to it the same place, length and footage, so the two stay in
     /// step. If the linked clip has no room for that on its track, neither changes. Returns whether anything did.
     fn keep_linked(&mut self, clip_id: &str, edit: impl FnOnce(&mut Self) -> bool) -> bool {
-        let Some(partner) = self.linked(clip_id) else { return edit(self) };
+        let Some(partner) = self.linked(clip_id) else {
+            return edit(self);
+        };
         let (tracks, captions) = (self.tracks.clone(), self.captions.clone());
         let before = self.clip(&partner).cloned().unwrap();
         if !edit(self) {
             return false;
         }
-        let Some(clip) = self.clip(clip_id).cloned() else { return true };
+        let Some(clip) = self.clip(clip_id).cloned() else {
+            return true;
+        };
         let at = self.find(&partner).unwrap();
-        if Self::overlaps(&self.tracks[at.track], clip.start, clip.end(), Some(&partner)) {
+        if Self::overlaps(
+            &self.tracks[at.track],
+            clip.start,
+            clip.end(),
+            Some(&partner),
+        ) {
             (self.tracks, self.captions) = (tracks, captions);
             return false;
         }
         let other = &mut self.tracks[at.track].clips[at.index];
-        (other.start, other.duration, other.source_in, other.speed) = (clip.start, clip.duration, clip.source_in, clip.speed);
+        (other.start, other.duration, other.source_in, other.speed) =
+            (clip.start, clip.duration, clip.source_in, clip.speed);
         self.sort_track(at.track);
         // Captions made from the linked clip's speech go with it.
         let by = clip.start - before.start;
         if by != 0.0 {
-            self.captions.iter_mut().filter(|c| c.clip.as_deref() == Some(partner.as_str())).for_each(|c| c.shift(by));
+            self.captions
+                .iter_mut()
+                .filter(|c| c.clip.as_deref() == Some(partner.as_str()))
+                .for_each(|c| c.shift(by));
             self.captions.sort_by(|a, b| a.start.total_cmp(&b.start));
         }
         true
@@ -1179,11 +1508,18 @@ impl Project {
     pub fn detach_sound(&mut self, clip_id: &str) -> Option<String> {
         let at = self.find(clip_id)?;
         let clip = self.tracks[at.track].clips[at.index].clone();
-        if self.tracks[at.track].kind != TrackKind::Video || self.linked(clip_id).is_some() || !self.media(&clip.media_id)?.has_audio {
+        if self.tracks[at.track].kind != TrackKind::Video
+            || self.linked(clip_id).is_some()
+            || !self.media(&clip.media_id)?.has_audio
+        {
             return None;
         }
         let track = (0..self.tracks.len())
-            .find(|&t| self.tracks[t].kind == TrackKind::Audio && !self.tracks[t].locked && !Self::overlaps(&self.tracks[t], clip.start, clip.end(), None))
+            .find(|&t| {
+                self.tracks[t].kind == TrackKind::Audio
+                    && !self.tracks[t].locked
+                    && !Self::overlaps(&self.tracks[t], clip.start, clip.end(), None)
+            })
             .unwrap_or_else(|| self.add_track(TrackKind::Audio));
         let sound = Clip {
             id: new_id(),
@@ -1207,7 +1543,9 @@ impl Project {
     /// Unlinks a clip from the one linked to it. A video clip whose sound was detached stays quiet (its volume goes
     /// to 0), so nothing plays twice. Returns whether it was linked.
     pub fn unlink(&mut self, clip_id: &str) -> bool {
-        let Some(partner) = self.linked(clip_id) else { return false };
+        let Some(partner) = self.linked(clip_id) else {
+            return false;
+        };
         for id in [clip_id.to_owned(), partner] {
             let quiet = self.clip(&id).is_some_and(|c| self.sounds_elsewhere(c));
             let clip = self.clip_mut(&id).unwrap();
@@ -1223,36 +1561,68 @@ impl Project {
     /// would overlap a neighbor it lands against that neighbor's nearer edge; if there's no room at all it stays put.
     /// Returns whether it moved.
     pub fn move_clip(&mut self, clip_id: &str, start: f64, track: usize) -> bool {
-        self.keep_linked(clip_id, |project| project.move_clip_alone(clip_id, start, track))
+        self.keep_linked(clip_id, |project| {
+            project.move_clip_alone(clip_id, start, track)
+        })
     }
 
     fn move_clip_alone(&mut self, clip_id: &str, start: f64, track: usize) -> bool {
-        let Some(from) = self.find(clip_id) else { return false };
+        let Some(from) = self.find(clip_id) else {
+            return false;
+        };
         if self.tracks.get(track).map(|t| t.kind) != Some(self.tracks[from.track].kind) {
             return false;
         }
         let clip = self.tracks[from.track].clips[from.index].clone();
         let mut start = start.max(0.0);
-        if Self::overlaps(&self.tracks[track], start, start + clip.duration, Some(clip_id)) {
+        if Self::overlaps(
+            &self.tracks[track],
+            start,
+            start + clip.duration,
+            Some(clip_id),
+        ) {
             // Try just after and just before whatever is in the way, and take the closer one that fits.
             let after = self.free_start(track, start, clip.duration, Some(clip_id));
-            let before = self.tracks[track].clips.iter()
+            let before = self.tracks[track]
+                .clips
+                .iter()
                 .filter(|c| c.id != clip_id && c.start < start + clip.duration && c.end() > start)
                 .map(|c| c.start - clip.duration)
                 .fold(f64::INFINITY, f64::min);
-            let fits_before = before >= 0.0 && !Self::overlaps(&self.tracks[track], before, before + clip.duration, Some(clip_id));
-            start = if fits_before && (start - before).abs() < (after - start).abs() { before } else { after };
-            if Self::overlaps(&self.tracks[track], start, start + clip.duration, Some(clip_id)) {
+            let fits_before = before >= 0.0
+                && !Self::overlaps(
+                    &self.tracks[track],
+                    before,
+                    before + clip.duration,
+                    Some(clip_id),
+                );
+            start = if fits_before && (start - before).abs() < (after - start).abs() {
+                before
+            } else {
+                after
+            };
+            if Self::overlaps(
+                &self.tracks[track],
+                start,
+                start + clip.duration,
+                Some(clip_id),
+            ) {
                 return false;
             }
         }
         self.tracks[from.track].clips.remove(from.index);
-        self.tracks[track].clips.push(Clip { start, ..clip.clone() });
+        self.tracks[track].clips.push(Clip {
+            start,
+            ..clip.clone()
+        });
         self.sort_track(track);
         // The clip's captions go with it.
         let by = start - clip.start;
         if by != 0.0 {
-            self.captions.iter_mut().filter(|c| c.belongs_to(&clip.id, clip.start, clip.end())).for_each(|c| c.shift(by));
+            self.captions
+                .iter_mut()
+                .filter(|c| c.belongs_to(&clip.id, clip.start, clip.end()))
+                .for_each(|c| c.shift(by));
             self.captions.sort_by(|a, b| a.start.total_cmp(&b.start));
         }
         true
@@ -1262,23 +1632,32 @@ impl Project {
     pub fn left_neighbor(&self, clip_id: &str) -> Option<String> {
         let at = self.find(clip_id)?;
         let clip = &self.tracks[at.track].clips[at.index];
-        self.tracks[at.track].clips.iter().find(|c| c.id != clip.id && (c.end() - clip.start).abs() < 1e-6).map(|c| c.id.clone())
+        self.tracks[at.track]
+            .clips
+            .iter()
+            .find(|c| c.id != clip.id && (c.end() - clip.start).abs() < 1e-6)
+            .map(|c| c.id.clone())
     }
 
     /// The clip that starts exactly where `clip_id` ends on its track, if any.
     pub fn right_neighbor(&self, clip_id: &str) -> Option<String> {
         let at = self.find(clip_id)?;
         let clip = &self.tracks[at.track].clips[at.index];
-        self.tracks[at.track].clips.iter().find(|c| c.id != clip.id && (c.start - clip.end()).abs() < 1e-6).map(|c| c.id.clone())
+        self.tracks[at.track]
+            .clips
+            .iter()
+            .find(|c| c.id != clip.id && (c.start - clip.end()).abs() < 1e-6)
+            .map(|c| c.id.clone())
     }
 
     /// How far a clip could grow, in timeline seconds: its start back into the footage before its in point, and its
     /// end on into the footage after its out point. Pictures have no limit.
     fn source_room(&self, clip: &Clip) -> (f64, f64) {
         match self.media(&clip.media_id) {
-            Some(media) if media.kind != MediaKind::Image => {
-                (clip.source_in / clip.speed, (media.max_length() - clip.source_in - clip.source_length()) / clip.speed)
-            }
+            Some(media) if media.kind != MediaKind::Image => (
+                clip.source_in / clip.speed,
+                (media.max_length() - clip.source_in - clip.source_length()) / clip.speed,
+            ),
             _ => (f64::INFINITY, f64::INFINITY),
         }
     }
@@ -1287,24 +1666,47 @@ impl Project {
     /// the one touching it after starts where it now ends, each within its source and no shorter than the shortest
     /// clip. A side with a gap instead keeps the clip off the clip beyond it. Returns whether it changed.
     pub fn slide(&mut self, clip_id: &str, start: f64) -> bool {
-        let Some(at) = self.find(clip_id) else { return false };
+        let Some(at) = self.find(clip_id) else {
+            return false;
+        };
         let clip = self.tracks[at.track].clips[at.index].clone();
         let (left, right) = (self.left_neighbor(clip_id), self.right_neighbor(clip_id));
-        let others = || self.tracks[at.track].clips.iter().filter(|c| c.id != clip.id);
+        let others = || {
+            self.tracks[at.track]
+                .clips
+                .iter()
+                .filter(|c| c.id != clip.id)
+        };
         let (mut lo, mut hi) = (-clip.start, f64::INFINITY);
         match left.as_deref().and_then(|id| self.clip(id)) {
             Some(l) => {
                 lo = lo.max(MIN_CLIP - l.duration);
                 hi = hi.min(self.source_room(l).1);
             }
-            None => lo = lo.max(others().filter(|c| c.end() <= clip.start + 1e-9).map(Clip::end).fold(0.0, f64::max) - clip.start),
+            None => {
+                lo = lo.max(
+                    others()
+                        .filter(|c| c.end() <= clip.start + 1e-9)
+                        .map(Clip::end)
+                        .fold(0.0, f64::max)
+                        - clip.start,
+                )
+            }
         }
         match right.as_deref().and_then(|id| self.clip(id)) {
             Some(r) => {
                 hi = hi.min(r.duration - MIN_CLIP);
                 lo = lo.max(-self.source_room(r).0);
             }
-            None => hi = hi.min(others().filter(|c| c.start >= clip.end() - 1e-9).map(|c| c.start).fold(f64::INFINITY, f64::min) - clip.end()),
+            None => {
+                hi = hi.min(
+                    others()
+                        .filter(|c| c.start >= clip.end() - 1e-9)
+                        .map(|c| c.start)
+                        .fold(f64::INFINITY, f64::min)
+                        - clip.end(),
+                )
+            }
         }
         let by = (start - clip.start).max(lo).min(hi);
         if by.abs() < 1e-9 {
@@ -1313,7 +1715,11 @@ impl Project {
         if let Some(l) = left.as_deref().and_then(|id| self.clip_mut(id)) {
             l.duration += by;
         }
-        let right_still = right.as_deref().and_then(|id| self.clip(id)).and_then(|r| self.media(&r.media_id)).is_some_and(|m| m.kind == MediaKind::Image);
+        let right_still = right
+            .as_deref()
+            .and_then(|id| self.clip(id))
+            .and_then(|r| self.media(&r.media_id))
+            .is_some_and(|m| m.kind == MediaKind::Image);
         if let Some(r) = right.as_deref().and_then(|id| self.clip_mut(id)) {
             r.start += by;
             r.duration -= by;
@@ -1323,7 +1729,10 @@ impl Project {
         }
         self.tracks[at.track].clips[at.index].start += by;
         // The clip's captions go with it.
-        self.captions.iter_mut().filter(|c| c.belongs_to(&clip.id, clip.start, clip.end())).for_each(|c| c.shift(by));
+        self.captions
+            .iter_mut()
+            .filter(|c| c.belongs_to(&clip.id, clip.start, clip.end()))
+            .for_each(|c| c.shift(by));
         self.captions.sort_by(|a, b| a.start.total_cmp(&b.start));
         true
     }
@@ -1331,13 +1740,21 @@ impl Project {
     /// Rolls the cut between two touching clips to `t`: the first ends there and the second starts there, each
     /// within the footage its source has, and neither shorter than the shortest clip. Returns whether it changed.
     pub fn roll(&mut self, left_id: &str, right_id: &str, t: f64) -> bool {
-        let (Some(left), Some(right)) = (self.clip(left_id).cloned(), self.clip(right_id).cloned()) else { return false };
-        let Some(right_media) = self.media(&right.media_id).cloned() else { return false };
+        let (Some(left), Some(right)) = (self.clip(left_id).cloned(), self.clip(right_id).cloned())
+        else {
+            return false;
+        };
+        let Some(right_media) = self.media(&right.media_id).cloned() else {
+            return false;
+        };
         // How far each can grow into the other: the first by the footage after its out point, the second by the
         // footage before its in point.
         let (left_room, right_room) = (self.source_room(&left).1, self.source_room(&right).0);
         let cut = right.start;
-        let t = t.clamp((left.start + MIN_CLIP).max(cut - right_room), (right.end() - MIN_CLIP).min(cut + left_room));
+        let t = t.clamp(
+            (left.start + MIN_CLIP).max(cut - right_room),
+            (right.end() - MIN_CLIP).min(cut + left_room),
+        );
         if (t - cut).abs() < 1e-9 {
             return false;
         }
@@ -1360,9 +1777,13 @@ impl Project {
     }
 
     fn slip_alone(&mut self, clip_id: &str, source_in: f64) -> bool {
-        let Some(at) = self.find(clip_id) else { return false };
+        let Some(at) = self.find(clip_id) else {
+            return false;
+        };
         let clip = &self.tracks[at.track].clips[at.index];
-        let Some(media) = self.media(&clip.media_id) else { return false };
+        let Some(media) = self.media(&clip.media_id) else {
+            return false;
+        };
         if media.kind == MediaKind::Image {
             return false;
         }
@@ -1382,11 +1803,25 @@ impl Project {
     }
 
     fn trim_start_alone(&mut self, clip_id: &str, start: f64) -> bool {
-        let Some(at) = self.find(clip_id) else { return false };
+        let Some(at) = self.find(clip_id) else {
+            return false;
+        };
         let clip = self.tracks[at.track].clips[at.index].clone();
-        let previous_end = self.tracks[at.track].clips.iter().filter(|c| c.end() <= clip.start + 1e-9 && c.id != clip.id).map(Clip::end).fold(0.0, f64::max);
-        let is_still = self.media(&clip.media_id).map(|m| m.kind == MediaKind::Image).unwrap_or(false);
-        let earliest = if is_still { previous_end } else { previous_end.max(clip.start - clip.source_in / clip.speed) };
+        let previous_end = self.tracks[at.track]
+            .clips
+            .iter()
+            .filter(|c| c.end() <= clip.start + 1e-9 && c.id != clip.id)
+            .map(Clip::end)
+            .fold(0.0, f64::max);
+        let is_still = self
+            .media(&clip.media_id)
+            .map(|m| m.kind == MediaKind::Image)
+            .unwrap_or(false);
+        let earliest = if is_still {
+            previous_end
+        } else {
+            previous_end.max(clip.start - clip.source_in / clip.speed)
+        };
         let start = start.clamp(earliest, clip.end() - MIN_CLIP);
         let delta = start - clip.start;
         let c = &mut self.tracks[at.track].clips[at.index];
@@ -1405,12 +1840,21 @@ impl Project {
     }
 
     fn set_speed_alone(&mut self, clip_id: &str, speed: f64) -> bool {
-        let Some(at) = self.find(clip_id) else { return false };
+        let Some(at) = self.find(clip_id) else {
+            return false;
+        };
         let clip = self.tracks[at.track].clips[at.index].clone();
         let speed = speed.clamp(*SPEEDS.start(), *SPEEDS.end());
-        let next_start = self.tracks[at.track].clips.iter().filter(|c| c.start >= clip.end() - 1e-9 && c.id != clip.id).map(|c| c.start).fold(f64::INFINITY, f64::min);
+        let next_start = self.tracks[at.track]
+            .clips
+            .iter()
+            .filter(|c| c.start >= clip.end() - 1e-9 && c.id != clip.id)
+            .map(|c| c.start)
+            .fold(f64::INFINITY, f64::min);
         let c = &mut self.tracks[at.track].clips[at.index];
-        c.duration = (clip.source_length() / speed).min(next_start - clip.start).max(MIN_CLIP);
+        c.duration = (clip.source_length() / speed)
+            .min(next_start - clip.start)
+            .max(MIN_CLIP);
         c.speed = speed;
         c.fade_in = c.fade_in.min(c.duration / 2.0);
         c.fade_out = c.fade_out.min(c.duration / 2.0);
@@ -1423,10 +1867,20 @@ impl Project {
     }
 
     fn trim_end_alone(&mut self, clip_id: &str, end: f64) -> bool {
-        let Some(at) = self.find(clip_id) else { return false };
+        let Some(at) = self.find(clip_id) else {
+            return false;
+        };
         let clip = self.tracks[at.track].clips[at.index].clone();
-        let next_start = self.tracks[at.track].clips.iter().filter(|c| c.start >= clip.end() - 1e-9 && c.id != clip.id).map(|c| c.start).fold(f64::INFINITY, f64::min);
-        let source_left = self.media(&clip.media_id).map(|m| (m.max_length() - clip.source_in) / clip.speed).unwrap_or(f64::INFINITY);
+        let next_start = self.tracks[at.track]
+            .clips
+            .iter()
+            .filter(|c| c.start >= clip.end() - 1e-9 && c.id != clip.id)
+            .map(|c| c.start)
+            .fold(f64::INFINITY, f64::min);
+        let source_left = self
+            .media(&clip.media_id)
+            .map(|m| (m.max_length() - clip.source_in) / clip.speed)
+            .unwrap_or(f64::INFINITY);
         let latest = next_start.min(clip.start + source_left);
         let end = end.clamp(clip.start + MIN_CLIP, latest);
         self.tracks[at.track].clips[at.index].duration = end - clip.start;
@@ -1451,13 +1905,20 @@ impl Project {
         if t <= clip.start + MIN_CLIP / 2.0 || t >= clip.end() - MIN_CLIP / 2.0 {
             return None;
         }
-        let is_still = self.media(&clip.media_id).map(|m| m.kind == MediaKind::Image).unwrap_or(false);
+        let is_still = self
+            .media(&clip.media_id)
+            .map(|m| m.kind == MediaKind::Image)
+            .unwrap_or(false);
         let left = t - clip.start;
         // The left half keeps the fade in, the right half the fade out.
         let right = Clip {
             id: new_id(),
             start: t,
-            source_in: if is_still { clip.source_in } else { clip.source_in + left * clip.speed },
+            source_in: if is_still {
+                clip.source_in
+            } else {
+                clip.source_in + left * clip.speed
+            },
             duration: clip.duration - left,
             fade_in: 0.0,
             crossfade_in: 0.0,
@@ -1469,7 +1930,11 @@ impl Project {
         self.tracks[at.track].clips[at.index].duration = left;
         self.tracks[at.track].clips[at.index].fade_out = 0.0;
         // Captions of the right half's speech now belong to the right half.
-        for caption in self.captions.iter_mut().filter(|c| c.clip.as_deref() == Some(clip.id.as_str()) && c.start >= t - 1e-6) {
+        for caption in self
+            .captions
+            .iter_mut()
+            .filter(|c| c.clip.as_deref() == Some(clip.id.as_str()) && c.start >= t - 1e-6)
+        {
             caption.clip = Some(id.clone());
         }
         self.tracks[at.track].clips.insert(at.index + 1, right);
@@ -1478,15 +1943,30 @@ impl Project {
 
     /// Splits every clip under timeline time `t` (when nothing is selected, the split button cuts across all tracks).
     pub fn split_all(&mut self, t: f64) -> Vec<String> {
-        let ids: Vec<String> = self.tracks.iter().filter(|track| !track.locked)
-            .flat_map(|track| track.clips.iter().filter(|c| c.contains(t)).map(|c| c.id.clone())).collect();
+        let ids: Vec<String> = self
+            .tracks
+            .iter()
+            .filter(|track| !track.locked)
+            .flat_map(|track| {
+                track
+                    .clips
+                    .iter()
+                    .filter(|c| c.contains(t))
+                    .map(|c| c.id.clone())
+            })
+            .collect();
         ids.iter().filter_map(|id| self.split(id, t)).collect()
     }
 
     /// The ids with the clips linked to them added.
     fn with_linked(&self, clip_ids: &[String]) -> Vec<String> {
         let mut ids = clip_ids.to_vec();
-        ids.extend(clip_ids.iter().filter_map(|id| self.linked(id)).filter(|id| !clip_ids.contains(id)));
+        ids.extend(
+            clip_ids
+                .iter()
+                .filter_map(|id| self.linked(id))
+                .filter(|id| !clip_ids.contains(id)),
+        );
         ids
     }
 
@@ -1510,7 +1990,12 @@ impl Project {
         let clip_ids = &self.with_linked(clip_ids);
         let mut removed = 0;
         for track in &mut self.tracks {
-            let gone: Vec<(String, f64, f64)> = track.clips.iter().filter(|c| clip_ids.contains(&c.id)).map(|c| (c.id.clone(), c.start, c.duration)).collect();
+            let gone: Vec<(String, f64, f64)> = track
+                .clips
+                .iter()
+                .filter(|c| clip_ids.contains(&c.id))
+                .map(|c| (c.id.clone(), c.start, c.duration))
+                .collect();
             if gone.is_empty() {
                 continue;
             }
@@ -1519,15 +2004,26 @@ impl Project {
             // Captions of what's left move with their clips: those of a clip that moves by `shift` move by it too.
             let mut moves = Vec::new();
             for clip in &mut track.clips {
-                let shift: f64 = gone.iter().filter(|(_, start, _)| *start < clip.start).map(|(_, _, duration)| duration).sum();
+                let shift: f64 = gone
+                    .iter()
+                    .filter(|(_, start, _)| *start < clip.start)
+                    .map(|(_, _, duration)| duration)
+                    .sum();
                 let start = (clip.start - shift).max(0.0);
                 moves.push((clip.id.clone(), clip.start, clip.end(), start - clip.start));
                 clip.start = start;
             }
             // The deleted clips' own captions go with them.
-            self.captions.retain(|c| !gone.iter().any(|(id, start, duration)| c.belongs_to(id, *start, start + duration)));
+            self.captions.retain(|c| {
+                !gone
+                    .iter()
+                    .any(|(id, start, duration)| c.belongs_to(id, *start, start + duration))
+            });
             for (id, from, to, by) in moves.into_iter().filter(|m| m.3 != 0.0) {
-                self.captions.iter_mut().filter(|c| c.belongs_to(&id, from, to)).for_each(|c| c.shift(by));
+                self.captions
+                    .iter_mut()
+                    .filter(|c| c.belongs_to(&id, from, to))
+                    .for_each(|c| c.shift(by));
             }
         }
         removed
@@ -1535,7 +2031,8 @@ impl Project {
 
     /// The clip in front at time `t`: the topmost visible video track with a clip there.
     pub fn front_clip(&self, t: f64) -> Option<(&Clip, &Media)> {
-        self.tracks.iter()
+        self.tracks
+            .iter()
             .filter(|track| track.kind == TrackKind::Video && !track.hidden)
             .find_map(|track| track.clips.iter().find(|c| c.contains(t)))
             .and_then(|clip| self.media(&clip.media_id).map(|m| (clip, m)))
@@ -1543,18 +2040,26 @@ impl Project {
 
     /// Every clip that makes sound, with its track muted state taken into account.
     pub fn audible_clips(&self) -> Vec<(&Clip, &Media)> {
-        self.tracks.iter()
+        self.tracks
+            .iter()
             .filter(|track| !track.muted && !(track.kind == TrackKind::Video && track.hidden))
             .flat_map(|track| track.clips.iter())
             .filter_map(|clip| self.media(&clip.media_id).map(|m| (clip, m)))
-            .filter(|(clip, media)| media.has_audio && clip.volume > 0.0 && !self.sounds_elsewhere(clip))
+            .filter(|(clip, media)| {
+                media.has_audio && clip.volume > 0.0 && !self.sounds_elsewhere(clip)
+            })
             .collect()
     }
 
     /// Clip edges and the playhead, for snapping.
     pub fn snap_points(&self, ignore: &[&str]) -> Vec<f64> {
         let mut points = vec![0.0];
-        for clip in self.tracks.iter().flat_map(|t| t.clips.iter()).filter(|c| !ignore.contains(&c.id.as_str())) {
+        for clip in self
+            .tracks
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .filter(|c| !ignore.contains(&c.id.as_str()))
+        {
             points.push(clip.start);
             points.push(clip.end());
         }
@@ -1616,7 +2121,18 @@ mod tests {
     use super::*;
 
     fn media(kind: MediaKind, duration: f64) -> Media {
-        Media { id: new_id(), path: PathBuf::from(format!("C:/m/{}.mp4", new_id())), name: "m".into(), kind, duration, width: 1920, height: 1080, has_audio: kind != MediaKind::Image, frame_rate: 30.0, attributes: Attributes::default() }
+        Media {
+            id: new_id(),
+            path: PathBuf::from(format!("C:/m/{}.mp4", new_id())),
+            name: "m".into(),
+            kind,
+            duration,
+            width: 1920,
+            height: 1080,
+            has_audio: kind != MediaKind::Image,
+            frame_rate: 30.0,
+            attributes: Attributes::default(),
+        }
     }
 
     fn project_with(duration: f64) -> (Project, String) {
@@ -1631,11 +2147,22 @@ mod tests {
         let audio = project.add_media(media(MediaKind::Audio, 4.0));
         let first = project.place(&video, None, 0.0).unwrap();
         let second = project.place(&video, None, 5.0).unwrap();
-        assert_eq!(project.clip(&second).unwrap().start, 10.0, "a clip placed over another moves after it");
+        assert_eq!(
+            project.clip(&second).unwrap().start,
+            10.0,
+            "a clip placed over another moves after it"
+        );
         let sound = project.place(&audio, Some(0), 2.0).unwrap();
         let at = project.find(&sound).unwrap();
-        assert_eq!(project.tracks[at.track].kind, TrackKind::Audio, "audio never lands on a video track");
-        assert_eq!(project.find(&first).unwrap().track, project.find(&second).unwrap().track);
+        assert_eq!(
+            project.tracks[at.track].kind,
+            TrackKind::Audio,
+            "audio never lands on a video track"
+        );
+        assert_eq!(
+            project.find(&first).unwrap().track,
+            project.find(&second).unwrap().track
+        );
         assert_eq!(project.duration(), 20.0);
     }
 
@@ -1673,32 +2200,80 @@ mod tests {
         assert_eq!(project.crossfade_limit(&incoming), 2.0);
         project.set_crossfade(&incoming, 1.0);
         let (old, _, new, _, progress) = project.crossfade_at(8.5).unwrap();
-        assert_eq!((old.id.as_str(), new.id.as_str()), (outgoing.as_str(), incoming.as_str()));
+        assert_eq!(
+            (old.id.as_str(), new.id.as_str()),
+            (outgoing.as_str(), incoming.as_str())
+        );
         assert!((progress - 0.5).abs() < 1e-9);
         assert_eq!(project.crossfade_after(&outgoing), 1.0);
         assert!(project.crossfade_at(9.0).is_none());
         project.clip_mut(&outgoing).unwrap().source_in = 2.0;
-        assert_eq!(project.crossfade_after(&outgoing), 0.0, "no source handle means no transition");
+        assert_eq!(
+            project.crossfade_after(&outgoing),
+            0.0,
+            "no source handle means no transition"
+        );
     }
 
     #[test]
     fn focus_tracks_become_short_crop_expressions() {
-        let line: Vec<Focus> = (0..=40).map(|i| Focus { t: i as f64 * 0.25, x: i as f32 / 40.0, y: 0.5 }).collect();
-        assert_eq!(simplify_track(&line, 0.02, 40).len(), 2, "a straight pan needs only its ends");
-        let zigzag: Vec<Focus> = (0..200).map(|i| Focus { t: i as f64 * 0.25, x: (i % 2) as f32, y: 0.5 }).collect();
+        let line: Vec<Focus> = (0..=40)
+            .map(|i| Focus {
+                t: i as f64 * 0.25,
+                x: i as f32 / 40.0,
+                y: 0.5,
+            })
+            .collect();
+        assert_eq!(
+            simplify_track(&line, 0.02, 40).len(),
+            2,
+            "a straight pan needs only its ends"
+        );
+        let zigzag: Vec<Focus> = (0..200)
+            .map(|i| Focus {
+                t: i as f64 * 0.25,
+                x: (i % 2) as f32,
+                y: 0.5,
+            })
+            .collect();
         assert!(simplify_track(&zigzag, 0.02, 30).len() <= 30);
-        let two = [Focus { t: 1.0, x: 0.2, y: 0.5 }, Focus { t: 3.0, x: 0.8, y: 0.5 }];
+        let two = [
+            Focus {
+                t: 1.0,
+                x: 0.2,
+                y: 0.5,
+            },
+            Focus {
+                t: 3.0,
+                x: 0.8,
+                y: 0.5,
+            },
+        ];
         // From source time 2 at double speed: the first point was half a second of frames ago, the last is in half.
-        assert_eq!(focus_expression(&two, 2.0, 2.0, |f| f.x), "0.2000*lt(t,-0.500)+(0.2000+0.600000*(t-(-0.500)))*gte(t,-0.500)*lt(t,0.500)+0.8000*gte(t,0.500)");
+        assert_eq!(
+            focus_expression(&two, 2.0, 2.0, |f| f.x),
+            "0.2000*lt(t,-0.500)+(0.2000+0.600000*(t-(-0.500)))*gte(t,-0.500)*lt(t,0.500)+0.8000*gte(t,0.500)"
+        );
     }
 
     #[test]
     fn media_searches_go_by_words_tags_and_stars() {
-        let mut clip = Media { name: "Stream Highlights.mp4".into(), ..media(MediaKind::Video, 10.0) };
+        let mut clip = Media {
+            name: "Stream Highlights.mp4".into(),
+            ..media(MediaKind::Video, 10.0)
+        };
         assert!(clip.add_tag("Funny") && !clip.add_tag(" funny ") && !clip.add_tag(""));
         clip.attributes.notes = "the boss fight".into();
         clip.attributes.rating = 3;
-        for query in ["", "highlights", "BOSS stream", "#funny", "3*", "★★", "funny 1*"] {
+        for query in [
+            "",
+            "highlights",
+            "BOSS stream",
+            "#funny",
+            "3*",
+            "★★",
+            "funny 1*",
+        ] {
             assert!(clip.matches(query), "{query:?} should match");
         }
         for query in ["#fun", "4*", "★★★★", "boss intro"] {
@@ -1709,15 +2284,26 @@ mod tests {
     #[test]
     fn tone_curves_bend_only_what_was_moved() {
         assert_eq!(Curves::default().filter(), None);
-        let lifted = Curves { master: [0.0, 0.3, 0.5, 0.75, 1.0], ..Default::default() };
-        assert_eq!(lifted.filter().unwrap(), "curves=interp=pchip:master='0/0.000 0.25/0.300 0.5/0.500 0.75/0.750 1/1.000'");
+        let lifted = Curves {
+            master: [0.0, 0.3, 0.5, 0.75, 1.0],
+            ..Default::default()
+        };
+        assert_eq!(
+            lifted.filter().unwrap(),
+            "curves=interp=pchip:master='0/0.000 0.25/0.300 0.5/0.500 0.75/0.750 1/1.000'"
+        );
         // Straight stays straight; a bent curve passes through its points and never overshoots them.
         for x in [0.0, 0.1, 0.5, 0.9, 1.0] {
             assert!((curve_at(&CURVE_KNOTS, x) - x).abs() < 1e-5);
         }
         assert!((curve_at(&lifted.master, 0.25) - 0.3).abs() < 1e-5);
-        let samples: Vec<f32> = (0..=100).map(|i| curve_at(&lifted.master, i as f32 / 100.0)).collect();
-        assert!(samples.windows(2).all(|w| w[1] >= w[0]), "a rising curve keeps rising");
+        let samples: Vec<f32> = (0..=100)
+            .map(|i| curve_at(&lifted.master, i as f32 / 100.0))
+            .collect();
+        assert!(
+            samples.windows(2).all(|w| w[1] >= w[0]),
+            "a rising curve keeps rising"
+        );
     }
 
     #[test]
@@ -1726,15 +2312,32 @@ mod tests {
         let picture = project.place(&video, None, 0.0).unwrap();
         let sound = project.detach_sound(&picture).unwrap();
         let track_of = |p: &Project, id: &str| p.tracks[p.find(id).unwrap().track].kind;
-        assert_eq!((track_of(&project, &picture), track_of(&project, &sound)), (TrackKind::Video, TrackKind::Audio));
-        assert_eq!(project.audible_clips().iter().map(|(c, _)| c.id.clone()).collect::<Vec<_>>(), vec![sound.clone()], "only the sound clip plays");
+        assert_eq!(
+            (track_of(&project, &picture), track_of(&project, &sound)),
+            (TrackKind::Video, TrackKind::Audio)
+        );
+        assert_eq!(
+            project
+                .audible_clips()
+                .iter()
+                .map(|(c, _)| c.id.clone())
+                .collect::<Vec<_>>(),
+            vec![sound.clone()],
+            "only the sound clip plays"
+        );
         assert!(project.detach_sound(&picture).is_none(), "already detached");
-        let span = |p: &Project, id: &str| { let c = p.clip(id).unwrap(); (c.start, c.end(), c.source_in) };
+        let span = |p: &Project, id: &str| {
+            let c = p.clip(id).unwrap();
+            (c.start, c.end(), c.source_in)
+        };
         // Moves, trims and slips go to both.
         assert!(project.move_clip(&picture, 2.0, project.find(&picture).unwrap().track));
         project.trim_end(&sound, 8.0);
         project.slip(&picture, 1.0);
-        assert_eq!((span(&project, &picture), span(&project, &sound)), ((2.0, 8.0, 1.0), (2.0, 8.0, 1.0)));
+        assert_eq!(
+            (span(&project, &picture), span(&project, &sound)),
+            ((2.0, 8.0, 1.0), (2.0, 8.0, 1.0))
+        );
         // A move the sound has no room for moves neither.
         let other = project.add_media(media(MediaKind::Audio, 3.0));
         let audio_track = project.find(&sound).unwrap().track;
@@ -1744,39 +2347,93 @@ mod tests {
         // Splits split both, and the right halves are linked to each other; deleting one deletes the other.
         let right = project.split(&picture, 4.0).unwrap();
         let right_sound = project.linked(&right).unwrap();
-        assert_eq!((span(&project, &right_sound), project.linked(&sound)), ((4.0, 8.0, 3.0), Some(picture.clone())));
+        assert_eq!(
+            (span(&project, &right_sound), project.linked(&sound)),
+            ((4.0, 8.0, 3.0), Some(picture.clone()))
+        );
         assert_eq!(project.delete(&[right.clone()]), 2);
         assert!(project.clip(&right_sound).is_none());
         // Unlinked, the video clip stays quiet and the sound clip plays on.
         assert!(project.unlink(&sound));
-        assert_eq!((project.clip(&picture).unwrap().volume, project.linked(&picture)), (0.0, None));
-        let playing: Vec<String> = project.audible_clips().iter().map(|(c, _)| c.id.clone()).collect();
-        assert!(playing.contains(&sound) && !playing.contains(&picture), "{playing:?}");
+        assert_eq!(
+            (
+                project.clip(&picture).unwrap().volume,
+                project.linked(&picture)
+            ),
+            (0.0, None)
+        );
+        let playing: Vec<String> = project
+            .audible_clips()
+            .iter()
+            .map(|(c, _)| c.id.clone())
+            .collect();
+        assert!(
+            playing.contains(&sound) && !playing.contains(&picture),
+            "{playing:?}"
+        );
     }
 
     #[test]
     fn captions_know_which_word_is_said() {
         assert_eq!(word_spans(" Hi  there\nyou"), vec![1..3, 5..10, 11..14]);
-        let word = |text: &str, start: f64, end: f64| Word { text: text.into(), start, end };
-        let mut caption = Caption { id: "c".into(), start: 1.0, end: 3.0, text: "Hi there".into(), words: vec![word("Hi", 1.2, 1.5), word(" there", 2.0, 2.4)], clip: None };
-        assert_eq!([1.1, 1.2, 1.9, 2.0, 2.9, 3.0].map(|t| caption.word_at(t)), [None, Some(0), Some(0), Some(1), Some(1), None]);
+        let word = |text: &str, start: f64, end: f64| Word {
+            text: text.into(),
+            start,
+            end,
+        };
+        let mut caption = Caption {
+            id: "c".into(),
+            start: 1.0,
+            end: 3.0,
+            text: "Hi there".into(),
+            words: vec![word("Hi", 1.2, 1.5), word(" there", 2.0, 2.4)],
+            clip: None,
+        };
+        assert_eq!(
+            [1.1, 1.2, 1.9, 2.0, 2.9, 3.0].map(|t| caption.word_at(t)),
+            [None, Some(0), Some(0), Some(1), Some(1), None]
+        );
         caption.text = "Hi there you".into();
-        assert_eq!(caption.word_at(2.0), None, "edited text no longer matches its word times");
+        assert_eq!(
+            caption.word_at(2.0),
+            None,
+            "edited text no longer matches its word times"
+        );
     }
 
     #[test]
     fn sound_becomes_pan_and_eq_filters() {
         assert_eq!(Sound::default().filter(), None);
-        let shaped = Sound { pan: 0.5, low: 3.0, ..Default::default() };
-        assert_eq!(shaped.filter().unwrap(), "pan=stereo|c0=0.500*c0|c1=1.000*c1,lowshelf=f=120:t=s:w=1:g=3.00");
+        let shaped = Sound {
+            pan: 0.5,
+            low: 3.0,
+            ..Default::default()
+        };
+        assert_eq!(
+            shaped.filter().unwrap(),
+            "pan=stereo|c0=0.500*c0|c1=1.000*c1,lowshelf=f=120:t=s:w=1:g=3.00"
+        );
     }
 
     #[test]
     fn color_wheels_at_rest_add_no_filter() {
         assert_eq!(Grade::default().filter(), None);
-        let warm = Grade { wheels: Wheels { gain: Wheel { r: 0.2, ..Default::default() }, ..Default::default() }, ..Default::default() };
+        let warm = Grade {
+            wheels: Wheels {
+                gain: Wheel {
+                    r: 0.2,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let filter = warm.filter().unwrap();
-        assert!(filter.starts_with("lutrgb=r='maxval*pow(clip((1.2000)*") && filter.contains(":g='maxval*pow(clip((1.0000)*"), "{filter}");
+        assert!(
+            filter.starts_with("lutrgb=r='maxval*pow(clip((1.2000)*")
+                && filter.contains(":g='maxval*pow(clip((1.0000)*"),
+            "{filter}"
+        );
     }
 
     #[test]
@@ -1789,13 +2446,25 @@ mod tests {
         let c = project.place(&video, None, 5.0).unwrap();
         project.trim_start(&c, 7.0);
         project.move_clip(&c, 5.0, project.find(&c).unwrap().track); // 5..13, source 2..10
-        assert_eq!((project.left_neighbor(&b), project.right_neighbor(&b)), (Some(a.clone()), Some(c.clone())));
+        assert_eq!(
+            (project.left_neighbor(&b), project.right_neighbor(&b)),
+            (Some(a.clone()), Some(c.clone()))
+        );
         assert!(project.slide(&b, 4.0));
-        let at = |p: &Project, id: &str| { let clip = p.clip(id).unwrap(); (clip.start, clip.end(), clip.source_in) };
-        assert_eq!((at(&project, &a), at(&project, &b), at(&project, &c)), ((0.0, 4.0, 0.0), (4.0, 6.0, 0.0), (6.0, 13.0, 3.0)));
+        let at = |p: &Project, id: &str| {
+            let clip = p.clip(id).unwrap();
+            (clip.start, clip.end(), clip.source_in)
+        };
+        assert_eq!(
+            (at(&project, &a), at(&project, &b), at(&project, &c)),
+            ((0.0, 4.0, 0.0), (4.0, 6.0, 0.0), (6.0, 13.0, 3.0))
+        );
         // Back towards the start: c has only 3 s of footage before its in point.
         project.slide(&b, 0.0);
-        assert_eq!((at(&project, &a), at(&project, &b), at(&project, &c)), ((0.0, 1.0, 0.0), (1.0, 3.0, 0.0), (3.0, 13.0, 0.0)));
+        assert_eq!(
+            (at(&project, &a), at(&project, &b), at(&project, &c)),
+            ((0.0, 1.0, 0.0), (1.0, 3.0, 0.0), (3.0, 13.0, 0.0))
+        );
     }
 
     #[test]
@@ -1808,10 +2477,20 @@ mod tests {
         project.move_clip(&b, 4.0, project.find(&b).unwrap().track); // touching at 4, source 2..10 (ends at 12)
         assert_eq!(project.left_neighbor(&b), Some(a.clone()));
         assert!(project.roll(&a, &b, 5.0));
-        let (ca, cb) = (project.clip(&a).unwrap().clone(), project.clip(&b).unwrap().clone());
-        assert_eq!((ca.duration, cb.start, cb.source_in, cb.end()), (5.0, 5.0, 3.0, 12.0));
+        let (ca, cb) = (
+            project.clip(&a).unwrap().clone(),
+            project.clip(&b).unwrap().clone(),
+        );
+        assert_eq!(
+            (ca.duration, cb.start, cb.source_in, cb.end()),
+            (5.0, 5.0, 3.0, 12.0)
+        );
         project.roll(&a, &b, 0.0);
-        assert_eq!(project.clip(&b).unwrap().start, 2.0, "b can only reach back to its source's start (in point 0)");
+        assert_eq!(
+            project.clip(&b).unwrap().start,
+            2.0,
+            "b can only reach back to its source's start (in point 0)"
+        );
         assert_eq!(project.clip(&a).unwrap().end(), 2.0);
     }
 
@@ -1822,9 +2501,16 @@ mod tests {
         project.trim_end(&clip, 6.0); // plays source 0..4 at 2..6
         assert!(project.slip(&clip, 3.0));
         let slipped = project.clip(&clip).unwrap();
-        assert_eq!((slipped.start, slipped.duration, slipped.source_in), (2.0, 4.0, 3.0));
+        assert_eq!(
+            (slipped.start, slipped.duration, slipped.source_in),
+            (2.0, 4.0, 3.0)
+        );
         project.slip(&clip, 9.0);
-        assert_eq!(project.clip(&clip).unwrap().source_in, 6.0, "the source ends at 10");
+        assert_eq!(
+            project.clip(&clip).unwrap().source_in,
+            6.0,
+            "the source ends at 10"
+        );
         project.slip(&clip, -2.0);
         assert_eq!(project.clip(&clip).unwrap().source_in, 0.0);
     }
@@ -1835,8 +2521,18 @@ mod tests {
         assert!(project.add_marker(5.0, ""));
         assert!(project.add_marker(2.0, "scene"));
         assert!(!project.add_marker(5.01, ""), "within a frame of another");
-        assert_eq!(project.markers.iter().map(|m| m.t).collect::<Vec<_>>(), vec![2.0, 5.0]);
-        assert_eq!((project.next_marker(2.0, false), project.next_marker(5.0, true), project.next_marker(6.0, false)), (Some(5.0), Some(2.0), None));
+        assert_eq!(
+            project.markers.iter().map(|m| m.t).collect::<Vec<_>>(),
+            vec![2.0, 5.0]
+        );
+        assert_eq!(
+            (
+                project.next_marker(2.0, false),
+                project.next_marker(5.0, true),
+                project.next_marker(6.0, false)
+            ),
+            (Some(5.0), Some(2.0), None)
+        );
     }
 
     #[test]
@@ -1844,8 +2540,15 @@ mod tests {
         let (mut project, video) = project_with(10.0);
         let clip = project.place(&video, None, 2.0).unwrap();
         project.trim_start(&clip, 3.0); // plays source 1..10 from timeline 3
-        assert_eq!(project.mark_scenes(&video, &[0.5, 4.0, 9.0]), 2, "0.5 s is trimmed off");
-        assert_eq!(project.markers.iter().map(|m| m.t).collect::<Vec<_>>(), vec![6.0, 11.0]);
+        assert_eq!(
+            project.mark_scenes(&video, &[0.5, 4.0, 9.0]),
+            2,
+            "0.5 s is trimmed off"
+        );
+        assert_eq!(
+            project.markers.iter().map(|m| m.t).collect::<Vec<_>>(),
+            vec![6.0, 11.0]
+        );
         assert_eq!(project.mark_scenes(&video, &[4.0]), 0, "already marked");
     }
 
@@ -1867,7 +2570,10 @@ mod tests {
         let (mut project, video) = project_with(10.0);
         let clip = project.place(&video, None, 2.0).unwrap();
         let right = project.split(&clip, 5.0).unwrap();
-        let (l, r) = (project.clip(&clip).unwrap().clone(), project.clip(&right).unwrap().clone());
+        let (l, r) = (
+            project.clip(&clip).unwrap().clone(),
+            project.clip(&right).unwrap().clone(),
+        );
         assert_eq!((l.start, l.duration, l.source_in), (2.0, 3.0, 0.0));
         assert_eq!((r.start, r.duration, r.source_in), (5.0, 7.0, 3.0));
         assert_eq!(project.split(&clip, 2.01), None, "no slivers at the edges");
@@ -1884,15 +2590,37 @@ mod tests {
         let d = project.place(&video, Some(other), 30.0).unwrap();
         assert_eq!(project.ripple_delete(&[b.clone()]), 1);
         assert!(project.clip(&b).is_none());
-        let starts: Vec<f64> = [&a, &c, &d].iter().map(|id| project.clip(id).unwrap().start).collect();
-        assert_eq!(starts, vec![0.0, 15.0, 30.0], "c moves left by b's length; the other track stays");
+        let starts: Vec<f64> = [&a, &c, &d]
+            .iter()
+            .map(|id| project.clip(id).unwrap().start)
+            .collect();
+        assert_eq!(
+            starts,
+            vec![0.0, 15.0, 30.0],
+            "c moves left by b's length; the other track stays"
+        );
     }
 
     #[test]
     fn new_captions_replace_the_ones_in_their_stretch() {
         let (mut project, _) = project_with(10.0);
-        let caption = |id: &str, start: f64, end: f64| Caption { id: id.into(), start, end, text: id.into(), words: Vec::new(), clip: None };
-        project.add_captions(0.0, 30.0, vec![caption("a", 1.0, 2.0), caption("b", 12.0, 14.0), caption("c", 25.0, 27.0)]);
+        let caption = |id: &str, start: f64, end: f64| Caption {
+            id: id.into(),
+            start,
+            end,
+            text: id.into(),
+            words: Vec::new(),
+            clip: None,
+        };
+        project.add_captions(
+            0.0,
+            30.0,
+            vec![
+                caption("a", 1.0, 2.0),
+                caption("b", 12.0, 14.0),
+                caption("c", 25.0, 27.0),
+            ],
+        );
         project.add_captions(10.0, 20.0, vec![caption("d", 11.0, 13.0)]);
         let ids: Vec<&str> = project.captions.iter().map(|c| c.id.as_str()).collect();
         assert_eq!(ids, vec!["a", "d", "c"]);
@@ -1907,7 +2635,11 @@ mod tests {
         let (mut project, video) = project_with(10.0);
         project.place(&video, None, 0.0).unwrap();
         let id = project.add_title(9.0);
-        assert_eq!(project.duration(), 12.0, "a title past the clips makes the cut longer");
+        assert_eq!(
+            project.duration(),
+            12.0,
+            "a title past the clips makes the cut longer"
+        );
         assert!(project.has_text());
         assert_eq!(project.delete(&[id]), 1);
         assert_eq!(project.duration(), 10.0);
@@ -1922,7 +2654,11 @@ mod tests {
         let clip = project.clip(&a).unwrap().clone();
         assert_eq!((clip.duration, clip.source_time(2.0)), (5.0, 4.0));
         assert!(project.set_speed(&a, 0.5));
-        assert_eq!(project.clip(&a).unwrap().duration, 12.0, "slower would run into b at 12 s: it stops there");
+        assert_eq!(
+            project.clip(&a).unwrap().duration,
+            12.0,
+            "slower would run into b at 12 s: it stops there"
+        );
         // Splitting and trimming a fast clip move the source by twice the timeline.
         project.set_speed(&b, 2.0);
         let right = project.split(&b, 13.0).unwrap();
@@ -1945,10 +2681,21 @@ mod tests {
     fn missing_media_is_only_what_the_timeline_uses() {
         let (mut project, video) = project_with(10.0);
         let unused = project.add_media(media(MediaKind::Video, 5.0));
-        assert!(project.missing_media().is_empty(), "nothing on the timeline yet");
+        assert!(
+            project.missing_media().is_empty(),
+            "nothing on the timeline yet"
+        );
         project.place(&video, None, 0.0).unwrap();
-        let missing: Vec<&str> = project.missing_media().iter().map(|m| m.id.as_str()).collect();
-        assert_eq!(missing, vec![video.as_str()], "C:/m/... doesn't exist; the unused {unused} doesn't count");
+        let missing: Vec<&str> = project
+            .missing_media()
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect();
+        assert_eq!(
+            missing,
+            vec![video.as_str()],
+            "C:/m/... doesn't exist; the unused {unused} doesn't count"
+        );
     }
 
     #[test]
@@ -1956,9 +2703,27 @@ mod tests {
         let (mut project, video) = project_with(10.0);
         let a = project.place(&video, None, 0.0).unwrap();
         let b = project.place(&video, None, 10.0).unwrap();
-        let caption = |id: &str, start: f64, end: f64, clip: Option<&String>| Caption { id: id.into(), start, end, text: id.into(), words: vec![Word { text: id.into(), start, end }], clip: clip.cloned() };
+        let caption = |id: &str, start: f64, end: f64, clip: Option<&String>| Caption {
+            id: id.into(),
+            start,
+            end,
+            text: id.into(),
+            words: vec![Word {
+                text: id.into(),
+                start,
+                end,
+            }],
+            clip: clip.cloned(),
+        };
         // a's caption knows its clip; b's is from an older project and goes by where it sits.
-        project.add_captions(0.0, 20.0, vec![caption("in a", 1.0, 2.0, Some(&a)), caption("in b", 12.0, 13.0, None)]);
+        project.add_captions(
+            0.0,
+            20.0,
+            vec![
+                caption("in a", 1.0, 2.0, Some(&a)),
+                caption("in b", 12.0, 13.0, None),
+            ],
+        );
         // A clip on another track over the same time doesn't take a's caption with it.
         let other = project.add_track(TrackKind::Video);
         let c = project.place(&video, Some(other), 0.0).unwrap();
@@ -1966,12 +2731,19 @@ mod tests {
         assert_eq!(project.captions[0].start, 1.0);
         let track = project.find(&b).unwrap().track;
         project.move_clip(&b, 30.0, track);
-        assert_eq!((project.captions[1].start, project.captions[1].words[0].end), (32.0, 33.0), "b's caption moved with b");
+        assert_eq!(
+            (project.captions[1].start, project.captions[1].words[0].end),
+            (32.0, 33.0),
+            "b's caption moved with b"
+        );
         assert_eq!(project.captions[0].start, 1.0, "a's stayed");
         // Ripple-deleting a takes its caption and pulls b's caption left with b.
         project.ripple_delete(&[a]);
         assert_eq!(project.captions.len(), 1);
-        assert_eq!((project.clip(&b).unwrap().start, project.captions[0].start), (20.0, 22.0));
+        assert_eq!(
+            (project.clip(&b).unwrap().start, project.captions[0].start),
+            (20.0, 22.0)
+        );
     }
 
     #[test]
@@ -1981,11 +2753,22 @@ mod tests {
         let b = project.place(&video, None, 10.0).unwrap();
         assert!(project.trim_start(&b, 12.0));
         let clip = project.clip(&b).unwrap().clone();
-        assert_eq!((clip.start, clip.source_in, clip.duration), (12.0, 2.0, 8.0));
+        assert_eq!(
+            (clip.start, clip.source_in, clip.duration),
+            (12.0, 2.0, 8.0)
+        );
         assert!(project.trim_start(&b, 5.0));
-        assert_eq!(project.clip(&b).unwrap().start, 10.0, "can't reveal before the source starts or cross clip a");
+        assert_eq!(
+            project.clip(&b).unwrap().start,
+            10.0,
+            "can't reveal before the source starts or cross clip a"
+        );
         assert!(project.trim_end(&a, 15.0));
-        assert_eq!(project.clip(&a).unwrap().end(), 10.0, "can't run past the source");
+        assert_eq!(
+            project.clip(&a).unwrap().end(),
+            10.0,
+            "can't run past the source"
+        );
         assert!(project.trim_end(&a, 4.0));
         assert!(project.trim_end(&a, 99.0));
         assert_eq!(project.clip(&a).unwrap().end(), 10.0);
@@ -1998,14 +2781,25 @@ mod tests {
         let b = project.place(&video, None, 10.0).unwrap();
         let track = project.find(&a).unwrap().track;
         assert!(project.move_clip(&b, 2.0, track));
-        assert_eq!(project.clip(&b).unwrap().start, 4.0, "lands right after clip a");
+        assert_eq!(
+            project.clip(&b).unwrap().start,
+            4.0,
+            "lands right after clip a"
+        );
         assert!(project.move_clip(&b, 20.0, track));
         assert_eq!(project.clip(&b).unwrap().start, 20.0);
         let audio_track = project.track_of_kind(TrackKind::Audio);
-        assert!(!project.move_clip(&b, 0.0, audio_track), "video stays on video tracks");
+        assert!(
+            !project.move_clip(&b, 0.0, audio_track),
+            "video stays on video tracks"
+        );
         let upper = project.add_track(TrackKind::Video);
         assert!(project.move_clip(&a, 0.0, upper));
-        assert_eq!(project.front_clip(1.0).unwrap().0.id, a, "the top video track is in front");
+        assert_eq!(
+            project.front_clip(1.0).unwrap().0.id,
+            a,
+            "the top video track is in front"
+        );
     }
 
     #[test]

@@ -12,7 +12,13 @@ pub const EXTENSION: &str = ".streamcuts.json";
 
 fn project_files(dir: &Path) -> Vec<PathBuf> {
     fs::read_dir(dir)
-        .map(|entries| entries.flatten().map(|e| e.path()).filter(|p| p.to_string_lossy().ends_with(EXTENSION)).collect())
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.to_string_lossy().ends_with(EXTENSION))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -26,7 +32,13 @@ pub fn file_for(dir: &Path, project: &Project) -> PathBuf {
     project_files(dir)
         .into_iter()
         .find(|path| load(path).map(|p| p.id == project.id).unwrap_or(false))
-        .unwrap_or_else(|| dir.join(format!("{}--{}{EXTENSION}", safe_file_name(&project.name), &project.id[..8])))
+        .unwrap_or_else(|| {
+            dir.join(format!(
+                "{}--{}{EXTENSION}",
+                safe_file_name(&project.name),
+                &project.id[..8]
+            ))
+        })
 }
 
 pub fn save(dir: &Path, project: &mut Project) -> Result<PathBuf, String> {
@@ -53,7 +65,11 @@ pub fn list(dir: &Path) -> Vec<Document> {
                 id: path.file_name()?.to_string_lossy().into_owned(),
                 name: project.name.clone(),
                 saved_at: project.saved_at,
-                detail: format!("{clips} clip{} · {}", if clips == 1 { "" } else { "s" }, clock(project.duration())),
+                detail: format!(
+                    "{clips} clip{} · {}",
+                    if clips == 1 { "" } else { "s" },
+                    clock(project.duration())
+                ),
             })
         })
         .collect();

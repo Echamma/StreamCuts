@@ -107,10 +107,14 @@ impl Mix {
         let from = self.played;
         if !self.rolling {
             // Pre-roll: hold the clock until the sound due first has arrived, so sound and picture start together.
-            let ready = self.voices.iter_mut().filter(|voice| voice.next < from + frames).all(|voice| {
-                voice.pull(1);
-                !voice.buffer.is_empty() || voice.done
-            });
+            let ready = self
+                .voices
+                .iter_mut()
+                .filter(|voice| voice.next < from + frames)
+                .all(|voice| {
+                    voice.pull(1);
+                    !voice.buffer.is_empty() || voice.done
+                });
             if !ready && self.cued_at.is_some_and(|at| at.elapsed() < PREROLL) {
                 return;
             }
@@ -131,9 +135,24 @@ impl Mix {
             let offset = (voice.next - from) as usize * channels;
             let have = wanted.min(voice.buffer.len());
             let (first, volume) = (voice.next, voice.volume);
-            let (clip_start, end, fade_in, fade_out) = (voice.clip_start, voice.end, voice.fade_in, voice.fade_out);
-            for (index, (slot, sample)) in out[offset..offset + have].iter_mut().zip(voice.buffer.drain(..have)).enumerate() {
-                let gain = if fade_in > 0 || fade_out > 0 { fade_gain(clip_start, end, fade_in, fade_out, first + (index / channels) as u64) } else { 1.0 };
+            let (clip_start, end, fade_in, fade_out) =
+                (voice.clip_start, voice.end, voice.fade_in, voice.fade_out);
+            for (index, (slot, sample)) in out[offset..offset + have]
+                .iter_mut()
+                .zip(voice.buffer.drain(..have))
+                .enumerate()
+            {
+                let gain = if fade_in > 0 || fade_out > 0 {
+                    fade_gain(
+                        clip_start,
+                        end,
+                        fade_in,
+                        fade_out,
+                        first + (index / channels) as u64,
+                    )
+                } else {
+                    1.0
+                };
                 *slot += sample * volume * gain;
             }
             voice.owed += wanted - have;
@@ -177,10 +196,24 @@ fn signature(project: &Project) -> u64 {
     for (clip, media) in project.audible_clips() {
         clip.id.hash(&mut hasher);
         media.path.hash(&mut hasher);
-        for value in [clip.start, clip.source_in, clip.duration, clip.fade_in, clip.fade_out, clip.crossfade_in, clip.speed] {
+        for value in [
+            clip.start,
+            clip.source_in,
+            clip.duration,
+            clip.fade_in,
+            clip.fade_out,
+            clip.crossfade_in,
+            clip.speed,
+        ] {
             value.to_bits().hash(&mut hasher);
         }
-        for value in [clip.volume, clip.sound.low, clip.sound.mid, clip.sound.high, clip.sound.pan] {
+        for value in [
+            clip.volume,
+            clip.sound.low,
+            clip.sound.mid,
+            clip.sound.high,
+            clip.sound.pan,
+        ] {
             value.to_bits().hash(&mut hasher);
         }
     }
@@ -189,7 +222,9 @@ fn signature(project: &Project) -> u64 {
 
 impl Audio {
     fn mix(&self) -> MutexGuard<'_, Mix> {
-        self.mix.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.mix
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Starts the sound at timeline time `from`. False when there's no sound output: use the wall clock then.
@@ -250,7 +285,9 @@ impl Audio {
             return None;
         }
         // Between batches, count on from the last one, but never past what it held.
-        let since = mix.played_at.map_or(0.0, |at| at.elapsed().as_secs_f64().min(mix.batch as f64 / rate));
+        let since = mix.played_at.map_or(0.0, |at| {
+            at.elapsed().as_secs_f64().min(mix.batch as f64 / rate)
+        });
         Some(self.origin + mix.played as f64 / rate + since)
     }
 
@@ -278,7 +315,9 @@ impl Audio {
     }
 
     fn schedule(&mut self, project: &Project, playhead: f64) {
-        let Some(rate) = self.output.as_ref().map(|output| output.rate) else { return };
+        let Some(rate) = self.output.as_ref().map(|output| output.rate) else {
+            return;
+        };
         self.decoders.retain(|(end, _)| *end > playhead);
         let channels = self.mix().channels.max(1) as u16;
         let origin = self.origin;
@@ -288,18 +327,33 @@ impl Audio {
             let crossfade_out = project.crossfade_after(&clip.id);
             let crossfade_in = project.crossfade_before(&clip.id).map_or(0.0, |(_, d)| d);
             let end = clip.end() + crossfade_out;
-            if self.started.contains(&clip.id) || end <= playhead || clip.start > playhead + LOOKAHEAD {
+            if self.started.contains(&clip.id)
+                || end <= playhead
+                || clip.start > playhead + LOOKAHEAD
+            {
                 continue;
             }
             let begin = clip.start.max(playhead);
-            let mut decoder = SoundStream::start(&media.path, clip.source_time(begin), end - begin, clip.speed, rate, channels, clip.sound.filter().as_deref());
+            let mut decoder = SoundStream::start(
+                &media.path,
+                clip.source_time(begin),
+                end - begin,
+                clip.speed,
+                rate,
+                channels,
+                clip.sound.filter().as_deref(),
+            );
             let frames = |seconds: f64| (seconds * rate as f64).round() as u64;
             voices.push(Voice {
                 next: frame(begin),
                 end: frame(end),
                 volume: clip.volume,
                 clip_start: ((clip.start - origin) * rate as f64).round() as i64,
-                fade_in: frames(if crossfade_in > 0.0 { crossfade_in } else { clip.fade_in }),
+                fade_in: frames(if crossfade_in > 0.0 {
+                    crossfade_in
+                } else {
+                    clip.fade_in
+                }),
                 fade_out: frames(clip.fade_out.max(crossfade_out)),
                 chunks: decoder.take_chunks(),
                 buffer: VecDeque::new(),
@@ -316,21 +370,36 @@ impl Audio {
 }
 
 fn open(mix: Arc<Mutex<Mix>>) -> Result<Output, String> {
-    let device = cpal::default_host().default_output_device().ok_or("No sound output is connected.")?;
+    let device = cpal::default_host()
+        .default_output_device()
+        .ok_or("No sound output is connected.")?;
     let supported = device.default_output_config().map_err(|e| e.to_string())?;
     let config = supported.config();
-    mix.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).channels = config.channels as usize;
+    mix.lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .channels = config.channels as usize;
     let stream = match supported.sample_format() {
         SampleFormat::F32 => build::<f32>(&device, config, mix),
         SampleFormat::I16 => build::<i16>(&device, config, mix),
         SampleFormat::I32 => build::<i32>(&device, config, mix),
         SampleFormat::U16 => build::<u16>(&device, config, mix),
-        other => return Err(format!("The sound output wants {other} samples, which StreamCuts can't make yet.")),
+        other => {
+            return Err(format!(
+                "The sound output wants {other} samples, which StreamCuts can't make yet."
+            ));
+        }
     }?;
-    Ok(Output { stream, rate: config.sample_rate })
+    Ok(Output {
+        stream,
+        rate: config.sample_rate,
+    })
 }
 
-fn build<T: SizedSample + FromSample<f32>>(device: &cpal::Device, config: cpal::StreamConfig, mix: Arc<Mutex<Mix>>) -> Result<cpal::Stream, String> {
+fn build<T: SizedSample + FromSample<f32>>(
+    device: &cpal::Device,
+    config: cpal::StreamConfig,
+    mix: Arc<Mutex<Mix>>,
+) -> Result<cpal::Stream, String> {
     let mut scratch = Vec::new();
     device
         .build_output_stream(
@@ -358,11 +427,30 @@ mod tests {
 
     fn voice(next: u64, end: u64, volume: f32) -> (Voice, SyncSender<Vec<f32>>) {
         let (sender, chunks) = sync_channel(8);
-        (Voice { next, end, volume, clip_start: next as i64, fade_in: 0, fade_out: 0, chunks, buffer: VecDeque::new(), owed: 0, done: false }, sender)
+        (
+            Voice {
+                next,
+                end,
+                volume,
+                clip_start: next as i64,
+                fade_in: 0,
+                fade_out: 0,
+                chunks,
+                buffer: VecDeque::new(),
+                owed: 0,
+                done: false,
+            },
+            sender,
+        )
     }
 
     fn mix(channels: usize, voices: Vec<Voice>) -> Mix {
-        Mix { channels, running: true, voices, ..Mix::default() }
+        Mix {
+            channels,
+            running: true,
+            voices,
+            ..Mix::default()
+        }
     }
 
     #[test]
@@ -454,13 +542,21 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("streamcuts-audio-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let tone = dir.join("tone.wav");
-        let made = crate::ffmpeg::command(&crate::ffmpeg::ffmpeg()).args(["-v", "error", "-y", "-f", "lavfi", "-i", "sine=duration=4"]).arg(&tone).status().unwrap();
+        let made = crate::ffmpeg::command(&crate::ffmpeg::ffmpeg())
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i", "sine=duration=4"])
+            .arg(&tone)
+            .status()
+            .unwrap();
         assert!(made.success());
         let mut project = Project::new("Tone");
         let id = project.add_media(crate::ffmpeg::probe(&tone).unwrap());
         // Played at 1.5x: the sound clock still keeps wall time; FFmpeg just reads faster.
         project.place(&id, None, 0.0).unwrap();
-        for clip in project.tracks.iter_mut().flat_map(|track| track.clips.iter_mut()) {
+        for clip in project
+            .tracks
+            .iter_mut()
+            .flat_map(|track| track.clips.iter_mut())
+        {
             clip.volume = 0.001;
             clip.speed = 1.5;
             clip.duration /= 1.5;
@@ -483,11 +579,18 @@ mod tests {
             tick(&mut audio);
         }
         let (now, expected) = (audio.now().unwrap(), from + started.elapsed().as_secs_f64());
-        assert!((now - expected).abs() < 0.1, "sound clock at {now:.3}, wall clock at {expected:.3}");
+        assert!(
+            (now - expected).abs() < 0.1,
+            "sound clock at {now:.3}, wall clock at {expected:.3}"
+        );
         {
             let mix = audio.mix();
             assert_eq!(mix.voices.len(), 1);
-            assert!(mix.voices[0].owed < 4_800 * mix.channels, "FFmpeg fell behind by {} samples", mix.voices[0].owed);
+            assert!(
+                mix.voices[0].owed < 4_800 * mix.channels,
+                "FFmpeg fell behind by {} samples",
+                mix.voices[0].owed
+            );
         }
         audio.pause();
         assert!(audio.now().is_none());

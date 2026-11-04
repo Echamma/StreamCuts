@@ -24,9 +24,16 @@ pub struct Film {
 pub fn cached(path: &Path, duration: f64, cache_dir: &Path) -> Result<Film, String> {
     let frame = (WIDTH * HEIGHT * 4) as usize;
     let entry = cache::entry(cache_dir, path, "strip");
-    if let Some(bytes) = entry.as_deref().and_then(cache::read).filter(|b| b.len() > 8 && (b.len() - 8) % frame == 0) {
+    if let Some(bytes) = entry
+        .as_deref()
+        .and_then(cache::read)
+        .filter(|b| b.len() > 8 && (b.len() - 8) % frame == 0)
+    {
         let interval = f64::from_le_bytes(bytes[..8].try_into().expect("8 bytes"));
-        return Ok(Film { interval, frames: bytes[8..].chunks(frame).map(<[u8]>::to_vec).collect() });
+        return Ok(Film {
+            interval,
+            frames: bytes[8..].chunks(frame).map(<[u8]>::to_vec).collect(),
+        });
     }
     let film = decode(path, duration)?;
     if let Some(entry) = entry {
@@ -48,7 +55,19 @@ pub fn decode(path: &Path, duration: f64) -> Result<Film, String> {
     let mut child = command
         .arg("-i")
         .arg(path)
-        .args(["-an", "-vf", &format!("fps=1/{interval:.4},{}", ffmpeg::scale_filter(WIDTH, HEIGHT)), "-pix_fmt", "rgba", "-f", "rawvideo", "pipe:1"])
+        .args([
+            "-an",
+            "-vf",
+            &format!(
+                "fps=1/{interval:.4},{}",
+                ffmpeg::scale_filter(WIDTH, HEIGHT)
+            ),
+            "-pix_fmt",
+            "rgba",
+            "-f",
+            "rawvideo",
+            "pipe:1",
+        ])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
@@ -89,12 +108,22 @@ impl Strip {
             for y in 0..h {
                 for x in 0..w {
                     let p = (y * w + x) * 4;
-                    atlas[(left + x, top + y)] = Color32::from_rgba_unmultiplied(frame[p], frame[p + 1], frame[p + 2], frame[p + 3]);
+                    atlas[(left + x, top + y)] = Color32::from_rgba_unmultiplied(
+                        frame[p],
+                        frame[p + 1],
+                        frame[p + 2],
+                        frame[p + 3],
+                    );
                 }
             }
         }
         let texture = ctx.load_texture(name, atlas, TextureOptions::LINEAR);
-        Self { texture, interval: film.interval, count, rows }
+        Self {
+            texture,
+            interval: film.interval,
+            count,
+            rows,
+        }
     }
 
     /// Where in the texture the frame nearest to source time `t` is, as UV coordinates.
@@ -102,7 +131,10 @@ impl Strip {
         let index = ((t / self.interval).round().max(0.0) as usize).min(self.count - 1);
         let (u, v) = (1.0 / COLUMNS as f32, 1.0 / self.rows as f32);
         let (column, row) = ((index % COLUMNS) as f32, (index / COLUMNS) as f32);
-        Rect::from_min_max(pos2(column * u, row * v), pos2((column + 1.0) * u, (row + 1.0) * v))
+        Rect::from_min_max(
+            pos2(column * u, row * v),
+            pos2((column + 1.0) * u, (row + 1.0) * v),
+        )
     }
 }
 
@@ -117,7 +149,17 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("clip.mp4");
         let made = ffmpeg::command(&ffmpeg::ffmpeg())
-            .args(["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=30:duration=5", "-pix_fmt", "yuv420p"])
+            .args([
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=320x180:rate=30:duration=5",
+                "-pix_fmt",
+                "yuv420p",
+            ])
             .arg(&file)
             .status()
             .unwrap();
@@ -125,15 +167,30 @@ mod tests {
         let film = cached(&file, 5.0, &dir).unwrap();
         assert_eq!(film.interval, 1.0);
         let again = cached(&file, 5.0, &dir).unwrap();
-        assert_eq!((again.interval, &again.frames), (film.interval, &film.frames), "the second time comes from the cache");
-        assert!((5..=6).contains(&film.frames.len()), "{} frames", film.frames.len());
-        assert_ne!(film.frames[0], film.frames[3], "different times, different pictures");
+        assert_eq!(
+            (again.interval, &again.frames),
+            (film.interval, &film.frames),
+            "the second time comes from the cache"
+        );
+        assert!(
+            (5..=6).contains(&film.frames.len()),
+            "{} frames",
+            film.frames.len()
+        );
+        assert_ne!(
+            film.frames[0], film.frames[3],
+            "different times, different pictures"
+        );
         let ctx = egui::Context::default();
         let strip = Strip::new(&ctx, "test-strip", film);
         let first = strip.uv(0.2);
         assert_eq!((first.min.x, first.min.y), (0.0, 0.0));
         assert_eq!(strip.uv(2.9).min.x, 3.0 / COLUMNS as f32);
-        assert_eq!(strip.uv(99.0).min.x, strip.uv(4.0).min.x.max(strip.uv(5.0).min.x), "past the end: the last frame");
+        assert_eq!(
+            strip.uv(99.0).min.x,
+            strip.uv(4.0).min.x.max(strip.uv(5.0).min.x),
+            "past the end: the last frame"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

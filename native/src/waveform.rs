@@ -21,7 +21,10 @@ impl Waveform {
         let mut levels = vec![peaks];
         while levels.last().is_some_and(|level| level.len() > 1) {
             let below = levels.last().expect("non-empty");
-            let above = below.chunks(2).map(|pair| pair.iter().copied().max().unwrap_or(0)).collect();
+            let above = below
+                .chunks(2)
+                .map(|pair| pair.iter().copied().max().unwrap_or(0))
+                .collect();
             levels.push(above);
         }
         Self { levels }
@@ -31,12 +34,18 @@ impl Waveform {
     pub fn peak(&self, from: f64, to: f64) -> u8 {
         let span = ((to - from) * PER_SECOND).max(1.0);
         // The level where one peak covers about half the span: two or three peaks to look at.
-        let level = (span.log2().floor() as usize).saturating_sub(1).min(self.levels.len() - 1);
+        let level = (span.log2().floor() as usize)
+            .saturating_sub(1)
+            .min(self.levels.len() - 1);
         let peaks = &self.levels[level];
         let scale = PER_SECOND / (1u64 << level) as f64;
         let first = ((from.max(0.0) * scale) as usize).min(peaks.len());
-        let last = ((to.max(0.0) * scale).ceil() as usize).clamp(first + 1, peaks.len().max(first + 1));
-        peaks.get(first..last.min(peaks.len())).and_then(|range| range.iter().copied().max()).unwrap_or(0)
+        let last =
+            ((to.max(0.0) * scale).ceil() as usize).clamp(first + 1, peaks.len().max(first + 1));
+        peaks
+            .get(first..last.min(peaks.len()))
+            .and_then(|range| range.iter().copied().max())
+            .unwrap_or(0)
     }
 }
 
@@ -59,7 +68,16 @@ pub fn decode(path: &Path) -> Result<Waveform, String> {
     let mut child = ffmpeg::command(&ffmpeg::ffmpeg())
         .args(["-v", "error", "-i"])
         .arg(path)
-        .args(["-vn", "-ac", "1", "-ar", &RATE.to_string(), "-f", "f32le", "pipe:1"])
+        .args([
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            &RATE.to_string(),
+            "-f",
+            "f32le",
+            "pipe:1",
+        ])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
@@ -77,7 +95,10 @@ pub fn decode(path: &Path) -> Result<Waveform, String> {
         };
         filled += read;
         let whole = filled - filled % 4;
-        for sample in bytes[..whole].chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])) {
+        for sample in bytes[..whole]
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        {
             loudest = loudest.max(sample.abs());
             counted += 1;
             if counted == per_peak {
@@ -126,7 +147,17 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("tone.wav");
         let made = ffmpeg::command(&ffmpeg::ffmpeg())
-            .args(["-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=2", "-af", "volume='if(lt(t,1),1,0.1)':eval=frame"])
+            .args([
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=2",
+                "-af",
+                "volume='if(lt(t,1),1,0.1)':eval=frame",
+            ])
             .arg(&file)
             .status()
             .unwrap();

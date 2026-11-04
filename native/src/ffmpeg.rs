@@ -4,13 +4,16 @@ use crate::project::{BLUR_THROUGH, Framing, Media, MediaKind, Picture, Transitio
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
-use std::sync::{Arc, Mutex, OnceLock};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::sync::{Arc, Mutex, OnceLock};
 
 const IMAGE_EXTENSIONS: [&str; 6] = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
 
 fn find(name: &str, env: &str) -> PathBuf {
-    if let Some(path) = std::env::var_os(env).map(PathBuf::from).filter(|p| p.is_file()) {
+    if let Some(path) = std::env::var_os(env)
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+    {
         return path;
     }
     let exe = format!("{name}.exe");
@@ -23,11 +26,18 @@ fn find(name: &str, env: &str) -> PathBuf {
     // A static build (one 240 MB exe) takes about half a second just to start on Windows; a shared build (a small exe
     // and DLLs) takes a few dozen milliseconds. StreamCuts starts FFmpeg for every still, so when PATH has both, use
     // the shared one.
-    found.iter().find(|path| is_shared_build(path)).or(found.first()).cloned().unwrap_or_else(|| PathBuf::from(name))
+    found
+        .iter()
+        .find(|path| is_shared_build(path))
+        .or(found.first())
+        .cloned()
+        .unwrap_or_else(|| PathBuf::from(name))
 }
 
 fn is_shared_build(exe: &Path) -> bool {
-    let Some(entries) = exe.parent().and_then(|dir| std::fs::read_dir(dir).ok()) else { return false };
+    let Some(entries) = exe.parent().and_then(|dir| std::fs::read_dir(dir).ok()) else {
+        return false;
+    };
     entries.flatten().any(|entry| {
         let name = entry.file_name().to_string_lossy().to_lowercase();
         name.starts_with("avcodec-") && name.ends_with(".dll")
@@ -37,13 +47,17 @@ fn is_shared_build(exe: &Path) -> bool {
 /// `STREAMCUTS_FFMPEG`, else `ffmpeg` on PATH.
 pub fn ffmpeg() -> PathBuf {
     static FOUND: OnceLock<PathBuf> = OnceLock::new();
-    FOUND.get_or_init(|| find("ffmpeg", "STREAMCUTS_FFMPEG")).clone()
+    FOUND
+        .get_or_init(|| find("ffmpeg", "STREAMCUTS_FFMPEG"))
+        .clone()
 }
 
 /// `STREAMCUTS_FFPROBE`, else `ffprobe` on PATH.
 pub fn ffprobe() -> PathBuf {
     static FOUND: OnceLock<PathBuf> = OnceLock::new();
-    FOUND.get_or_init(|| find("ffprobe", "STREAMCUTS_FFPROBE")).clone()
+    FOUND
+        .get_or_init(|| find("ffprobe", "STREAMCUTS_FFPROBE"))
+        .clone()
 }
 
 /// A command that never flashes a console window.
@@ -59,30 +73,64 @@ pub fn command(program: &Path) -> Command {
 }
 
 fn is_image(path: &Path) -> bool {
-    path.extension().map(|e| IMAGE_EXTENSIONS.contains(&e.to_string_lossy().to_lowercase().as_str())).unwrap_or(false)
+    path.extension()
+        .map(|e| IMAGE_EXTENSIONS.contains(&e.to_string_lossy().to_lowercase().as_str()))
+        .unwrap_or(false)
 }
 
 /// Reads what a media file holds (length, size, sound) into a [`Media`] the project can use.
 pub fn probe(path: &Path) -> Result<Media, String> {
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     if is_image(path) {
-        let (width, height) = image::image_dimensions(path).map_err(|e| format!("{name} couldn't be read: {e}"))?;
-        return Ok(Media { id: new_id(), path: path.to_path_buf(), name, kind: MediaKind::Image, duration: 0.0, width, height, has_audio: false, frame_rate: 0.0, attributes: Default::default() });
+        let (width, height) =
+            image::image_dimensions(path).map_err(|e| format!("{name} couldn't be read: {e}"))?;
+        return Ok(Media {
+            id: new_id(),
+            path: path.to_path_buf(),
+            name,
+            kind: MediaKind::Image,
+            duration: 0.0,
+            width,
+            height,
+            has_audio: false,
+            frame_rate: 0.0,
+            attributes: Default::default(),
+        });
     }
     let output = command(&ffprobe())
-        .args(["-v", "error", "-print_format", "json", "-show_format", "-show_streams"])
+        .args([
+            "-v",
+            "error",
+            "-print_format",
+            "json",
+            "-show_format",
+            "-show_streams",
+        ])
         .arg(path)
         .output()
-        .map_err(|e| format!("FFprobe couldn't start ({e}). Install FFmpeg or set STREAMCUTS_FFPROBE."))?;
+        .map_err(|e| {
+            format!("FFprobe couldn't start ({e}). Install FFmpeg or set STREAMCUTS_FFPROBE.")
+        })?;
     if !output.status.success() {
-        return Err(format!("{name} isn't a video or sound file StreamCuts can read."));
+        return Err(format!(
+            "{name} isn't a video or sound file StreamCuts can read."
+        ));
     }
-    let info: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())?;
+    let info: serde_json::Value =
+        serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())?;
     let streams = info["streams"].as_array().cloned().unwrap_or_default();
     // Cover art in audio files shows up as a one-frame video stream; it doesn't make the file a video.
-    let video = streams.iter().find(|s| s["codec_type"] == "video" && s["disposition"]["attached_pic"] != 1);
+    let video = streams
+        .iter()
+        .find(|s| s["codec_type"] == "video" && s["disposition"]["attached_pic"] != 1);
     let has_audio = streams.iter().any(|s| s["codec_type"] == "audio");
-    let duration = info["format"]["duration"].as_str().and_then(|d| d.parse::<f64>().ok()).unwrap_or(0.0);
+    let duration = info["format"]["duration"]
+        .as_str()
+        .and_then(|d| d.parse::<f64>().ok())
+        .unwrap_or(0.0);
     match video {
         Some(v) => Ok(Media {
             id: new_id(),
@@ -94,22 +142,47 @@ pub fn probe(path: &Path) -> Result<Media, String> {
             height: v["height"].as_u64().unwrap_or(0) as u32,
             has_audio,
             // "30000/1001" and the like.
-            frame_rate: v["avg_frame_rate"].as_str().or(v["r_frame_rate"].as_str()).and_then(|rate| {
-                let (n, d) = rate.split_once('/')?;
-                let (n, d) = (n.parse::<f64>().ok()?, d.parse::<f64>().ok()?);
-                (d > 0.0).then(|| n / d)
-            }).unwrap_or(0.0),
+            frame_rate: v["avg_frame_rate"]
+                .as_str()
+                .or(v["r_frame_rate"].as_str())
+                .and_then(|rate| {
+                    let (n, d) = rate.split_once('/')?;
+                    let (n, d) = (n.parse::<f64>().ok()?, d.parse::<f64>().ok()?);
+                    (d > 0.0).then(|| n / d)
+                })
+                .unwrap_or(0.0),
             attributes: Default::default(),
         }),
-        None if has_audio => Ok(Media { id: new_id(), path: path.to_path_buf(), name, kind: MediaKind::Audio, duration, width: 0, height: 0, has_audio, frame_rate: 0.0, attributes: Default::default() }),
-        None => Err(format!("{name} has no picture or sound StreamCuts can use.")),
+        None if has_audio => Ok(Media {
+            id: new_id(),
+            path: path.to_path_buf(),
+            name,
+            kind: MediaKind::Audio,
+            duration,
+            width: 0,
+            height: 0,
+            has_audio,
+            frame_rate: 0.0,
+            attributes: Default::default(),
+        }),
+        None => Err(format!(
+            "{name} has no picture or sound StreamCuts can use."
+        )),
     }
 }
 
 /// A stretch of a file's integrated loudness (EBU R128), in LUFS. Reads the whole stretch; call it off the UI thread.
 pub fn loudness(path: &Path, from: f64, length: f64) -> Result<f64, String> {
     let output = command(&ffmpeg())
-        .args(["-hide_banner", "-nostats", "-ss", &format!("{:.3}", seek_to(from)), "-t", &format!("{length:.3}"), "-i"])
+        .args([
+            "-hide_banner",
+            "-nostats",
+            "-ss",
+            &format!("{:.3}", seek_to(from)),
+            "-t",
+            &format!("{length:.3}"),
+            "-i",
+        ])
         .arg(path)
         .args(["-vn", "-af", "ebur128", "-f", "null", "-"])
         .stdin(Stdio::null())
@@ -117,8 +190,22 @@ pub fn loudness(path: &Path, from: f64, length: f64) -> Result<f64, String> {
         .map_err(|e| format!("FFmpeg couldn't start ({e})."))?;
     // The summary at the end: "Integrated loudness:\n    I:         -23.0 LUFS".
     let text = String::from_utf8_lossy(&output.stderr);
-    let summary = text.rsplit("Integrated loudness:").next().filter(|_| text.contains("Integrated loudness:")).ok_or("This clip has no sound to measure.")?;
-    summary.lines().find_map(|line| line.trim().strip_prefix("I:")?.trim().strip_suffix("LUFS")?.trim().parse::<f64>().ok())
+    let summary = text
+        .rsplit("Integrated loudness:")
+        .next()
+        .filter(|_| text.contains("Integrated loudness:"))
+        .ok_or("This clip has no sound to measure.")?;
+    summary
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("I:")?
+                .trim()
+                .strip_suffix("LUFS")?
+                .trim()
+                .parse::<f64>()
+                .ok()
+        })
         .ok_or_else(|| "FFmpeg didn't report the loudness.".into())
 }
 
@@ -128,13 +215,27 @@ pub fn loudness(path: &Path, from: f64, length: f64) -> Result<f64, String> {
 /// it off the UI thread.
 pub fn proxy(path: &Path, output: &Path) -> Result<(), String> {
     if let Some(dir) = output.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("Couldn't make the proxy folder ({e})."))?;
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("Couldn't make the proxy folder ({e})."))?;
     }
     let partial = output.with_extension("partial.mp4");
     let result = command(&ffmpeg())
         .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
         .arg(path)
-        .args(["-map", "0:v:0", "-an", "-sn", "-vf", "scale=-2:'min(540,ih)'", "-c:v", "libx264", "-preset", "veryfast", "-crf", "26"])
+        .args([
+            "-map",
+            "0:v:0",
+            "-an",
+            "-sn",
+            "-vf",
+            "scale=-2:'min(540,ih)'",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "26",
+        ])
         .args(["-g", "15", "-pix_fmt", "yuv420p", "-movflags", "+faststart"])
         .arg(&partial)
         .stdin(Stdio::null())
@@ -142,7 +243,13 @@ pub fn proxy(path: &Path, output: &Path) -> Result<(), String> {
         .map_err(|e| format!("FFmpeg couldn't start ({e})."))?;
     if !result.status.success() {
         let _ = std::fs::remove_file(&partial);
-        return Err(format!("FFmpeg couldn't make a proxy: {}", String::from_utf8_lossy(&result.stderr).lines().last().unwrap_or("no reason given")));
+        return Err(format!(
+            "FFmpeg couldn't make a proxy: {}",
+            String::from_utf8_lossy(&result.stderr)
+                .lines()
+                .last()
+                .unwrap_or("no reason given")
+        ));
     }
     std::fs::rename(&partial, output).map_err(|e| format!("Couldn't keep the proxy ({e})."))
 }
@@ -155,9 +262,26 @@ pub fn focus(path: &Path, from: f64, length: f64) -> Result<Vec<crate::project::
     const RATE: f64 = 4.0;
     let (width, height) = (160usize, 90usize);
     let mut child = command(&ffmpeg())
-        .args(["-v", "error", "-ss", &seek_to(from), "-t", &format!("{length:.3}"), "-i"])
+        .args([
+            "-v",
+            "error",
+            "-ss",
+            &seek_to(from),
+            "-t",
+            &format!("{length:.3}"),
+            "-i",
+        ])
         .arg(path)
-        .args(["-an", "-vf", &format!("fps={RATE},scale={width}:{height}"), "-pix_fmt", "gray", "-f", "rawvideo", "pipe:1"])
+        .args([
+            "-an",
+            "-vf",
+            &format!("fps={RATE},scale={width}:{height}"),
+            "-pix_fmt",
+            "gray",
+            "-f",
+            "rawvideo",
+            "pipe:1",
+        ])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -169,7 +293,11 @@ pub fn focus(path: &Path, from: f64, length: f64) -> Result<Vec<crate::project::
     let mut frame = vec![0u8; width * height];
     while stdout.read_exact(&mut frame).is_ok() {
         let (x, y) = motion.next(&frame);
-        track.push(crate::project::Focus { t: from + track.len() as f64 / RATE, x, y });
+        track.push(crate::project::Focus {
+            t: from + track.len() as f64 / RATE,
+            x,
+            y,
+        });
     }
     let _ = child.wait();
     if track.is_empty() {
@@ -192,7 +320,12 @@ impl Motion {
 
     fn new(width: usize, height: usize, rate: f64) -> Self {
         let dt = 1.0 / rate as f32;
-        Motion { size: (width, height), previous: None, place: None, ease: dt / (dt + 0.5) }
+        Motion {
+            size: (width, height),
+            previous: None,
+            place: None,
+            ease: dt / (dt + 0.5),
+        }
     }
 
     fn next(&mut self, luma: &[u8]) -> (f32, f32) {
@@ -205,7 +338,8 @@ impl Motion {
                 for y in 0..height {
                     for x in 0..width {
                         let i = y * width + x;
-                        cells[(y * Self::GRID / height) * Self::GRID + x * Self::GRID / width] += luma[i].abs_diff(previous[i]) as u64;
+                        cells[(y * Self::GRID / height) * Self::GRID + x * Self::GRID / width] +=
+                            luma[i].abs_diff(previous[i]) as u64;
                     }
                 }
                 // Below half a level of change per pixel it's noise, not motion: stay put.
@@ -214,7 +348,10 @@ impl Motion {
                     last
                 } else {
                     let best = (0..cells.len()).max_by_key(|&i| cells[i]).unwrap_or(0);
-                    (((best % Self::GRID) as f32 + 0.5) / Self::GRID as f32, ((best / Self::GRID) as f32 + 0.5) / Self::GRID as f32)
+                    (
+                        ((best % Self::GRID) as f32 + 0.5) / Self::GRID as f32,
+                        ((best / Self::GRID) as f32 + 0.5) / Self::GRID as f32,
+                    )
                 }
             }
         };
@@ -234,7 +371,14 @@ pub fn scenes(path: &Path, threshold: f64) -> Result<Vec<f64>, String> {
     let output = command(&ffmpeg())
         .args(["-hide_banner", "-nostats", "-i"])
         .arg(path)
-        .args(["-an", "-vf", &format!("scale=160:-2,select='gt(scene,{threshold})',showinfo"), "-f", "null", "-"])
+        .args([
+            "-an",
+            "-vf",
+            &format!("scale=160:-2,select='gt(scene,{threshold})',showinfo"),
+            "-f",
+            "null",
+            "-",
+        ])
         .stdin(Stdio::null())
         .output()
         .map_err(|e| format!("FFmpeg couldn't start ({e})."))?;
@@ -242,8 +386,17 @@ pub fn scenes(path: &Path, threshold: f64) -> Result<Vec<f64>, String> {
         return Err("FFmpeg couldn't read this file for scenes.".into());
     }
     // showinfo prints a line per selected frame: "... pts_time:12.345 ...".
-    Ok(String::from_utf8_lossy(&output.stderr).lines().filter(|line| line.contains("Parsed_showinfo"))
-        .filter_map(|line| line.split("pts_time:").nth(1)?.split_whitespace().next()?.parse::<f64>().ok())
+    Ok(String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .filter(|line| line.contains("Parsed_showinfo"))
+        .filter_map(|line| {
+            line.split("pts_time:")
+                .nth(1)?
+                .split_whitespace()
+                .next()?
+                .parse::<f64>()
+                .ok()
+        })
         .collect())
 }
 
@@ -257,7 +410,12 @@ pub struct Frame {
 /// The incoming picture fades over the outgoing one at a cut. Both are decoded to the project size.
 /// The picture partway (`progress`, 0-1) through a crossfade, as exports draw it: a dissolve, or for a blur-through
 /// each picture mixed towards a blurred copy of itself on its way out (or in) first.
-pub fn crossfade_frames(outgoing: &Frame, incoming: &Frame, progress: f32, transition: Transition) -> Frame {
+pub fn crossfade_frames(
+    outgoing: &Frame,
+    incoming: &Frame,
+    progress: f32,
+    transition: Transition,
+) -> Frame {
     match transition {
         Transition::Dissolve => blend_frames(outgoing, incoming, progress),
         Transition::BlurThrough => {
@@ -274,7 +432,9 @@ pub fn crossfade_frames(outgoing: &Frame, incoming: &Frame, progress: f32, trans
 pub fn blurred(frame: &Frame, sigma: f32) -> Frame {
     let [width, height] = frame.size;
     // The box that, three times over, spreads as far as the Gaussian.
-    let radius = ((((4.0 * sigma * sigma + 1.0).sqrt()) - 1.0) / 2.0).round().max(0.0) as usize;
+    let radius = ((((4.0 * sigma * sigma + 1.0).sqrt()) - 1.0) / 2.0)
+        .round()
+        .max(0.0) as usize;
     let mut rgba = frame.rgba.clone();
     if radius > 0 && width > 0 && height > 0 {
         let mut line = Vec::new();
@@ -287,11 +447,22 @@ pub fn blurred(frame: &Frame, sigma: f32) -> Frame {
             }
         }
     }
-    Frame { time: frame.time, size: frame.size, rgba }
+    Frame {
+        time: frame.time,
+        size: frame.size,
+        rgba,
+    }
 }
 
 /// One box blur along a line of `count` pixels `stride` bytes apart from `start`, its end pixels repeated beyond it.
-fn box_pass(rgba: &mut [u8], start: usize, stride: usize, count: usize, radius: usize, line: &mut Vec<[u32; 3]>) {
+fn box_pass(
+    rgba: &mut [u8],
+    start: usize,
+    stride: usize,
+    count: usize,
+    radius: usize,
+    line: &mut Vec<[u32; 3]>,
+) {
     line.clear();
     line.extend((0..count).map(|i| {
         let p = start + i * stride;
@@ -299,7 +470,10 @@ fn box_pass(rgba: &mut [u8], start: usize, stride: usize, count: usize, radius: 
     }));
     let at = |i: isize| line[i.clamp(0, count as isize - 1) as usize];
     let (r, width) = (radius as isize, 2 * radius as u32 + 1);
-    let mut sum = (-r..=r).fold([0u32; 3], |sum, i| { let v = at(i); [sum[0] + v[0], sum[1] + v[1], sum[2] + v[2]] });
+    let mut sum = (-r..=r).fold([0u32; 3], |sum, i| {
+        let v = at(i);
+        [sum[0] + v[0], sum[1] + v[1], sum[2] + v[2]]
+    });
     for i in 0..count as isize {
         let p = start + i as usize * stride;
         for c in 0..3 {
@@ -318,11 +492,17 @@ pub fn blend_frames(outgoing: &Frame, incoming: &Frame, progress: f32) -> Frame 
     if outgoing.size == incoming.size {
         for (to, from) in rgba.chunks_exact_mut(4).zip(outgoing.rgba.chunks_exact(4)) {
             for channel in 0..3 {
-                to[channel] = (from[channel] as f32 * (1.0 - progress) + to[channel] as f32 * progress).round() as u8;
+                to[channel] = (from[channel] as f32 * (1.0 - progress)
+                    + to[channel] as f32 * progress)
+                    .round() as u8;
             }
         }
     }
-    Frame { time: incoming.time, size: incoming.size, rgba }
+    Frame {
+        time: incoming.time,
+        size: incoming.size,
+        rgba,
+    }
 }
 
 /// The `-ss` for the frame at `at`. FFmpeg starts at the first frame at or after the time it's given, and a frame's
@@ -355,7 +535,13 @@ pub(crate) fn scale_filter(width: u32, height: u32) -> String {
 }
 
 /// One frame at `at` seconds, shown as `picture` in `width`×`height`. Blocking: call it off the UI thread.
-pub fn still(path: &Path, at: f64, width: u32, height: u32, picture: Picture) -> Result<Frame, String> {
+pub fn still(
+    path: &Path,
+    at: f64,
+    width: u32,
+    height: u32,
+    picture: Picture,
+) -> Result<Frame, String> {
     // Pictures are read directly unless they have a color grade, which FFmpeg applies exactly as exports do.
     if is_image(path) && picture.grade.is_neutral() && picture.effects.is_neutral() {
         let framing = picture.framing;
@@ -364,21 +550,44 @@ pub fn still(path: &Path, at: f64, width: u32, height: u32, picture: Picture) ->
         // Scale to fit (or fill), then place the picture: centered with bars, or cropped around the focus.
         let (scale, focus) = match framing {
             Framing::Fit => ((width as f32 / iw).min(height as f32 / ih), (0.5, 0.5)),
-            Framing::Fill { x, y } => ((width as f32 / iw).max(height as f32 / ih), (x.clamp(0.0, 1.0), y.clamp(0.0, 1.0))),
+            Framing::Fill { x, y } => (
+                (width as f32 / iw).max(height as f32 / ih),
+                (x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)),
+            ),
         };
-        let (sw, sh) = (((iw * scale).round() as u32).max(1), ((ih * scale).round() as u32).max(1));
-        let scaled = image.resize_exact(sw, sh, image::imageops::FilterType::Triangle).to_rgba8();
+        let (sw, sh) = (
+            ((iw * scale).round() as u32).max(1),
+            ((ih * scale).round() as u32).max(1),
+        );
+        let scaled = image
+            .resize_exact(sw, sh, image::imageops::FilterType::Triangle)
+            .to_rgba8();
         let mut canvas = image::RgbaImage::from_pixel(width, height, image::Rgba([0, 0, 0, 255]));
         let x = ((width as f32 - sw as f32) * focus.0).round() as i64;
         let y = ((height as f32 - sh as f32) * focus.1).round() as i64;
         image::imageops::overlay(&mut canvas, &scaled, x, y);
-        return Ok(Frame { time: at, size: [width as usize, height as usize], rgba: canvas.into_raw() });
+        return Ok(Frame {
+            time: at,
+            size: [width as usize, height as usize],
+            rgba: canvas.into_raw(),
+        });
     }
     let output = command(&ffmpeg())
         .args(["-v", "error", "-ss", &seek_to(at)])
         .arg("-i")
         .arg(path)
-        .args(["-frames:v", "1", "-an", "-vf", &picture.filter_at(width, height, at, 1.0), "-pix_fmt", "rgba", "-f", "rawvideo", "pipe:1"])
+        .args([
+            "-frames:v",
+            "1",
+            "-an",
+            "-vf",
+            &picture.filter_at(width, height, at, 1.0),
+            "-pix_fmt",
+            "rgba",
+            "-f",
+            "rawvideo",
+            "pipe:1",
+        ])
         .stderr(Stdio::null())
         .output()
         .map_err(|e| format!("FFmpeg couldn't start ({e})."))?;
@@ -386,7 +595,11 @@ pub fn still(path: &Path, at: f64, width: u32, height: u32, picture: Picture) ->
     if output.stdout.len() < expected {
         return Err("No picture at that time.".into());
     }
-    Ok(Frame { time: at, size: [width as usize, height as usize], rgba: output.stdout[..expected].to_vec() })
+    Ok(Frame {
+        time: at,
+        size: [width as usize, height as usize],
+        rgba: output.stdout[..expected].to_vec(),
+    })
 }
 
 /// A small PNG-sized thumbnail for the media bin and clips.
@@ -417,10 +630,14 @@ impl Background {
         let (sender, receiver) = sync_channel(capacity);
         let shared = state.clone();
         std::thread::spawn(move || {
-            let Ok(mut child) = command.stdout(Stdio::piped()).stderr(Stdio::null()).spawn() else { return };
+            let Ok(mut child) = command.stdout(Stdio::piped()).stderr(Stdio::null()).spawn() else {
+                return;
+            };
             let stdout = child.stdout.take().expect("piped");
             {
-                let mut state = shared.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                let mut state = shared
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 if matches!(*state, Started::Stopped) {
                     let _ = child.kill();
                     let _ = child.wait();
@@ -436,7 +653,10 @@ impl Background {
 
 impl Drop for Background {
     fn drop(&mut self) {
-        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Started::Running(mut child) = std::mem::replace(&mut *state, Started::Stopped) {
             let _ = child.kill();
             // Waiting for the process to go can take a moment; it needn't hold up the caller.
@@ -456,7 +676,15 @@ pub struct FrameStream {
 
 impl FrameStream {
     /// `speed` plays the source faster or slower; frame times stay in source seconds.
-    pub fn start(path: &Path, from: f64, fps: u32, width: u32, height: u32, picture: Picture, speed: f64) -> Self {
+    pub fn start(
+        path: &Path,
+        from: f64,
+        fps: u32,
+        width: u32,
+        height: u32,
+        picture: Picture,
+        speed: f64,
+    ) -> Self {
         // Start on a frame, so each frame's time is exactly the source time it shows.
         let from = (from * fps as f64 - 1e-6).ceil().max(0.0) / fps as f64;
         let mut command = command(&ffmpeg());
@@ -464,7 +692,19 @@ impl FrameStream {
             .args(["-v", "error", "-ss", &seek_to(from)])
             .arg("-i")
             .arg(path)
-            .args(["-an", "-vf", &format!("setpts=(PTS-STARTPTS)/{speed:.4},fps={fps},{}", picture.filter_at(width, height, from, speed)), "-pix_fmt", "rgba", "-f", "rawvideo", "pipe:1"]);
+            .args([
+                "-an",
+                "-vf",
+                &format!(
+                    "setpts=(PTS-STARTPTS)/{speed:.4},fps={fps},{}",
+                    picture.filter_at(width, height, from, speed)
+                ),
+                "-pix_fmt",
+                "rgba",
+                "-f",
+                "rawvideo",
+                "pipe:1",
+            ]);
         let frame_bytes = (width * height * 4) as usize;
         let (ffmpeg, frames) = Background::start(command, 6, move |mut stdout, sender| {
             for index in 0.. {
@@ -472,13 +712,21 @@ impl FrameStream {
                 if stdout.read_exact(&mut rgba).is_err() {
                     break;
                 }
-                let frame = Frame { time: from + index as f64 * speed / fps as f64, size: [width as usize, height as usize], rgba };
+                let frame = Frame {
+                    time: from + index as f64 * speed / fps as f64,
+                    size: [width as usize, height as usize],
+                    rgba,
+                };
                 if sender.send(frame).is_err() {
                     break;
                 }
             }
         });
-        Self { _ffmpeg: ffmpeg, frames, from }
+        Self {
+            _ffmpeg: ffmpeg,
+            frames,
+            from,
+        }
     }
 }
 
@@ -491,18 +739,37 @@ pub struct SoundStream {
 
 impl SoundStream {
     /// `filter` shapes the clip's sound (`Sound::filter`): it takes stereo, as in exports.
-    pub fn start(path: &Path, from: f64, length: f64, speed: f64, rate: u32, channels: u16, filter: Option<&str>) -> Self {
+    pub fn start(
+        path: &Path,
+        from: f64,
+        length: f64,
+        speed: f64,
+        rate: u32,
+        channels: u16,
+        filter: Option<&str>,
+    ) -> Self {
         let mut command = command(&ffmpeg());
         command
             .args(["-v", "error", "-ss", &format!("{from:.3}")])
             .arg("-i")
             .arg(path)
             .args(["-t", &format!("{:.3}", length * speed), "-vn"]);
-        let filters: Vec<String> = atempo(speed).into_iter().chain(filter.map(|f| format!("aformat=channel_layouts=stereo,{f}"))).collect();
+        let filters: Vec<String> = atempo(speed)
+            .into_iter()
+            .chain(filter.map(|f| format!("aformat=channel_layouts=stereo,{f}")))
+            .collect();
         if !filters.is_empty() {
             command.args(["-af", &filters.join(",")]);
         }
-        command.args(["-ac", &channels.to_string(), "-ar", &rate.to_string(), "-f", "f32le", "pipe:1"]);
+        command.args([
+            "-ac",
+            &channels.to_string(),
+            "-ar",
+            &rate.to_string(),
+            "-f",
+            "f32le",
+            "pipe:1",
+        ]);
         let (ffmpeg, chunks) = Background::start(command, 32, |mut stdout, sender| {
             let mut bytes = vec![0u8; 4096 * 4];
             // A read can end partway through a sample: those bytes wait at the front for the rest.
@@ -513,7 +780,10 @@ impl SoundStream {
                     Ok(read) => {
                         filled += read;
                         let whole = filled - filled % 4;
-                        let samples: Vec<f32> = bytes[..whole].chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+                        let samples: Vec<f32> = bytes[..whole]
+                            .chunks_exact(4)
+                            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                            .collect();
                         bytes.copy_within(whole..filled, 0);
                         filled -= whole;
                         if !samples.is_empty() && sender.send(samples).is_err() {
@@ -523,7 +793,10 @@ impl SoundStream {
                 }
             }
         });
-        Self { _ffmpeg: ffmpeg, chunks }
+        Self {
+            _ffmpeg: ffmpeg,
+            chunks,
+        }
     }
 
     /// Hands the samples to whoever plays them (the output thread) while FFmpeg's lifetime stays with this.
@@ -549,7 +822,15 @@ mod tests {
         let (w, h) = (80, 80);
         // A bright square moving along the right edge, on black.
         let frame = |step: usize| -> Vec<u8> {
-            (0..w * h).map(|i| if i % w >= 70 && (i / w) / 10 == step { 255 } else { 0 }).collect()
+            (0..w * h)
+                .map(|i| {
+                    if i % w >= 70 && (i / w) / 10 == step {
+                        255
+                    } else {
+                        0
+                    }
+                })
+                .collect()
         };
         let mut motion = Motion::new(w, h, 4.0);
         let mut place = motion.next(&frame(0));
@@ -557,7 +838,10 @@ mod tests {
         for step in 1..8 {
             place = motion.next(&frame(step));
         }
-        assert!(place.0 > 0.8 && place.1 > 0.5, "drifts right and down after it: {place:?}");
+        assert!(
+            place.0 > 0.8 && place.1 > 0.5,
+            "drifts right and down after it: {place:?}"
+        );
         let still = motion.next(&frame(7));
         assert!((still.0 - place.0).abs() < 1e-6, "nothing moved: it stays");
     }
@@ -566,18 +850,43 @@ mod tests {
     fn blur_through_softens_both_pictures_midway() {
         // A white square on black, and a plain gray picture.
         let (w, h) = (100usize, 100usize);
-        let square: Vec<u8> = (0..w * h).flat_map(|i| if (40..60).contains(&(i % w)) && (40..60).contains(&(i / w)) { [255, 255, 255, 255] } else { [0, 0, 0, 255] }).collect();
-        let (sharp, gray) = (Frame { time: 0.0, size: [w, h], rgba: square }, Frame { time: 0.0, size: [w, h], rgba: [128, 128, 128, 255].repeat(w * h) });
+        let square: Vec<u8> = (0..w * h)
+            .flat_map(|i| {
+                if (40..60).contains(&(i % w)) && (40..60).contains(&(i / w)) {
+                    [255, 255, 255, 255]
+                } else {
+                    [0, 0, 0, 255]
+                }
+            })
+            .collect();
+        let (sharp, gray) = (
+            Frame {
+                time: 0.0,
+                size: [w, h],
+                rgba: square,
+            },
+            Frame {
+                time: 0.0,
+                size: [w, h],
+                rgba: [128, 128, 128, 255].repeat(w * h),
+            },
+        );
         let soft = blurred(&sharp, 4.0);
         let at = |f: &Frame, x: usize, y: usize| f.rgba[4 * (y * w + x)];
         // The blur spreads the square's edge and keeps the gray flat.
         assert!(at(&soft, 38, 50) > 0 && at(&soft, 50, 50) < 255 && at(&soft, 50, 50) > 200);
         assert_eq!(blurred(&gray, 4.0).rgba, gray.rgba);
         // At the very start a blur-through shows the outgoing picture sharp; midway its edge has softened.
-        assert_eq!(crossfade_frames(&sharp, &gray, 0.0, Transition::BlurThrough).rgba, sharp.rgba);
+        assert_eq!(
+            crossfade_frames(&sharp, &gray, 0.0, Transition::BlurThrough).rgba,
+            sharp.rgba
+        );
         let midway = crossfade_frames(&sharp, &gray, 0.5, Transition::BlurThrough);
         let dissolved = crossfade_frames(&sharp, &gray, 0.5, Transition::Dissolve);
-        assert!(at(&midway, 38, 50) > at(&dissolved, 38, 50), "the edge spreads beyond a plain dissolve's");
+        assert!(
+            at(&midway, 38, 50) > at(&dissolved, 38, 50),
+            "the edge spreads beyond a plain dissolve's"
+        );
     }
 
     /// Needs FFmpeg on PATH: makes a 2-second clip with sound, then reads it back.
@@ -587,16 +896,45 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let clip = dir.join("clip.mp4");
         let made = command(&ffmpeg())
-            .args(["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=30:duration=2", "-f", "lavfi", "-i", "sine=duration=2", "-shortest", "-pix_fmt", "yuv420p"])
+            .args([
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=320x180:rate=30:duration=2",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=duration=2",
+                "-shortest",
+                "-pix_fmt",
+                "yuv420p",
+            ])
             .arg(&clip)
             .status()
             .unwrap();
         assert!(made.success());
         let media = probe(&clip).unwrap();
-        assert!((media.frame_rate - 30.0).abs() < 0.01, "frame rate {}", media.frame_rate);
-        assert!(media.info().starts_with("Video · 320×180 · 30 fps · 0:00:02 · with sound · "), "{}", media.info());
+        assert!(
+            (media.frame_rate - 30.0).abs() < 0.01,
+            "frame rate {}",
+            media.frame_rate
+        );
+        assert!(
+            media
+                .info()
+                .starts_with("Video · 320×180 · 30 fps · 0:00:02 · with sound · "),
+            "{}",
+            media.info()
+        );
         assert_eq!(media.kind, MediaKind::Video);
-        assert!((media.duration - 2.0).abs() < 0.1, "duration {}", media.duration);
+        assert!(
+            (media.duration - 2.0).abs() < 0.1,
+            "duration {}",
+            media.duration
+        );
         assert!(media.has_audio && media.width == 320 && media.height == 180);
         let frame = still(&clip, 1.0, 160, 90, Picture::default()).unwrap();
         // A 440 Hz sine at FFmpeg's default amplitude measures around -21 LUFS; its loudness is a finite number.
@@ -606,55 +944,181 @@ mod tests {
         let made = dir.join("clip.proxy.mp4");
         proxy(&clip, &made).unwrap();
         let proxied = probe(&made).unwrap();
-        assert!(proxied.kind == MediaKind::Video && !proxied.has_audio && (proxied.width, proxied.height) == (320, 180), "{}", proxied.info());
-        assert!((proxied.duration - 2.0).abs() < 0.1, "proxy duration {}", proxied.duration);
+        assert!(
+            proxied.kind == MediaKind::Video
+                && !proxied.has_audio
+                && (proxied.width, proxied.height) == (320, 180),
+            "{}",
+            proxied.info()
+        );
+        assert!(
+            (proxied.duration - 2.0).abs() < 0.1,
+            "proxy duration {}",
+            proxied.duration
+        );
         // Following a focus that pans from the left edge to the right, a vertical frame shows the picture's left end
         // at first and its right end at the last, as a fill placed at either side does.
-        let pan = [crate::project::Focus { t: 0.0, x: 0.0, y: 0.5 }, crate::project::Focus { t: 2.0, x: 1.0, y: 0.5 }];
-        let fill = |x| Picture { framing: Framing::Fill { x, y: 0.5 }, ..Default::default() };
-        let followed = Picture { follow: Some(crate::project::FollowRef::of(&pan)), ..fill(0.5) };
-        assert_eq!(still(&clip, 0.1, 90, 160, followed).unwrap().rgba, still(&clip, 0.1, 90, 160, fill(0.0)).unwrap().rgba);
-        assert_eq!(still(&clip, 1.9, 90, 160, followed).unwrap().rgba, still(&clip, 1.9, 90, 160, fill(1.0)).unwrap().rgba);
+        let pan = [
+            crate::project::Focus {
+                t: 0.0,
+                x: 0.0,
+                y: 0.5,
+            },
+            crate::project::Focus {
+                t: 2.0,
+                x: 1.0,
+                y: 0.5,
+            },
+        ];
+        let fill = |x| Picture {
+            framing: Framing::Fill { x, y: 0.5 },
+            ..Default::default()
+        };
+        let followed = Picture {
+            follow: Some(crate::project::FollowRef::of(&pan)),
+            ..fill(0.5)
+        };
+        assert_eq!(
+            still(&clip, 0.1, 90, 160, followed).unwrap().rgba,
+            still(&clip, 0.1, 90, 160, fill(0.0)).unwrap().rgba
+        );
+        assert_eq!(
+            still(&clip, 1.9, 90, 160, followed).unwrap().rgba,
+            still(&clip, 1.9, 90, 160, fill(1.0)).unwrap().rgba
+        );
         // The test pattern moves, so following it finds points across the clip.
         let found = focus(&clip, 0.0, 2.0).unwrap();
-        assert!(!found.is_empty() && found.iter().all(|f| (0.0..=2.0).contains(&f.t)), "{found:?}");
+        assert!(
+            !found.is_empty() && found.iter().all(|f| (0.0..=2.0).contains(&f.t)),
+            "{found:?}"
+        );
         // The generated clip is one continuous test pattern: no cuts.
         assert!(scenes(&clip, 0.3).unwrap().is_empty());
         assert_eq!(frame.rgba.len(), 160 * 90 * 4);
         // A grade with no saturation leaves gray: red, green and blue alike in every pixel.
-        let gray = Picture { grade: crate::project::Grade { saturation: 0.0, ..Default::default() }, ..Default::default() };
+        let gray = Picture {
+            grade: crate::project::Grade {
+                saturation: 0.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let graded = still(&clip, 1.0, 160, 90, gray).unwrap();
-        let spread = graded.rgba.chunks(4).map(|p| p[0].max(p[1]).max(p[2]) - p[0].min(p[1]).min(p[2])).max().unwrap();
+        let spread = graded
+            .rgba
+            .chunks(4)
+            .map(|p| p[0].max(p[1]).max(p[2]) - p[0].min(p[1]).min(p[2]))
+            .max()
+            .unwrap();
         assert!(spread <= 6, "colors left in a gray picture: {spread}");
         // No gain at all: every channel's highlights (and everything below them) go to black.
-        let wheels = crate::project::Wheels { gain: crate::project::Wheel { master: -1.0, ..Default::default() }, ..Default::default() };
-        let dark = Picture { grade: crate::project::Grade { wheels, ..Default::default() }, ..Default::default() };
+        let wheels = crate::project::Wheels {
+            gain: crate::project::Wheel {
+                master: -1.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let dark = Picture {
+            grade: crate::project::Grade {
+                wheels,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let black = still(&clip, 1.0, 160, 90, dark).unwrap();
-        assert!(black.rgba.chunks(4).all(|p| p[..3].iter().all(|&v| v <= 4)), "the wheels' filter didn't apply");
+        assert!(
+            black.rgba.chunks(4).all(|p| p[..3].iter().all(|&v| v <= 4)),
+            "the wheels' filter didn't apply"
+        );
         // A falling master curve inverts the picture, through the filter exports use.
-        let falling = crate::project::Curves { master: [1.0, 0.75, 0.5, 0.25, 0.0], ..Default::default() };
-        let curved = Picture { effects: crate::project::Effects { curves: falling, ..Default::default() }, ..Default::default() };
+        let falling = crate::project::Curves {
+            master: [1.0, 0.75, 0.5, 0.25, 0.0],
+            ..Default::default()
+        };
+        let curved = Picture {
+            effects: crate::project::Effects {
+                curves: falling,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let inverted = still(&clip, 1.0, 160, 90, curved).unwrap();
-        let (a, b) = (&frame.rgba[4 * 4000..][..3], &inverted.rgba[4 * 4000..][..3]);
-        assert!(a.iter().zip(b).all(|(x, y)| (*x as i32 + *y as i32 - 255).abs() < 12), "{a:?} vs {b:?} through the curve");
-        let soft = Picture { effects: crate::project::Effects { blur: 4.0, ..Default::default() }, ..Default::default() };
+        let (a, b) = (
+            &frame.rgba[4 * 4000..][..3],
+            &inverted.rgba[4 * 4000..][..3],
+        );
+        assert!(
+            a.iter()
+                .zip(b)
+                .all(|(x, y)| (*x as i32 + *y as i32 - 255).abs() < 12),
+            "{a:?} vs {b:?} through the curve"
+        );
+        let soft = Picture {
+            effects: crate::project::Effects {
+                blur: 4.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let blurred = still(&clip, 1.0, 160, 90, soft).unwrap();
-        assert_ne!(blurred.rgba, frame.rgba, "blur should change the decoded picture");
+        assert_ne!(
+            blurred.rgba, frame.rgba,
+            "blur should change the decoded picture"
+        );
         // The negative look inverts the picture, through the same filter exports use.
-        let negative = Picture { effects: crate::project::Effects { look: Some(crate::project::Look::Negative), ..Default::default() }, ..Default::default() };
+        let negative = Picture {
+            effects: crate::project::Effects {
+                look: Some(crate::project::Look::Negative),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let inverted = still(&clip, 1.0, 160, 90, negative).unwrap();
-        let (a, b) = (&frame.rgba[4 * 4000..][..3], &inverted.rgba[4 * 4000..][..3]);
-        assert!(a.iter().zip(b).all(|(x, y)| (*x as i32 + *y as i32 - 255).abs() < 12), "{a:?} vs {b:?}");
+        let (a, b) = (
+            &frame.rgba[4 * 4000..][..3],
+            &inverted.rgba[4 * 4000..][..3],
+        );
+        assert!(
+            a.iter()
+                .zip(b)
+                .all(|(x, y)| (*x as i32 + *y as i32 - 255).abs() < 12),
+            "{a:?} vs {b:?}"
+        );
         // A LUT that inverts colors, from a path with a space and a comma (the filter graph has to take it whole).
         let cube = dir.join("negative, a test.cube");
-        std::fs::write(&cube, "LUT_3D_SIZE 2\n1 1 1\n0 1 1\n1 0 1\n0 0 1\n1 1 0\n0 1 0\n1 0 0\n0 0 0\n").unwrap();
-        let looked_up = Picture { lut: Some(crate::project::LutRef::of(&cube)), ..Default::default() };
+        std::fs::write(
+            &cube,
+            "LUT_3D_SIZE 2\n1 1 1\n0 1 1\n1 0 1\n0 0 1\n1 1 0\n0 1 0\n1 0 0\n0 0 0\n",
+        )
+        .unwrap();
+        let looked_up = Picture {
+            lut: Some(crate::project::LutRef::of(&cube)),
+            ..Default::default()
+        };
         let inverted = still(&clip, 1.0, 160, 90, looked_up).unwrap();
-        let (a, b) = (&frame.rgba[4 * 4000..][..3], &inverted.rgba[4 * 4000..][..3]);
-        assert!(a.iter().zip(b).all(|(x, y)| (*x as i32 + *y as i32 - 255).abs() < 12), "{a:?} vs {b:?} through the LUT");
-        let crisp = Picture { effects: crate::project::Effects { sharpen: 1.0, ..Default::default() }, ..Default::default() };
+        let (a, b) = (
+            &frame.rgba[4 * 4000..][..3],
+            &inverted.rgba[4 * 4000..][..3],
+        );
+        assert!(
+            a.iter()
+                .zip(b)
+                .all(|(x, y)| (*x as i32 + *y as i32 - 255).abs() < 12),
+            "{a:?} vs {b:?} through the LUT"
+        );
+        let crisp = Picture {
+            effects: crate::project::Effects {
+                sharpen: 1.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let sharpened = still(&clip, 1.0, 160, 90, crisp).unwrap();
-        assert_ne!(sharpened.rgba, frame.rgba, "sharpen should change the decoded picture");
+        assert_ne!(
+            sharpened.rgba, frame.rgba,
+            "sharpen should change the decoded picture"
+        );
         // Streamed frames carry their real source time: each looks like the still at its time, not its neighbors'.
         let stream = FrameStream::start(&clip, 0.5, 30, 160, 90, Picture::default(), 1.0);
         let frames: Vec<Frame> = stream.frames.iter().take(16).collect();
@@ -662,24 +1126,50 @@ mod tests {
         for frame in [&frames[0], &frames[15]] {
             let unlike = |t: f64| {
                 let other = still(&clip, t, 160, 90, Picture::default()).unwrap();
-                frame.rgba.iter().zip(&other.rgba).map(|(a, b)| a.abs_diff(*b) as u64).sum::<u64>()
+                frame
+                    .rgba
+                    .iter()
+                    .zip(&other.rgba)
+                    .map(|(a, b)| a.abs_diff(*b) as u64)
+                    .sum::<u64>()
             };
-            let (here, before, after) = (unlike(frame.time), unlike(frame.time - 1.0 / 30.0), unlike(frame.time + 1.0 / 30.0));
-            assert!(here < before && here < after, "frame at {:.3}: {here} vs {before} before, {after} after", frame.time);
+            let (here, before, after) = (
+                unlike(frame.time),
+                unlike(frame.time - 1.0 / 30.0),
+                unlike(frame.time + 1.0 / 30.0),
+            );
+            assert!(
+                here < before && here < after,
+                "frame at {:.3}: {here} vs {before} before, {after} after",
+                frame.time
+            );
         }
         drop(stream);
         // 1.5 s of stereo at 48 kHz from 0.25 s in, give or take a packet.
         let mut sound = SoundStream::start(&clip, 0.25, 1.5, 1.0, 48_000, 2, None);
         let samples: usize = sound.take_chunks().iter().map(|chunk| chunk.len()).sum();
-        assert!(samples % 2 == 0 && (samples as i64 - 144_000).abs() < 4_000, "{samples} samples");
+        assert!(
+            samples % 2 == 0 && (samples as i64 - 144_000).abs() < 4_000,
+            "{samples} samples"
+        );
         drop(sound);
         // Panned hard left: the right side is silent.
-        let left = crate::project::Sound { pan: -1.0, ..Default::default() }.filter().unwrap();
+        let left = crate::project::Sound {
+            pan: -1.0,
+            ..Default::default()
+        }
+        .filter()
+        .unwrap();
         let mut panned = SoundStream::start(&clip, 0.25, 0.5, 1.0, 48_000, 2, Some(&left));
         let samples: Vec<f32> = panned.take_chunks().iter().flatten().collect();
-        let (l, r) = samples.chunks(2).fold((0.0f32, 0.0f32), |(l, r), s| (l.max(s[0].abs()), r.max(s[1].abs())));
-        assert!(samples.len() > 40_000 && l > 0.05 && r < 1e-4, "{} samples, left {l}, right {r}", samples.len());
+        let (l, r) = samples.chunks(2).fold((0.0f32, 0.0f32), |(l, r), s| {
+            (l.max(s[0].abs()), r.max(s[1].abs()))
+        });
+        assert!(
+            samples.len() > 40_000 && l > 0.05 && r < 1e-4,
+            "{} samples, left {l}, right {r}",
+            samples.len()
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
-

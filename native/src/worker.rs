@@ -1,11 +1,11 @@
 //! Slow work (probing files, thumbnails, preview stills, waveforms) runs on background threads; results come back on
 //! a channel the editor drains every frame.
 
-use crate::ffmpeg::{self, Frame};
 use crate::boss::{self, Suggestion};
+use crate::ffmpeg::{self, Frame};
 use crate::filmstrip::{self, Film};
-use crate::transcribe;
 use crate::project::{Caption, Media, Picture};
+use crate::transcribe;
 use crate::waveform::{self, Waveform};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -25,22 +25,72 @@ pub struct StillBlend {
 
 pub enum Job {
     Probe(PathBuf),
-    Thumbnail { media_id: String, path: PathBuf, at: f64 },
-    Still { key: StillKey, path: PathBuf, at: f64, width: u32, height: u32, picture: Picture, blend: Option<StillBlend> },
+    Thumbnail {
+        media_id: String,
+        path: PathBuf,
+        at: f64,
+    },
+    Still {
+        key: StillKey,
+        path: PathBuf,
+        at: f64,
+        width: u32,
+        height: u32,
+        picture: Picture,
+        blend: Option<StillBlend>,
+    },
     /// Waveforms and filmstrips are cached in `cache`.
-    Waveform { media_id: String, path: PathBuf, cache: PathBuf },
-    Filmstrip { media_id: String, path: PathBuf, duration: f64, cache: PathBuf },
+    Waveform {
+        media_id: String,
+        path: PathBuf,
+        cache: PathBuf,
+    },
+    Filmstrip {
+        media_id: String,
+        path: PathBuf,
+        duration: f64,
+        cache: PathBuf,
+    },
     /// Captions for `length` source seconds of `path` from `from`, for a clip at `speed` that starts at `at`.
-    Transcribe { clip: String, path: PathBuf, from: f64, length: f64, speed: f64, at: f64 },
-    Boss { media_id: String, path: PathBuf, duration: f64 },
+    Transcribe {
+        clip: String,
+        path: PathBuf,
+        from: f64,
+        length: f64,
+        speed: f64,
+        at: f64,
+    },
+    Boss {
+        media_id: String,
+        path: PathBuf,
+        duration: f64,
+    },
     /// Where a video cuts to another scene.
-    Scenes { media_id: String, path: PathBuf },
+    Scenes {
+        media_id: String,
+        path: PathBuf,
+    },
     /// Where the action is in a clip's stretch of video (auto-reframe).
-    Focus { clip: String, path: PathBuf, from: f64, length: f64 },
+    Focus {
+        clip: String,
+        path: PathBuf,
+        from: f64,
+        length: f64,
+    },
     /// An editing proxy of a video, made at `output`.
-    Proxy { media_id: String, path: PathBuf, output: PathBuf },
+    Proxy {
+        media_id: String,
+        path: PathBuf,
+        output: PathBuf,
+    },
     /// A clip's loudness; with `normalize`, its volume is then set to reach -14 LUFS.
-    Loudness { clip: String, path: PathBuf, from: f64, length: f64, normalize: bool },
+    Loudness {
+        clip: String,
+        path: PathBuf,
+        from: f64,
+        length: f64,
+        normalize: bool,
+    },
 }
 
 pub enum Done {
@@ -50,12 +100,32 @@ pub enum Done {
     Waveform(String, Result<Waveform, String>),
     Filmstrip(String, Result<Film, String>),
     /// Captions for the timeline stretch `from`..`to`.
-    Captions { from: f64, to: f64, result: Result<Vec<Caption>, String> },
-    Boss { media_id: String, result: Result<Vec<Suggestion>, String> },
-    Scenes { media_id: String, result: Result<Vec<f64>, String> },
-    Loudness { clip: String, normalize: bool, result: Result<f64, String> },
-    Proxy { media_id: String, result: Result<PathBuf, String> },
-    Focus { clip: String, result: Result<Vec<crate::project::Focus>, String> },
+    Captions {
+        from: f64,
+        to: f64,
+        result: Result<Vec<Caption>, String>,
+    },
+    Boss {
+        media_id: String,
+        result: Result<Vec<Suggestion>, String>,
+    },
+    Scenes {
+        media_id: String,
+        result: Result<Vec<f64>, String>,
+    },
+    Loudness {
+        clip: String,
+        normalize: bool,
+        result: Result<f64, String>,
+    },
+    Proxy {
+        media_id: String,
+        result: Result<PathBuf, String>,
+    },
+    Focus {
+        clip: String,
+        result: Result<Vec<crate::project::Focus>, String>,
+    },
 }
 
 pub struct Worker {
@@ -74,16 +144,40 @@ impl Worker {
         let (still_finished, still_ctx) = (finished.clone(), ctx.clone());
         std::thread::spawn(move || {
             while let Ok(mut job) = still_queue.recv() {
-                while let Ok(newer) = still_queue.try_recv() { job = newer; }
-                let Job::Still { key, path, at, width, height, picture, blend } = job else { continue };
-                let result = ffmpeg::still(&path, at, width, height, picture).and_then(|incoming| {
-                    if let Some(blend) = blend {
-                        let outgoing = ffmpeg::still(&blend.path, blend.at, width, height, blend.picture)?;
-                        Ok(ffmpeg::crossfade_frames(&outgoing, &incoming, blend.progress, blend.transition))
-                    } else { Ok(incoming) }
-                });
+                while let Ok(newer) = still_queue.try_recv() {
+                    job = newer;
+                }
+                let Job::Still {
+                    key,
+                    path,
+                    at,
+                    width,
+                    height,
+                    picture,
+                    blend,
+                } = job
+                else {
+                    continue;
+                };
+                let result =
+                    ffmpeg::still(&path, at, width, height, picture).and_then(|incoming| {
+                        if let Some(blend) = blend {
+                            let outgoing =
+                                ffmpeg::still(&blend.path, blend.at, width, height, blend.picture)?;
+                            Ok(ffmpeg::crossfade_frames(
+                                &outgoing,
+                                &incoming,
+                                blend.progress,
+                                blend.transition,
+                            ))
+                        } else {
+                            Ok(incoming)
+                        }
+                    });
                 let result = Done::Still(key, result);
-                if still_finished.send(result).is_err() { break; }
+                if still_finished.send(result).is_err() {
+                    break;
+                }
                 still_ctx.request_repaint();
             }
         });
@@ -98,39 +192,103 @@ impl Worker {
                     };
                     let result = match job {
                         Job::Probe(path) => Done::Probed(path.clone(), ffmpeg::probe(&path)),
-                        Job::Thumbnail { media_id, path, at } => Done::Thumbnail(media_id, ffmpeg::thumbnail(&path, at)),
+                        Job::Thumbnail { media_id, path, at } => {
+                            Done::Thumbnail(media_id, ffmpeg::thumbnail(&path, at))
+                        }
                         Job::Still { .. } => continue,
                         // Reading a long file through takes a while: it gets a thread of its own, so stills don't wait.
-                        Job::Waveform { media_id, path, cache } => {
-                            aside(&finished, &ctx, move || Done::Waveform(media_id, waveform::cached(&path, &cache)));
+                        Job::Waveform {
+                            media_id,
+                            path,
+                            cache,
+                        } => {
+                            aside(&finished, &ctx, move || {
+                                Done::Waveform(media_id, waveform::cached(&path, &cache))
+                            });
                             continue;
                         }
-                        Job::Filmstrip { media_id, path, duration, cache } => {
-                            aside(&finished, &ctx, move || Done::Filmstrip(media_id, filmstrip::cached(&path, duration, &cache)));
+                        Job::Filmstrip {
+                            media_id,
+                            path,
+                            duration,
+                            cache,
+                        } => {
+                            aside(&finished, &ctx, move || {
+                                Done::Filmstrip(
+                                    media_id,
+                                    filmstrip::cached(&path, duration, &cache),
+                                )
+                            });
                             continue;
                         }
-                        Job::Transcribe { clip, path, from, length, speed, at } => {
-                            aside(&finished, &ctx, move || Done::Captions { from: at, to: at + length / speed, result: transcribe::captions(&clip, &path, from, length, speed, at) });
+                        Job::Transcribe {
+                            clip,
+                            path,
+                            from,
+                            length,
+                            speed,
+                            at,
+                        } => {
+                            aside(&finished, &ctx, move || Done::Captions {
+                                from: at,
+                                to: at + length / speed,
+                                result: transcribe::captions(&clip, &path, from, length, speed, at),
+                            });
                             continue;
                         }
-                        Job::Focus { clip, path, from, length } => {
-                            aside(&finished, &ctx, move || Done::Focus { clip, result: ffmpeg::focus(&path, from, length) });
+                        Job::Focus {
+                            clip,
+                            path,
+                            from,
+                            length,
+                        } => {
+                            aside(&finished, &ctx, move || Done::Focus {
+                                clip,
+                                result: ffmpeg::focus(&path, from, length),
+                            });
                             continue;
                         }
-                        Job::Proxy { media_id, path, output } => {
-                            aside(&finished, &ctx, move || Done::Proxy { media_id, result: ffmpeg::proxy(&path, &output).map(|()| output) });
+                        Job::Proxy {
+                            media_id,
+                            path,
+                            output,
+                        } => {
+                            aside(&finished, &ctx, move || Done::Proxy {
+                                media_id,
+                                result: ffmpeg::proxy(&path, &output).map(|()| output),
+                            });
                             continue;
                         }
-                        Job::Loudness { clip, path, from, length, normalize } => {
-                            aside(&finished, &ctx, move || Done::Loudness { clip, normalize, result: ffmpeg::loudness(&path, from, length) });
+                        Job::Loudness {
+                            clip,
+                            path,
+                            from,
+                            length,
+                            normalize,
+                        } => {
+                            aside(&finished, &ctx, move || Done::Loudness {
+                                clip,
+                                normalize,
+                                result: ffmpeg::loudness(&path, from, length),
+                            });
                             continue;
                         }
                         Job::Scenes { media_id, path } => {
-                            aside(&finished, &ctx, move || Done::Scenes { media_id, result: ffmpeg::scenes(&path, 0.3) });
+                            aside(&finished, &ctx, move || Done::Scenes {
+                                media_id,
+                                result: ffmpeg::scenes(&path, 0.3),
+                            });
                             continue;
                         }
-                        Job::Boss { media_id, path, duration } => {
-                            aside(&finished, &ctx, move || Done::Boss { media_id, result: boss::suggest(&path, duration) });
+                        Job::Boss {
+                            media_id,
+                            path,
+                            duration,
+                        } => {
+                            aside(&finished, &ctx, move || Done::Boss {
+                                media_id,
+                                result: boss::suggest(&path, duration),
+                            });
                             continue;
                         }
                     };
@@ -146,14 +304,22 @@ impl Worker {
 
     pub fn send(&self, job: Job) {
         match job {
-            job @ Job::Still { .. } => { let _ = self.stills.send(job); }
-            job => { let _ = self.jobs.send(job); }
+            job @ Job::Still { .. } => {
+                let _ = self.stills.send(job);
+            }
+            job => {
+                let _ = self.jobs.send(job);
+            }
         }
     }
 }
 
 /// Runs a long job on a thread of its own and sends back what it makes.
-fn aside(finished: &Sender<Done>, ctx: &egui::Context, job: impl FnOnce() -> Done + Send + 'static) {
+fn aside(
+    finished: &Sender<Done>,
+    ctx: &egui::Context,
+    job: impl FnOnce() -> Done + Send + 'static,
+) {
     let (finished, ctx) = (finished.clone(), ctx.clone());
     std::thread::spawn(move || {
         if finished.send(job()).is_ok() {
