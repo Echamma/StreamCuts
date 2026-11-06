@@ -35,7 +35,11 @@ enum Gesture {
         clip: String,
         grab: f64,
     },
-    TrimStart(String),
+    TrimStart {
+        clip: String,
+        /// How much the clip has grown past the timeline's start during this drag.
+        grown: f64,
+    },
     TrimEnd(String),
     /// Ctrl-drag on the cut between two touching clips: the first ends and the second starts where the pointer is.
     Roll {
@@ -452,7 +456,9 @@ impl Timeline {
                     x += step;
                 }
             }
-            let name = if clip.link.is_some() {
+            let name = if clip.group.is_some() {
+                format!("{} · grouped", media.name)
+            } else if clip.link.is_some() {
                 format!("{} · linked", media.name)
             } else {
                 media.name.clone()
@@ -464,11 +470,13 @@ impl Timeline {
                 font::ui(11.0),
                 color::INK,
             );
-            // The clip linked to a selected one is outlined lightly: it goes wherever the selected one does.
-            let partner_selected = clip
-                .link
-                .as_ref()
-                .is_some_and(|id| self.selection.contains(id));
+            // A clip linked or grouped with a selected one is outlined lightly: it goes wherever the selected one does.
+            let partner_selected = (clip.link.is_some() || clip.group.is_some())
+                && !selected
+                && project
+                    .partners(&clip.id)
+                    .iter()
+                    .any(|id| self.selection.contains(id));
             let stroke = if selected {
                 Stroke::new(2.0, color::SELECT_INK)
             } else if partner_selected {
@@ -530,7 +538,7 @@ impl Timeline {
                         (p.x - clip_rect.right()).abs() <= EDGE,
                     );
                     // Linked clips don't roll or slide: their partner's neighbors would fall out of step.
-                    let alone = clip.link.is_none();
+                    let alone = clip.link.is_none() && clip.group.is_none();
                     let (left, right) = (
                         project.left_neighbor(&clip.id).filter(|_| alone),
                         project.right_neighbor(&clip.id).filter(|_| alone),
@@ -562,7 +570,10 @@ impl Timeline {
                                 grab: t_of(p.x) - clip.start,
                             }
                         } else if (p.x - clip_rect.left()).abs() <= EDGE {
-                            Gesture::TrimStart(clip.id.clone())
+                            Gesture::TrimStart {
+                                clip: clip.id.clone(),
+                                grown: 0.0,
+                            }
                         } else if (p.x - clip_rect.right()).abs() <= EDGE {
                             Gesture::TrimEnd(clip.id.clone())
                         } else {
@@ -765,6 +776,7 @@ impl Timeline {
         }
 
         // An active move or trim follows the pointer until release.
+        let mut grew = 0.0;
         if let (Some(gesture), Some(p)) = (&self.gesture, ui.input(|i| i.pointer.interact_pos())) {
             if ui.input(|i| i.pointer.primary_down()) {
                 let t = t_of(p.x);
@@ -836,9 +848,20 @@ impl Timeline {
                         let speed = project.clip(clip).map_or(1.0, |c| c.speed);
                         output.changed |= project.slip(clip, source_in - (t - from) * speed);
                     }
-                    Gesture::TrimStart(clip) => {
-                        output.changed |= project
-                            .trim_start(clip, self.snap(project, &[clip.as_str()], playhead, t))
+                    // Past the very start of the timeline, the clip keeps growing into earlier footage and everything
+                    // after it moves later: `grown` is how far that has gone, so holding still doesn't grow it more.
+                    Gesture::TrimStart { clip, grown } => {
+                        let at_start = project.clip(clip).is_some_and(|c| c.start < 1e-6);
+                        if t < 0.0 && at_start {
+                            let more = -t - *grown;
+                            if more > 0.0 {
+                                grew = project.extend_start(clip, more);
+                                output.changed |= grew > 0.0;
+                            }
+                        } else {
+                            output.changed |= project
+                                .trim_start(clip, self.snap(project, &[clip.as_str()], playhead, t))
+                        }
                     }
                     Gesture::TrimEnd(clip) => {
                         output.changed |= project
@@ -854,6 +877,9 @@ impl Timeline {
             } else {
                 self.gesture = None;
             }
+        }
+        if let Some(Gesture::TrimStart { grown, .. }) = &mut self.gesture {
+            *grown += grew;
         }
 
         // Clicking or dragging on the ruler or an empty lane moves the playhead.

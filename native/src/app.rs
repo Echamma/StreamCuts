@@ -1772,8 +1772,35 @@ impl StreamCuts {
             .media(&clip.media_id)
             .is_some_and(|m| m.has_audio)
             && !self.project.sounds_elsewhere(&clip);
+        // Some((true, s)) shows `s` more seconds of footage before the clip, Some((false, s)) after it.
+        let mut extend = None;
+        let mut ungroup = false;
         egui::containers::menu::MenuButton::new(egui::RichText::new("Clip").font(font::ui(13.0))).config(stays_open()).ui(ui, |ui| {
             ui.set_min_width(230.0);
+            if kind != MediaKind::Image {
+                // A clip is a window on its whole video: it can always show more of what came before or after.
+                ui.label(canopy_ui::muted("Show more of the video"));
+                ui.horizontal(|ui| {
+                    for (label, before, seconds) in [("5 s earlier", true, 5.0), ("1 s earlier", true, 1.0), ("1 s later", false, 1.0), ("5 s later", false, 5.0)] {
+                        let hint = if before {
+                            "Start this clip earlier in its video. At the start of the timeline, everything after it moves along to make room."
+                        } else {
+                            "End this clip later in its video. Clips right after it move along to make room."
+                        };
+                        if ui.button(label).on_hover_text(hint).clicked() {
+                            extend = Some((before, seconds));
+                        }
+                    }
+                });
+                ui.separator();
+            }
+            if clip.group.is_some() {
+                if ui.button("Ungroup layers").on_hover_text("Let this clip and the layers grouped with it move and trim on their own").clicked() {
+                    ungroup = true;
+                    ui.close();
+                }
+                ui.separator();
+            }
             if self.project.linked(&clip.id).is_some() {
                 if ui.button("Unlink").on_hover_text("Let this clip and its linked clip move and trim on their own").clicked() {
                     link = Some(false);
@@ -2086,6 +2113,30 @@ impl StreamCuts {
                 self.project.unlink(&clip.id)
             };
             if done {
+                self.edited();
+            }
+        }
+        if let Some((before, seconds)) = extend {
+            let was = self.project.clone();
+            let grown = if before {
+                self.project.extend_start(&clip.id, seconds)
+            } else {
+                self.project.extend_end(&clip.id, seconds)
+            };
+            if grown > 0.0 {
+                self.history.record(&was);
+                self.edited();
+            } else {
+                self.toasts.push(if before {
+                    "That's the start of its video".into()
+                } else {
+                    "That's the end of its video".into()
+                });
+            }
+        }
+        if ungroup {
+            self.history.record(&self.project);
+            if self.project.ungroup(&clip.id) {
                 self.edited();
             }
         }

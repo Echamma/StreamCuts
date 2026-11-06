@@ -218,6 +218,10 @@ pub struct Clip {
     /// trim, split and go together, and the video clip plays no sound of its own.
     #[serde(default)]
     pub link: Option<String>,
+    /// Clips that go together as one: the layers of a Short from Video Chat (the gameplay, the facecam, the chat), each
+    /// a crop of the same footage. Like linked clips they move, trim, split and go together.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     /// How fast the source plays: 2 is twice as fast (the clip covers twice the source in its length).
     #[serde(default = "normal_speed")]
     pub speed: f64,
@@ -1084,6 +1088,10 @@ pub struct Project {
     /// Captions light up each word as it's said (the web StreamCuts' word-by-word captions), where they have word times.
     #[serde(default)]
     pub caption_words: bool,
+    /// Where the project came from, when another app made it: a Short handed over from Video Chat is
+    /// `videochat:<project>:<start>-<end>`, so handing it over again opens this edit instead of starting another.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
     #[serde(default)]
     pub saved_at: u64,
 }
@@ -1245,6 +1253,7 @@ impl Project {
             caption_x: middle(),
             caption_size: caption_size(),
             caption_words: false,
+            origin: None,
             saved_at: 0,
         }
     }
@@ -1582,6 +1591,7 @@ impl Project {
             lut: None,
             follow: Vec::new(),
             link: None,
+            group: None,
             speed: 1.0,
             place: Placement::default(),
         };
@@ -1612,44 +1622,191 @@ impl Project {
             && clip.link.as_deref().and_then(kind) == Some(TrackKind::Audio)
     }
 
-    /// Runs `edit` on a clip, then gives the clip linked to it the same place, length and footage, so the two stay in
-    /// step. If the linked clip has no room for that on its track, neither changes. Returns whether anything did.
+    /// The clips that go wherever `clip_id` goes: the one linked to it, the others in its group, and theirs.
+    pub fn partners(&self, clip_id: &str) -> Vec<String> {
+        let mut family = vec![clip_id.to_owned()];
+        let mut i = 0;
+        while i < family.len() {
+            let Some(clip) = self.clip(&family[i]) else {
+                i += 1;
+                continue;
+            };
+            let mut more: Vec<String> = self.linked(&clip.id).into_iter().collect();
+            if let Some(group) = &clip.group {
+                more.extend(
+                    self.tracks
+                        .iter()
+                        .flat_map(|t| &t.clips)
+                        .filter(|c| c.group.as_ref() == Some(group))
+                        .map(|c| c.id.clone()),
+                );
+            }
+            for id in more {
+                if !family.contains(&id) {
+                    family.push(id);
+                }
+            }
+            i += 1;
+        }
+        family.remove(0);
+        family
+    }
+
+    /// Runs `edit` on a clip, then moves, trims and slips its partners (the clip linked to it, the rest of its group)
+    /// by as much, so they stay in step. If a partner has no room for that on its track, nothing changes. Returns
+    /// whether anything did.
     fn keep_linked(&mut self, clip_id: &str, edit: impl FnOnce(&mut Self) -> bool) -> bool {
-        let Some(partner) = self.linked(clip_id) else {
+        let partners = self.partners(clip_id);
+        if partners.is_empty() {
             return edit(self);
-        };
+        }
         let (tracks, captions) = (self.tracks.clone(), self.captions.clone());
-        let before = self.clip(&partner).cloned().unwrap();
+        let Some(was) = self.clip(clip_id).cloned() else {
+            return false;
+        };
         if !edit(self) {
             return false;
         }
         let Some(clip) = self.clip(clip_id).cloned() else {
             return true;
         };
-        let at = self.find(&partner).unwrap();
-        if Self::overlaps(
-            &self.tracks[at.track],
-            clip.start,
-            clip.end(),
-            Some(&partner),
-        ) {
-            (self.tracks, self.captions) = (tracks, captions);
-            return false;
+        let (moved, slipped) = (clip.start - was.start, clip.source_in - was.source_in);
+        for partner in partners {
+            let at = self.find(&partner).unwrap();
+            let before = self.tracks[at.track].clips[at.index].clone();
+            // Partners keep their own place (a linked pair shares one; a group's layers start together too).
+            let start = before.start + moved;
+            if Self::overlaps(
+                &self.tracks[at.track],
+                start,
+                start + clip.duration,
+                Some(&partner),
+            ) {
+                (self.tracks, self.captions) = (tracks, captions);
+                return false;
+            }
+            let other = &mut self.tracks[at.track].clips[at.index];
+            (other.start, other.duration, other.speed) = (start, clip.duration, clip.speed);
+            other.source_in = (before.source_in + slipped).max(0.0);
+            self.sort_track(at.track);
+            // Captions made from the partner's speech go with it.
+            if moved != 0.0 {
+                self.captions
+                    .iter_mut()
+                    .filter(|c| c.clip.as_deref() == Some(partner.as_str()))
+                    .for_each(|c| c.shift(moved));
+            }
         }
-        let other = &mut self.tracks[at.track].clips[at.index];
-        (other.start, other.duration, other.source_in, other.speed) =
-            (clip.start, clip.duration, clip.source_in, clip.speed);
-        self.sort_track(at.track);
-        // Captions made from the linked clip's speech go with it.
-        let by = clip.start - before.start;
-        if by != 0.0 {
-            self.captions
-                .iter_mut()
-                .filter(|c| c.clip.as_deref() == Some(partner.as_str()))
-                .for_each(|c| c.shift(by));
-            self.captions.sort_by(|a, b| a.start.total_cmp(&b.start));
+        self.captions.sort_by(|a, b| a.start.total_cmp(&b.start));
+        true
+    }
+
+    /// Takes a clip and the rest of its group apart: they move and trim on their own from then on. Returns whether
+    /// it was in a group.
+    pub fn ungroup(&mut self, clip_id: &str) -> bool {
+        let Some(group) = self.clip(clip_id).and_then(|c| c.group.clone()) else {
+            return false;
+        };
+        for clip in self.tracks.iter_mut().flat_map(|t| &mut t.clips) {
+            if clip.group.as_ref() == Some(&group) {
+                clip.group = None;
+            }
         }
         true
+    }
+
+    /// Moves everything from timeline time `at` on (clips on every track, captions, titles and markers) `by` seconds
+    /// later.
+    fn push_later(&mut self, at: f64, by: f64) {
+        let from = at - 1e-6;
+        for track in &mut self.tracks {
+            for clip in track.clips.iter_mut().filter(|c| c.start >= from) {
+                clip.start += by;
+            }
+        }
+        for caption in self.captions.iter_mut().filter(|c| c.start >= from) {
+            caption.shift(by);
+        }
+        for title in self.titles.iter_mut().filter(|t| t.start >= from) {
+            title.start += by;
+            title.end += by;
+        }
+        for marker in self.markers.iter_mut().filter(|m| m.t >= from) {
+            marker.t += by;
+        }
+    }
+
+    /// Shows up to `seconds` more of a clip's footage before where it starts now (as far as the source goes), with
+    /// its partners. When the clip sits at the very start of the timeline or right after another clip, everything
+    /// from it on moves later to make room. Returns how much it grew.
+    pub fn extend_start(&mut self, clip_id: &str, seconds: f64) -> f64 {
+        let Some(clip) = self.clip(clip_id).cloned() else {
+            return 0.0;
+        };
+        let mut family = self.partners(clip_id);
+        family.push(clip_id.to_owned());
+        let mut grow = seconds.max(0.0);
+        let mut room = f64::INFINITY;
+        for id in &family {
+            let Some(c) = self.clip(id) else { continue };
+            grow = grow.min(self.source_room(c).0);
+            let at = self.find(id).unwrap();
+            let previous_end = self.tracks[at.track]
+                .clips
+                .iter()
+                .filter(|o| o.id != c.id && o.end() <= c.start + 1e-9)
+                .map(Clip::end)
+                .fold(0.0, f64::max);
+            room = room.min(c.start - previous_end);
+        }
+        if grow < 1e-6 {
+            return 0.0;
+        }
+        if grow > room {
+            self.push_later(clip.start, grow - room);
+        }
+        let start = self.clip(clip_id).map_or(clip.start, |c| c.start) - grow;
+        if self.trim_start(clip_id, start) {
+            grow
+        } else {
+            0.0
+        }
+    }
+
+    /// Shows up to `seconds` more of a clip's footage after where it ends now (as far as the source goes), with its
+    /// partners. When another clip comes right after it, everything from there on moves later to make room. Returns
+    /// how much it grew.
+    pub fn extend_end(&mut self, clip_id: &str, seconds: f64) -> f64 {
+        let Some(clip) = self.clip(clip_id).cloned() else {
+            return 0.0;
+        };
+        let mut family = self.partners(clip_id);
+        family.push(clip_id.to_owned());
+        let mut grow = seconds.max(0.0);
+        let mut room = f64::INFINITY;
+        for id in &family {
+            let Some(c) = self.clip(id) else { continue };
+            grow = grow.min(self.source_room(c).1);
+            let at = self.find(id).unwrap();
+            let next_start = self.tracks[at.track]
+                .clips
+                .iter()
+                .filter(|o| o.id != c.id && o.start >= c.end() - 1e-9)
+                .map(|o| o.start)
+                .fold(f64::INFINITY, f64::min);
+            room = room.min(next_start - c.end());
+        }
+        if grow < 1e-6 {
+            return 0.0;
+        }
+        if grow > room {
+            self.push_later(clip.end(), grow - room);
+        }
+        if self.trim_end(clip_id, clip.end() + grow) {
+            grow
+        } else {
+            0.0
+        }
     }
 
     /// Puts a video clip's sound on an audio track as a clip of its own, linked to it (the first audio track with room,
@@ -2040,11 +2197,29 @@ impl Project {
     /// Splits a clip in two at timeline time `t`, and the clip linked to it too (the right halves are linked to each
     /// other). Returns the new right-hand clip's id.
     pub fn split(&mut self, clip_id: &str, t: f64) -> Option<String> {
-        let partner = self.linked(clip_id);
+        // The clip and its partners (the clip linked to it, the rest of its group) are cut together: the right halves
+        // are linked to each other as the left ones were, and make a group of their own.
+        let mut family = vec![clip_id.to_owned()];
+        family.extend(self.partners(clip_id));
         let right = self.split_alone(clip_id, t)?;
-        if let Some(other_right) = partner.and_then(|partner| self.split_alone(&partner, t)) {
-            self.clip_mut(&right)?.link = Some(other_right.clone());
-            self.clip_mut(&other_right)?.link = Some(right.clone());
+        let mut halves = vec![(clip_id.to_owned(), right.clone())];
+        for id in &family[1..] {
+            if let Some(other_right) = self.split_alone(id, t) {
+                halves.push((id.clone(), other_right));
+            }
+        }
+        let group = self.clip(clip_id)?.group.as_ref().map(|_| new_id());
+        for (left, right) in &halves {
+            let left = self.clip(left)?.clone();
+            let link = left.link.as_ref().and_then(|partner| {
+                halves
+                    .iter()
+                    .find(|(l, _)| l == partner)
+                    .map(|(_, r)| r.clone())
+            });
+            let clip = self.clip_mut(right)?;
+            clip.link = link;
+            clip.group = left.group.as_ref().and(group.clone());
         }
         Some(right)
     }
@@ -2108,15 +2283,16 @@ impl Project {
         ids.iter().filter_map(|id| self.split(id, t)).collect()
     }
 
-    /// The ids with the clips linked to them added.
+    /// The ids with their partners (linked clips, the rest of their groups) added.
     fn with_linked(&self, clip_ids: &[String]) -> Vec<String> {
         let mut ids = clip_ids.to_vec();
-        ids.extend(
-            clip_ids
-                .iter()
-                .filter_map(|id| self.linked(id))
-                .filter(|id| !clip_ids.contains(id)),
-        );
+        for id in clip_ids {
+            for partner in self.partners(id) {
+                if !ids.contains(&partner) {
+                    ids.push(partner);
+                }
+            }
+        }
         ids
     }
 
@@ -2339,6 +2515,100 @@ mod tests {
             project.find(&second).unwrap().track
         );
         assert_eq!(project.duration(), 20.0);
+    }
+
+    /// A minute of a ten-minute video at the start of the timeline, with a second layer of it grouped on a track
+    /// above (as Video Chat hands over a stacked Short), and a caption.
+    fn grouped_short() -> (Project, String, String) {
+        let (mut project, video) = project_with(600.0);
+        let base = project.place(&video, None, 0.0).unwrap();
+        let top = project.add_track(TrackKind::Video);
+        let layer = project.place(&video, Some(top), 0.0).unwrap();
+        for id in [&base, &layer] {
+            let clip = project.clip_mut(id).unwrap();
+            (clip.source_in, clip.duration, clip.group) = (120.0, 60.0, Some("g".into()));
+        }
+        project.captions.push(Caption {
+            id: new_id(),
+            start: 1.0,
+            end: 2.0,
+            text: "hi".into(),
+            words: Vec::new(),
+            clip: Some(base.clone()),
+        });
+        (project, base, layer)
+    }
+
+    #[test]
+    fn grouped_layers_trim_move_split_and_delete_together() {
+        let (mut project, base, layer) = grouped_short();
+        assert_eq!(project.partners(&base), vec![layer.clone()]);
+        assert!(project.trim_end(&base, 50.0));
+        assert_eq!(project.clip(&layer).unwrap().duration, 50.0);
+        assert!(project.trim_start(&layer, 10.0));
+        let (b, l) = (project.clip(&base).unwrap(), project.clip(&layer).unwrap());
+        assert_eq!((b.start, b.source_in, b.duration), (10.0, 130.0, 40.0));
+        assert_eq!((l.start, l.source_in, l.duration), (10.0, 130.0, 40.0));
+        assert!(project.move_clip(&base, 20.0, project.find(&base).unwrap().track));
+        assert_eq!(project.clip(&layer).unwrap().start, 20.0);
+        let right = project.split(&base, 40.0).unwrap();
+        let right_layer = project.partners(&right);
+        assert_eq!(
+            right_layer.len(),
+            1,
+            "the right halves make a group of their own"
+        );
+        assert_ne!(project.clip(&right).unwrap().group, Some("g".into()));
+        assert_eq!(project.partners(&base), vec![layer.clone()]);
+        assert_eq!(project.delete(&[right.clone()]), 2);
+        assert!(project.ungroup(&base));
+        assert!(project.partners(&base).is_empty());
+    }
+
+    #[test]
+    fn a_clip_at_the_start_shows_earlier_footage_by_moving_everything_along() {
+        let (mut project, base, layer) = grouped_short();
+        let (video, title) = (
+            project.clip(&base).unwrap().media_id.clone(),
+            project.add_title(30.0),
+        );
+        let after = project
+            .place(&video, Some(project.find(&base).unwrap().track), 60.0)
+            .unwrap();
+        assert_eq!(project.extend_start(&base, 5.0), 5.0);
+        let (b, l) = (project.clip(&base).unwrap(), project.clip(&layer).unwrap());
+        assert_eq!((b.start, b.source_in, b.duration), (0.0, 115.0, 65.0));
+        assert_eq!((l.start, l.source_in, l.duration), (0.0, 115.0, 65.0));
+        assert_eq!(
+            project.clip(&after).unwrap().start,
+            65.0,
+            "what came after moves along"
+        );
+        assert_eq!(
+            project.titles.iter().find(|t| t.id == title).unwrap().start,
+            35.0
+        );
+        assert_eq!(
+            project.captions[0].start, 6.0,
+            "captions stay on their words"
+        );
+        // Footage only goes back so far.
+        assert_eq!(project.extend_start(&base, 500.0), 115.0);
+        assert_eq!(project.clip(&layer).unwrap().source_in, 0.0);
+        assert_eq!(project.extend_start(&base, 1.0), 0.0);
+    }
+
+    #[test]
+    fn a_clip_shows_later_footage_and_the_next_clip_moves_along() {
+        let (mut project, base, layer) = grouped_short();
+        let video = project.clip(&base).unwrap().media_id.clone();
+        let after = project
+            .place(&video, Some(project.find(&base).unwrap().track), 60.0)
+            .unwrap();
+        assert_eq!(project.extend_end(&base, 5.0), 5.0);
+        assert_eq!(project.clip(&layer).unwrap().duration, 65.0);
+        assert_eq!(project.clip(&after).unwrap().start, 65.0);
+        assert_eq!(project.extend_end(&base, 1000.0), 600.0 - 120.0 - 65.0);
     }
 
     #[test]
