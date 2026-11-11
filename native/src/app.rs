@@ -74,6 +74,8 @@ pub struct StreamCuts {
     media_typing: bool,
     /// The file selected in Media: Delete removes it while no clip is selected.
     media_selected: Option<String>,
+    /// Clips copied with Ctrl+C or cut with Ctrl+X, with the tracks they were on.
+    clipboard: Vec<(usize, crate::project::Clip)>,
     /// Dragging a clip setting: one undo step for the whole drag.
     adjusting: bool,
     /// Media whose waveform and filmstrip have been asked for.
@@ -181,6 +183,7 @@ impl StreamCuts {
             media_search: String::new(),
             media_typing: false,
             media_selected: None,
+            clipboard: Vec::new(),
             adjusting: false,
             looks_asked: HashSet::new(),
             pending: HashMap::new(),
@@ -542,13 +545,120 @@ impl StreamCuts {
         self.edited();
     }
 
+    /// Pastes clips at `at` and selects them.
+    fn paste(&mut self, clips: Vec<(usize, crate::project::Clip)>, at: f64) {
+        if clips.is_empty() {
+            return;
+        }
+        self.history.record(&self.project);
+        let made = self.project.paste_clips(&clips, at);
+        if made.is_empty() {
+            self.toasts.push("The files those clips came from are no longer in Media".into());
+            return;
+        }
+        self.timeline.selection = made;
+        self.edited();
+    }
+
+    /// The selected clips, or with none selected, the clips under the playhead on tracks that aren't locked.
+    fn clips_in_hand(&self) -> Vec<String> {
+        if !self.timeline.selection.is_empty() {
+            return self.timeline.selection.clone();
+        }
+        let t = self.playhead;
+        self.project.tracks.iter().filter(|track| !track.locked).flat_map(|track| track.clips.iter()).filter(|c| c.start < t && t < c.end()).map(|c| c.id.clone()).collect()
+    }
+
+    /// Q and W: cut everything before (or after) the playhead off the clips in hand.
+    fn trim_to_playhead(&mut self, start: bool) {
+        let clips = self.clips_in_hand();
+        if clips.is_empty() {
+            return;
+        }
+        self.history.record(&self.project);
+        let t = self.playhead;
+        let mut trimmed = false;
+        for id in &clips {
+            trimmed |= if start { self.project.trim_start(id, t) } else { self.project.trim_end(id, t) };
+        }
+        if trimmed {
+            self.edited();
+        }
+    }
+
     fn shortcuts(&mut self, ui: &Ui, focused: bool) {
         if !focused || ui.ctx().egui_wants_keyboard_input() {
             return;
         }
         let ctx = ui.ctx();
-        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Space)) {
+        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Space) | i.consume_key(Modifiers::NONE, Key::K)) {
             self.toggle_play();
+        }
+        // J and L move a second back and on; Up and Down go to the cut before and after.
+        for (key, step) in [(Key::J, -1.0), (Key::L, 1.0)] {
+            if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, key)) {
+                self.seek(self.playhead + step);
+            }
+        }
+        for (key, back) in [(Key::ArrowUp, true), (Key::ArrowDown, false)] {
+            if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, key)) {
+                if let Some(t) = self.project.next_cut(self.playhead, back) {
+                    self.seek(t);
+                }
+            }
+        }
+        // Copy, cut, paste at the playhead, and duplicate right after.
+        let (copy, cut, paste, duplicate, all, none) = ctx.input_mut(|i| {
+            // The clipboard keys arrive as events on Windows; the plain keys cover the rest.
+            let copy = i.events.iter().any(|e| matches!(e, egui::Event::Copy));
+            let cut = i.events.iter().any(|e| matches!(e, egui::Event::Cut));
+            let paste = i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)));
+            (
+                i.consume_key(Modifiers::COMMAND, Key::C) || copy,
+                i.consume_key(Modifiers::COMMAND, Key::X) || cut,
+                i.consume_key(Modifiers::COMMAND, Key::V) || paste,
+                i.consume_key(Modifiers::COMMAND, Key::D),
+                i.consume_key(Modifiers::COMMAND, Key::A),
+                i.consume_key(Modifiers::NONE, Key::Escape),
+            )
+        });
+        if (copy || cut) && !self.timeline.selection.is_empty() {
+            self.clipboard = self.project.copy_clips(&self.timeline.selection);
+            let count = self.clipboard.len();
+            if cut {
+                self.delete_selection(false);
+            }
+            self.toasts.push(format!("{} {count} clip{}. Ctrl+V pastes at the playhead.", if cut { "Cut" } else { "Copied" }, if count == 1 { "" } else { "s" }));
+        }
+        if paste {
+            self.paste(self.clipboard.clone(), self.playhead);
+        }
+        if duplicate && !self.timeline.selection.is_empty() {
+            let clips = self.project.copy_clips(&self.timeline.selection);
+            if let Some(end) = self.project.end_of(&self.timeline.selection) {
+                self.paste(clips, end);
+            }
+        }
+        if all {
+            self.timeline.selection = self.project.tracks.iter().filter(|track| !track.locked).flat_map(|track| track.clips.iter().map(|c| c.id.clone())).collect();
+        }
+        if none {
+            self.timeline.selection.clear();
+            self.media_selected = None;
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Q)) {
+            self.trim_to_playhead(true);
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::W)) {
+            self.trim_to_playhead(false);
+        }
+        // + and - zoom the timeline.
+        let zoom = ctx.input_mut(|i| {
+            let closer = i.consume_key(Modifiers::NONE, Key::Plus) | i.consume_key(Modifiers::NONE, Key::Equals);
+            if closer { 1.25 } else if i.consume_key(Modifiers::NONE, Key::Minus) { 0.8 } else { 1.0 }
+        });
+        if zoom != 1.0 {
+            self.timeline.pps = (self.timeline.pps * zoom).clamp(2.0, 600.0);
         }
         if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::S)) {
             self.split();

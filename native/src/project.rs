@@ -2296,6 +2296,71 @@ impl Project {
         ids
     }
 
+    /// The clips (with the ones linked or grouped with them) and the tracks they are on, to paste later.
+    pub fn copy_clips(&self, clip_ids: &[String]) -> Vec<(usize, Clip)> {
+        let ids = self.with_linked(clip_ids);
+        let mut copies = Vec::new();
+        for (index, track) in self.tracks.iter().enumerate() {
+            copies.extend(track.clips.iter().filter(|c| ids.contains(&c.id)).map(|c| (index, c.clone())));
+        }
+        copies
+    }
+
+    /// Where the last of these clips ends on the timeline (where a duplicate goes).
+    pub fn end_of(&self, clip_ids: &[String]) -> Option<f64> {
+        let ids = self.with_linked(clip_ids);
+        self.tracks.iter().flat_map(|t| t.clips.iter()).filter(|c| ids.contains(&c.id)).map(Clip::end).reduce(f64::max)
+    }
+
+    /// Pastes copied clips so the earliest starts at `at`, or at the first spot after it where they all fit, each on
+    /// the track it came from (or the first of its kind, when that track is gone or locked). They keep their settings,
+    /// their spacing and their links to each other; crossfades from clips left behind are dropped. Returns the new ids.
+    pub fn paste_clips(&mut self, clips: &[(usize, Clip)], at: f64) -> Vec<String> {
+        let mut placed: Vec<(usize, Clip)> = Vec::new();
+        for (track, clip) in clips {
+            let Some((kind, sounds)) = self.media(&clip.media_id).map(|m| (Self::track_kind_for(m.kind), m.has_audio)) else { continue };
+            // A video's detached sound lives on an audio track, and goes back to one.
+            let track = match self.tracks.get(*track) {
+                Some(t) if !t.locked && (t.kind == kind || (t.kind == TrackKind::Audio && sounds)) => *track,
+                _ => self.track_of_kind(kind),
+            };
+            placed.push((track, clip.clone()));
+        }
+        let Some(first) = placed.iter().map(|(_, c)| c.start).reduce(f64::min) else { return Vec::new() };
+        // One shift for all of them, pushed later until none lands on a clip that's already there.
+        let mut shift = at.max(0.0) - first;
+        for _ in 0..200 {
+            let push = placed.iter().map(|(track, c)| self.free_start(*track, c.start + shift, c.duration, None) - (c.start + shift)).fold(0.0, f64::max);
+            if push < 1e-9 {
+                break;
+            }
+            shift += push;
+        }
+        let ids: std::collections::HashMap<String, String> = placed.iter().map(|(_, c)| (c.id.clone(), new_id())).collect();
+        let mut groups: std::collections::HashMap<String, String> = Default::default();
+        let mut made = Vec::new();
+        for (track, mut clip) in placed {
+            clip.id = ids[&clip.id].clone();
+            clip.start += shift;
+            clip.link = clip.link.and_then(|other| ids.get(&other).cloned());
+            clip.group = clip.group.map(|group| groups.entry(group).or_insert_with(new_id).clone());
+            match clip.crossfade_from.take().and_then(|from| ids.get(&from).cloned()) {
+                Some(from) => clip.crossfade_from = Some(from),
+                None => clip.crossfade_in = 0.0,
+            }
+            made.push(clip.id.clone());
+            self.tracks[track].clips.push(clip);
+            self.sort_track(track);
+        }
+        made
+    }
+
+    /// The nearest clip edge before (`back`) or after `t`: Up and Down step through the cuts.
+    pub fn next_cut(&self, t: f64, back: bool) -> Option<f64> {
+        let edges = self.tracks.iter().flat_map(|track| track.clips.iter()).flat_map(|c| [c.start, c.end()]);
+        if back { edges.filter(|e| *e < t - 1e-6).reduce(f64::max) } else { edges.filter(|e| *e > t + 1e-6).reduce(f64::min) }
+    }
+
     /// Deletes clips (and the clips linked to them) and captions by id.
     pub fn delete(&mut self, clip_ids: &[String]) -> usize {
         let clip_ids = &self.with_linked(clip_ids);
@@ -2490,6 +2555,45 @@ mod tests {
         let mut project = Project::new("Test");
         let id = project.add_media(media(MediaKind::Video, duration));
         (project, id)
+    }
+
+    #[test]
+    fn pasted_clips_keep_their_settings_and_spacing_and_never_overlap() {
+        let (mut project, video) = project_with(10.0);
+        let first = project.place(&video, None, 0.0).unwrap();
+        project.trim_end(&first, 2.0);
+        let second = project.place(&video, None, 3.0).unwrap();
+        project.trim_end(&second, 5.0);
+        project.clip_mut(&first).unwrap().volume = 0.5;
+        let sound = project.detach_sound(&second).unwrap();
+        let copied = project.copy_clips(&[first.clone(), second.clone()]);
+        assert_eq!(copied.len(), 3, "the detached sound goes with its video clip");
+
+        // A duplicate goes right after the last of them.
+        let end = project.end_of(&[first.clone(), second.clone()]).unwrap();
+        assert_eq!(end, 5.0);
+        let made = project.paste_clips(&copied, end);
+        assert_eq!(made.len(), 3);
+        let starts: Vec<f64> = made.iter().map(|id| project.clip(id).unwrap().start).collect();
+        assert_eq!(starts, [5.0, 8.0, 8.0]);
+        assert_eq!(project.clip(&made[0]).unwrap().volume, 0.5);
+        // The copies are linked to each other, not to the originals.
+        let copy_sound = made.iter().find(|id| project.clip(id).unwrap().link.as_deref() == Some(made[1].as_str())).unwrap();
+        assert_ne!(copy_sound, &sound);
+        assert_eq!(project.linked(&made[1]).as_ref(), Some(copy_sound));
+
+        // Pasting where clips already are moves the whole paste to the first place it fits.
+        let again = project.paste_clips(&copied, 1.0);
+        let starts: Vec<f64> = again.iter().map(|id| project.clip(id).unwrap().start).collect();
+        assert_eq!(starts, [10.0, 13.0, 13.0]);
+        for track in &project.tracks {
+            for pair in track.clips.windows(2) {
+                assert!(pair[0].end() <= pair[1].start + 1e-9, "{:?}", track.clips.iter().map(|c| (c.start, c.duration)).collect::<Vec<_>>());
+            }
+        }
+        assert_eq!(project.next_cut(2.5, false), Some(3.0));
+        assert_eq!(project.next_cut(2.5, true), Some(2.0));
+        assert_eq!(project.next_cut(0.0, true), None);
     }
 
     #[test]
