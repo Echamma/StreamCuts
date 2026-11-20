@@ -391,8 +391,9 @@ impl Timeline {
             rect.max,
         ));
         let mut clicked_clip = false;
-        // Where each clip, title and caption is drawn (not locked clips), for picking them with a box.
-        let mut boxes: Vec<(String, Rect)> = Vec::new();
+        // Where each clip, title and caption is (not locked clips), for picking them with a box: in time, so ones
+        // scrolled out of sight while the box is out stay in it, and in height on the screen (the rows don't scroll).
+        let mut boxes: Vec<(String, f64, f64, f32, f32)> = Vec::new();
         let clips: Vec<(usize, crate::project::Clip)> = project
             .tracks
             .iter()
@@ -421,6 +422,9 @@ impl Timeline {
                 clip.start = shown as f64;
             }
             let r = row(track_index);
+            if !project.tracks[track_index].locked {
+                boxes.push((clip.id.clone(), real_start, real_start + clip.duration, r.top() + 4.0, r.bottom() - 4.0));
+            }
             let clip_rect = Rect::from_min_max(
                 pos2(x_of(clip.start), r.top() + 4.0),
                 pos2(x_of(clip.end()), r.bottom() - 4.0),
@@ -546,8 +550,6 @@ impl Timeline {
             let locked = project.tracks[track_index].locked;
             if locked {
                 lane_painter.rect_filled(clip_rect, 6, color::VEIL_STRONG);
-            } else {
-                boxes.push((clip.id.clone(), clip_rect));
             }
             let response = ui.interact(
                 visible,
@@ -676,6 +678,7 @@ impl Timeline {
             );
             let (mut grabbed, mut moved) = (false, None);
             for title in &project.titles {
+                boxes.push((title.id.clone(), title.start, title.end, lane.top() + 6.0, lane.top() + 34.0));
                 let block = Rect::from_min_max(
                     pos2(x_of(title.start), lane.top() + 6.0),
                     pos2(
@@ -688,7 +691,6 @@ impl Timeline {
                     continue;
                 }
                 let selected = self.selection.contains(&title.id);
-                boxes.push((title.id.clone(), block));
                 lane_painter.rect_filled(block, 5, TITLE_FILL);
                 lane_painter.rect_stroke(
                     block,
@@ -793,6 +795,7 @@ impl Timeline {
                 color::INK_SOFT,
             );
             for caption in &project.captions {
+                boxes.push((caption.id.clone(), caption.start, caption.end, lane.top() + 6.0, lane.top() + 34.0));
                 let block = Rect::from_min_max(
                     pos2(x_of(caption.start), lane.top() + 6.0),
                     pos2(
@@ -805,7 +808,6 @@ impl Timeline {
                     continue;
                 }
                 let selected = self.selection.contains(&caption.id);
-                boxes.push((caption.id.clone(), block));
                 lane_painter.rect_filled(block, 5, CAPTION_FILL);
                 lane_painter.rect_stroke(
                     block,
@@ -992,7 +994,14 @@ impl Timeline {
             let area = Rect::from_two_pos(pos2(x_of(marquee.from.0), marquee.from.1), p)
                 .intersect(Rect::from_min_max(pos2(lanes.left(), ruler.bottom()), rect.max));
             let mut picked = marquee.keep.clone();
-            for (id, _) in boxes.iter().filter(|(_, r)| r.intersects(area)) {
+            // What the box covers in time runs from where it began to the pointer, wherever the timeline has scrolled.
+            let x = p.x.clamp(lanes.left(), rect.right());
+            let (t0, t1) = (marquee.from.0.min(t_of(x)), marquee.from.0.max(t_of(x)));
+            let (y0, y1) = (marquee.from.1.min(p.y), marquee.from.1.max(p.y));
+            let touched = |(_, start, end, top, bottom): &&(String, f64, f64, f32, f32)| {
+                *start <= t1 && *end >= t0 && *top <= y1 && *bottom >= y0
+            };
+            for (id, ..) in boxes.iter().filter(touched) {
                 if !picked.contains(id) {
                     picked.push(id.clone());
                 }
@@ -1337,6 +1346,38 @@ mod tests {
         bench.press(empty, false);
         bench.frame(Vec::new());
         assert!(bench.timeline.selection.is_empty());
+    }
+
+    #[test]
+    fn clips_picked_by_a_box_stay_picked_when_they_scroll_out_of_sight() {
+        let mut bench = Bench::new();
+        let below = |b: &Bench, t: f64| pos2(b.at(t).x, b.at(t).y + ROW + 10.0);
+        // A box from under the first clip over all four.
+        let (from, to) = (below(&bench, 1.0), bench.at(14.0));
+        bench.frame(vec![Event::PointerMoved(from)]);
+        bench.press(from, true);
+        for i in 1..=4 {
+            let p = from + (to - from) * i as f32 / 4.0;
+            bench.frame(vec![Event::PointerMoved(p)]);
+        }
+        assert_eq!(bench.timeline.selection, bench.clips);
+        // Still holding, the wheel scrolls the timeline 10 seconds on: the first two clips are out of sight now,
+        // and still picked; the pointer, now over 24 s, takes the box no further back.
+        bench.frame(vec![Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: vec2(-300.0, 0.0),
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+            modifiers: Default::default(),
+        }]);
+        for _ in 0..4 {
+            bench.frame(vec![Event::PointerMoved(to)]);
+        }
+        assert!(bench.timeline.scroll > 5.0, "scrolled to {}", bench.timeline.scroll);
+        assert_eq!(bench.timeline.selection, bench.clips);
+        bench.press(to, false);
+        bench.frame(Vec::new());
+        assert_eq!(bench.timeline.selection, bench.clips);
     }
 
     #[test]
