@@ -558,6 +558,19 @@ fn seek_to(at: f64) -> String {
     format!("{:.3}", (at - 0.001).max(0.0))
 }
 
+/// The sound of a clip at `speed`: the same pitch (`atempo`), or, with `pitch_shift`, higher when faster and lower
+/// when slower, as a tape would play it (resampled at 48 kHz).
+pub fn speed_sound(speed: f64, pitch_shift: bool) -> Option<String> {
+    if (speed - 1.0).abs() < 1e-6 {
+        return None;
+    }
+    if pitch_shift {
+        Some(format!("aresample=48000,asetrate={:.0},aresample=48000", 48_000.0 * speed))
+    } else {
+        atempo(speed)
+    }
+}
+
 /// FFmpeg's `atempo` for a speed: one step only goes from 0.5 to 2, so bigger changes chain several.
 pub fn atempo(speed: f64) -> Option<String> {
     if (speed - 1.0).abs() < 1e-6 {
@@ -805,6 +818,7 @@ impl SoundStream {
         from: f64,
         length: f64,
         speed: f64,
+        pitch_shift: bool,
         rate: u32,
         channels: u16,
         filter: Option<&str>,
@@ -815,7 +829,7 @@ impl SoundStream {
             .arg("-i")
             .arg(path)
             .args(["-t", &format!("{:.3}", length * speed), "-vn"]);
-        let filters: Vec<String> = atempo(speed)
+        let filters: Vec<String> = speed_sound(speed, pitch_shift)
             .into_iter()
             .chain(filter.map(|f| format!("aformat=channel_layouts=stereo,{f}")))
             .collect();
@@ -1283,7 +1297,7 @@ mod tests {
         }
         drop(stream);
         // 1.5 s of stereo at 48 kHz from 0.25 s in, give or take a packet.
-        let mut sound = SoundStream::start(&clip, 0.25, 1.5, 1.0, 48_000, 2, None);
+        let mut sound = SoundStream::start(&clip, 0.25, 1.5, 1.0, false, 48_000, 2, None);
         let samples: usize = sound.take_chunks().iter().map(|chunk| chunk.len()).sum();
         assert!(
             samples % 2 == 0 && (samples as i64 - 144_000).abs() < 4_000,
@@ -1297,7 +1311,7 @@ mod tests {
         }
         .filter()
         .unwrap();
-        let mut panned = SoundStream::start(&clip, 0.25, 0.5, 1.0, 48_000, 2, Some(&left));
+        let mut panned = SoundStream::start(&clip, 0.25, 0.5, 1.0, false, 48_000, 2, Some(&left));
         let samples: Vec<f32> = panned.take_chunks().iter().flatten().collect();
         let (l, r) = samples.chunks(2).fold((0.0f32, 0.0f32), |(l, r), s| {
             (l.max(s[0].abs()), r.max(s[1].abs()))

@@ -10,8 +10,8 @@ use crate::filmstrip::Strip;
 use crate::keys::{self, Cmd};
 use crate::preview::{Clock, Preview};
 use crate::project::{
-    Effects, ExportFormat, Framing, Grade, History, MediaKind, Picture, Placement, Project, SPEEDS,
-    Sound,
+    Effects, ExportFormat, Framing, Grade, History, MediaKind, Picture, Placement, Project, Retime,
+    SPEEDS, Sound,
 };
 use crate::storage;
 use crate::timeline::{Looks, MediaDrag, Timeline, timecode};
@@ -113,6 +113,31 @@ pub struct StreamCuts {
     /// The timeline's width last frame (Z fits the whole timeline into it), and StreamCuts' pane.
     lanes_width: f32,
     pane: Rect,
+    /// The Change clip speed window (Ctrl+S).
+    speed_dialog: Option<SpeedDialog>,
+}
+
+/// What the Change clip speed window is setting, until Change speed applies it.
+struct SpeedDialog {
+    clip: String,
+    speed: f64,
+    retime: Retime,
+    pitch_shift: bool,
+    ripple: bool,
+    opened: bool,
+}
+
+/// Dims `pane` (StreamCuts' own, not all of Canopy) under a window, taking the clicks meant for what's beneath.
+fn dim_pane(ctx: &egui::Context, pane: Rect, id: egui::Id) -> egui::Response {
+    egui::Area::new(id)
+        .order(egui::Order::Middle)
+        .fixed_pos(pane.min)
+        .constrain(false)
+        .show(ctx, |ui| {
+            ui.painter().rect_filled(pane, 10.0, Color32::from_black_alpha(110));
+            ui.allocate_response(pane.size(), Sense::click())
+        })
+        .inner
 }
 
 #[derive(Default)]
@@ -245,6 +270,7 @@ impl StreamCuts {
             media_scroll_to: None,
             lanes_width: 800.0,
             pane: Rect::NOTHING,
+            speed_dialog: None,
         };
         app.request_looks();
         app
@@ -631,7 +657,7 @@ impl StreamCuts {
     /// The keyboard: every key in `keys::COMMANDS`, while StreamCuts has the focus and nothing is being typed in.
     fn shortcuts(&mut self, ui: &Ui, focused: bool) {
         // Not while typing, in the Commands window, or with a menu open (Escape then just closes the menu).
-        if !focused || ui.ctx().egui_wants_keyboard_input() || self.palette.is_some() || egui::Popup::is_any_open(ui.ctx()) {
+        if !focused || ui.ctx().egui_wants_keyboard_input() || self.palette.is_some() || self.speed_dialog.is_some() || egui::Popup::is_any_open(ui.ctx()) {
             return;
         }
         let ctx = ui.ctx().clone();
@@ -1009,6 +1035,25 @@ impl StreamCuts {
                     self.open_clip_menu = true;
                 }
             }
+            Cmd::ChangeSpeed => {
+                let Some(id) = self.one_clip() else {
+                    return;
+                };
+                let clip = self.project.clip(&id).cloned().unwrap();
+                if self.project.media(&clip.media_id).is_some_and(|m| m.kind == MediaKind::Image) {
+                    self.toasts.push("A picture has no speed: change its length by trimming it".into());
+                    return;
+                }
+                self.timeline.selection = vec![id.clone()];
+                self.speed_dialog = Some(SpeedDialog {
+                    clip: id,
+                    speed: clip.speed,
+                    retime: clip.retime,
+                    pitch_shift: clip.pitch_shift,
+                    ripple: true,
+                    opened: false,
+                });
+            }
             Cmd::Fades => {
                 let all_faded = self.clips_in_hand().iter().all(|id| self.project.clip(id).is_some_and(|c| c.fade_in > 0.0 && c.fade_out > 0.0));
                 self.change_clips(|clip, _| {
@@ -1262,6 +1307,175 @@ impl StreamCuts {
             }
         } else if close {
             self.palette = None;
+        }
+    }
+
+    /// The Change clip speed window (Ctrl+S), as Resolve's: speed or length, how slow motion fills the project's
+    /// frames, the pitch, and whether what comes after moves along. Exports stay at the project's frame rate.
+    fn speed_window(&mut self, ui: &mut Ui) {
+        let Some(dialog) = self.speed_dialog.as_mut() else {
+            return;
+        };
+        let Some(clip) = self.project.clip(&dialog.clip).cloned() else {
+            self.speed_dialog = None;
+            return;
+        };
+        let media = self.project.media(&clip.media_id).cloned();
+        let fps = self.project.fps;
+        let source_fps = media.as_ref().map(|m| m.frame_rate).filter(|r| *r > 0.0).unwrap_or(fps as f64);
+        let has_sound = media.as_ref().is_some_and(|m| m.has_audio);
+        let is_video = media.as_ref().is_some_and(|m| m.kind == MediaKind::Video);
+        let source = clip.source_length();
+        // The room before the next clip on its track, when what comes after stays where it is.
+        let room = self
+            .project
+            .find(&clip.id)
+            .map(|at| &self.project.tracks[at.track])
+            .and_then(|track| track.clips.iter().filter(|c| c.start >= clip.end() - 1e-9 && c.id != clip.id).map(|c| c.start).reduce(f64::min))
+            .map(|next| next - clip.start);
+        let pane = if self.pane.is_positive() { self.pane } else { ui.ctx().content_rect() };
+        let backdrop = dim_pane(ui.ctx(), pane, ui.scope_id().with("speed-backdrop"));
+        let (enter, escape) = ui.input(|i| (i.key_pressed(Key::Enter), i.key_pressed(Key::Escape)));
+        let typing = ui.ctx().memory(|m| m.focused().is_some());
+        let mut apply = enter && !typing;
+        let mut close = escape || backdrop.clicked();
+        let mut focused_field = None;
+        egui::Area::new(ui.scope_id().with("speed"))
+            .order(egui::Order::Foreground)
+            .pivot(Align2::CENTER_CENTER)
+            .fixed_pos(pane.center())
+            .constrain_to(pane.shrink(8.0))
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_width((pane.width() - 40.0).clamp(280.0, 440.0));
+                    ui.label(egui::RichText::new("Change clip speed").font(font::display(18.0)));
+                    let name = media.as_ref().map_or("Clip", |m| m.name.as_str());
+                    ui.label(canopy_ui::muted(&format!("{name} · {source:.2} s of its footage")));
+                    ui.add_space(6.0);
+                    let mut percent = dialog.speed * 100.0;
+                    let mut length = source / dialog.speed;
+                    egui::Grid::new("speed-fields").num_columns(2).spacing(vec2(10.0, 8.0)).show(ui, |ui| {
+                        ui.label("Speed");
+                        let field = ui.add(egui::DragValue::new(&mut percent).range(SPEEDS.start() * 100.0..=SPEEDS.end() * 100.0).speed(1.0).max_decimals(1).suffix(" %"));
+                        if !dialog.opened {
+                            field.request_focus();
+                            dialog.opened = true;
+                        }
+                        if field.changed() {
+                            dialog.speed = percent / 100.0;
+                        }
+                        // Typed a number and pressed Enter: that's the change.
+                        if field.lost_focus() && enter {
+                            apply = true;
+                        }
+                        focused_field = Some(field.id);
+                        ui.end_row();
+                        ui.label("Length");
+                        let field = ui.add(egui::DragValue::new(&mut length).range(source / SPEEDS.end()..=source / SPEEDS.start()).speed(0.02).max_decimals(2).suffix(" s"));
+                        if field.changed() && length > 0.0 {
+                            dialog.speed = (source / length).clamp(*SPEEDS.start(), *SPEEDS.end());
+                        }
+                        if field.lost_focus() && enter {
+                            apply = true;
+                        }
+                        ui.end_row();
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        for preset in [0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 4.0] {
+                            if ui.selectable_label((dialog.speed - preset).abs() < 1e-6, format!("{}%", preset * 100.0)).clicked() {
+                                dialog.speed = preset;
+                            }
+                        }
+                    });
+                    ui.add_space(6.0);
+                    let speed = dialog.speed;
+                    if is_video {
+                        let per_second = source_fps * speed;
+                        let note = if (speed - 1.0).abs() < 1e-6 {
+                            format!("Plays at its own pace. Exports stay at the project's {fps} fps.")
+                        } else if per_second >= fps as f64 - 1e-6 {
+                            format!("Each second shows {per_second:.0} frames' worth of its {source_fps:.0} fps footage, at the project's {fps} fps: the frames in between are skipped.")
+                        } else {
+                            format!("Each second has {per_second:.1} of its own frames, and the project's {fps} fps needs {fps}: the rest are made as below.")
+                        };
+                        ui.label(canopy_ui::muted(&note));
+                        let slow = per_second < fps as f64 - 1e-6;
+                        ui.add_enabled_ui(slow, |ui| {
+                            ui.label(egui::RichText::new("Slow motion").font(font::ui(12.0)).color(color::INK_MUTED));
+                            for retime in Retime::ALL {
+                                ui.radio_value(&mut dialog.retime, retime, retime.label());
+                            }
+                        });
+                        if slow && dialog.retime != Retime::Nearest {
+                            ui.label(canopy_ui::muted("The preview plays it with repeated frames; exports make the smooth ones."));
+                        }
+                    }
+                    if has_sound {
+                        let mut keep = !dialog.pitch_shift;
+                        if ui.checkbox(&mut keep, "Keep the voice's pitch").on_hover_text("Off: faster sounds higher and slower sounds lower, like a tape").changed() {
+                            dialog.pitch_shift = !keep;
+                        }
+                    }
+                    ui.checkbox(&mut dialog.ripple, "Move what comes after it").on_hover_text("Everything after the clip moves along by however much longer or shorter it gets, on every track");
+                    let new_length = source / speed;
+                    if !dialog.ripple {
+                        if let Some(room) = room.filter(|room| new_length > room + 1e-6) {
+                            ui.label(egui::RichText::new(format!("Only {room:.2} s fit before the next clip, so it stops there. Tick Move what comes after it to make room.")).font(font::ui(12.0)).color(color::DANGER));
+                        }
+                    }
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if primary_button(ui, "Change speed", Mood::Ember).on_hover_text("Enter").clicked() {
+                            apply = true;
+                        }
+                        if quiet_button(ui, "Cancel", None).on_hover_text("Esc").clicked() {
+                            close = true;
+                        }
+                        ui.label(canopy_ui::muted(&format!("{:.2} s → {new_length:.2} s", clip.duration)));
+                    });
+                });
+            });
+        if apply || close {
+            if let Some(id) = focused_field {
+                ui.ctx().memory_mut(|m| m.surrender_focus(id));
+            }
+            ui.ctx().memory_mut(|m| {
+                if let Some(id) = m.focused() {
+                    m.surrender_focus(id);
+                }
+            });
+        }
+        if apply {
+            let dialog = self.speed_dialog.take().unwrap();
+            self.change_speed(&dialog);
+        } else if close {
+            self.speed_dialog = None;
+        }
+    }
+
+    /// Applies a Change clip speed: one undo step, the clip and its linked clip alike.
+    fn change_speed(&mut self, dialog: &SpeedDialog) {
+        let before = self.project.clone();
+        let Some(was) = self.project.clip(&dialog.clip).map(|c| c.duration) else {
+            return;
+        };
+        if dialog.ripple {
+            self.project.set_speed_ripple(&dialog.clip, dialog.speed);
+        } else {
+            self.project.set_speed(&dialog.clip, dialog.speed);
+        }
+        let mut family = self.project.partners(&dialog.clip);
+        family.push(dialog.clip.clone());
+        for id in family {
+            if let Some(clip) = self.project.clip_mut(&id) {
+                (clip.retime, clip.pitch_shift) = (dialog.retime, dialog.pitch_shift);
+            }
+        }
+        if self.project != before {
+            self.history.record(&before);
+            self.edited();
+            let now = self.project.clip(&dialog.clip).map_or(was, |c| c.duration);
+            self.toasts.push(format!("Speed {:.0}%: {was:.2} s → {now:.2} s", dialog.speed * 100.0));
         }
     }
 
@@ -2525,6 +2739,7 @@ impl StreamCuts {
         // Some((true, s)) shows `s` more seconds of footage before the clip, Some((false, s)) after it.
         let mut extend = None;
         let mut ungroup = false;
+        let mut more_speed = false;
         let focus_first = std::mem::take(&mut self.focus_clip_menu);
         let (menu_button, _) = egui::containers::menu::MenuButton::new(egui::RichText::new("Clip").font(font::ui(13.0))).config(stays_open()).ui(ui, |ui| {
             ui.set_min_width(230.0);
@@ -2650,6 +2865,10 @@ impl StreamCuts {
                         if ui.selectable_label((speed - preset).abs() < 1e-6, format!("{preset}×")).clicked() {
                             speed = preset;
                         }
+                    }
+                    if ui.button("More…").on_hover_text("Change clip speed (Ctrl+S): exact speed or length, smooth slow motion, pitch, and moving what comes after").clicked() {
+                        more_speed = true;
+                        ui.close();
                     }
                 });
             }
@@ -2815,6 +3034,10 @@ impl StreamCuts {
         ];
         for op in ops.into_iter().flatten() {
             self.clip_op(&clip.id, op);
+        }
+        if more_speed {
+            let ctx = ui.ctx().clone();
+            self.run(Cmd::ChangeSpeed, &ctx);
         }
     }
 
@@ -3390,6 +3613,7 @@ impl CanopyApp for StreamCuts {
         self.deliver_window(ui);
         self.export_window(ui, host);
         self.commands_window(ui);
+        self.speed_window(ui);
     }
 
     fn receive(&mut self, files: Vec<SharedFile>, _host: &mut dyn Host) -> Receipt {
@@ -3695,6 +3919,28 @@ mod keyboard_tests {
         frame(&mut app, &ctx, &mut host, key(Key::Enter, Modifiers::NONE));
         assert!(app.palette.is_none());
         assert_eq!(app.timeline.snap, !snap);
+
+        // Ctrl+S: the Change clip speed window, the keyboard on Speed; typing 50 and Enter makes it half speed,
+        // twice as long, with what comes after moved along.
+        app.timeline.selection = vec![first.clone()];
+        let after_first = app.project.tracks.iter().flat_map(|t| &t.clips).filter(|c| c.id != first && c.start >= 4.0 - 1e-9).map(|c| (c.id.clone(), c.start)).collect::<Vec<_>>();
+        frame(&mut app, &ctx, &mut host, key(Key::S, Modifiers::COMMAND));
+        assert!(app.speed_dialog.is_some());
+        frame(&mut app, &ctx, &mut host, Vec::new());
+        frame(&mut app, &ctx, &mut host, Vec::new());
+        assert!(ctx.memory(|m| m.focused().is_some()), "Speed has the keyboard");
+        frame(&mut app, &ctx, &mut host, key(Key::A, Modifiers::COMMAND));
+        frame(&mut app, &ctx, &mut host, vec![egui::Event::Text("50".into())]);
+        frame(&mut app, &ctx, &mut host, key(Key::Enter, Modifiers::NONE));
+        frame(&mut app, &ctx, &mut host, Vec::new());
+        assert!(app.speed_dialog.is_none(), "Enter changed it and closed the window");
+        let clip = app.project.clip(&first).unwrap();
+        assert_eq!((clip.speed, clip.duration), (0.5, 8.0));
+        for (id, was) in after_first {
+            assert_eq!(app.project.clip(&id).unwrap().start, was + 4.0, "moved along");
+        }
+        frame(&mut app, &ctx, &mut host, key(Key::Z, Modifiers::COMMAND));
+        assert_eq!(app.project.clip(&first).unwrap().speed, 1.0, "one undo step");
 
         // Delete removes the picked clip.
         app.timeline.selection = vec![first.clone()];

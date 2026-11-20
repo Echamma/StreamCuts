@@ -339,6 +339,7 @@ impl Audio {
                 clip.source_time(begin),
                 end - begin,
                 clip.speed,
+                clip.pitch_shift,
                 rate,
                 channels,
                 clip.sound.filter().as_deref(),

@@ -234,12 +234,15 @@ pub fn arguments(project: &Project, output: &Path) -> Result<Vec<String>, String
                 };
                 // A placed clip is cut and sized after framing, then laid on the frame at its place (see `Place`).
                 let placed = clip.place.filter(w, h);
+                // The speed changes the frames' times first; then the clip's retime brings them to the project's
+                // frame rate (sped up skips frames, slowed down repeats, blends or makes them), so every clip is at it.
                 let mut chain = format!(
-                    "[{input}:v]{trim}{}{},fps={fps},format=yuva420p,setpts={pace}",
+                    "[{input}:v]{trim}{}{},setpts={pace},{},format=yuva420p",
                     clip.picture().filter_at(w, h, clip.source_in, 1.0),
                     placed
                         .as_ref()
-                        .map_or(String::new(), |(cut, ..)| format!(",{cut}"))
+                        .map_or(String::new(), |(cut, ..)| format!(",{cut}")),
+                    clip.retime.filter(fps)
                 );
                 // A blur-through mixes each side towards a blurred copy of itself across the crossfade (`K`, 0 sharp to
                 // 1 blurred, by the clip's own time T): the outgoing clip on its way out, the incoming one in reverse.
@@ -306,7 +309,7 @@ pub fn arguments(project: &Project, output: &Path) -> Result<Vec<String>, String
                 if let Some(sound) = clip.sound.filter() {
                     chain.push_str(&format!(",{sound}"));
                 }
-                if let Some(tempo) = crate::ffmpeg::atempo(clip.speed) {
+                if let Some(tempo) = crate::ffmpeg::speed_sound(clip.speed, clip.pitch_shift) {
                     chain.push_str(&format!(",{tempo}"));
                 }
                 let fade_in = if crossfade_in > 0.0 {
@@ -719,6 +722,61 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    #[test]
+    fn slow_motion_and_pitch_reach_the_graph() {
+        let mut project = Project::new("Slow");
+        let video = project.add_media(media(MediaKind::Video, 10.0, true));
+        let id = project.place(&video, None, 0.0).unwrap();
+        project.set_speed(&id, 0.5);
+        let clip = project.clip_mut(&id).unwrap();
+        (clip.retime, clip.pitch_shift) = (crate::project::Retime::Blend, true);
+        let args = arguments(&project, Path::new("o.mp4")).unwrap();
+        let graph = &args[args.iter().position(|a| a == "-filter_complex").unwrap() + 1];
+        let fps = project.fps;
+        assert!(graph.contains(&format!("setpts=(PTS-STARTPTS)/0.5000,framerate=fps={fps},format=yuva420p")), "{graph}");
+        assert!(graph.contains("aresample=48000,asetrate=24000,aresample=48000"), "{graph}");
+        assert!(!graph.contains("atempo"), "pitch follows the speed, so no atempo: {graph}");
+        project.clip_mut(&id).unwrap().retime = crate::project::Retime::Flow;
+        let args = arguments(&project, Path::new("o.mp4")).unwrap();
+        assert!(args.iter().any(|a| a.contains(&format!("minterpolate=fps={fps}:mi_mode=mci"))));
+    }
+
+    /// Needs FFmpeg on PATH: slowed down (each way of making frames) and sped up, a 30 fps clip exports at the
+    /// project's 30 fps, for the length its speed gives it.
+    #[test]
+    fn speed_changes_keep_the_project_frame_rate() {
+        let dir = std::env::temp_dir().join(format!("streamcuts-speed-{}", new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source.mp4");
+        assert!(command(&ffmpeg())
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=30:duration=1", "-pix_fmt", "yuv420p"])
+            .arg(&source)
+            .status()
+            .unwrap()
+            .success());
+        for (speed, retime, length) in [
+            (0.5, crate::project::Retime::Nearest, 2.0),
+            (0.5, crate::project::Retime::Blend, 2.0),
+            (0.5, crate::project::Retime::Flow, 2.0),
+            (2.0, crate::project::Retime::Nearest, 0.5),
+        ] {
+            let mut project = Project::new("Speed");
+            (project.width, project.height, project.fps) = (160, 90, 30);
+            project.even_loudness = false;
+            let video = project.add_media(crate::ffmpeg::probe(&source).unwrap());
+            let id = project.place(&video, None, 0.0).unwrap();
+            project.set_speed(&id, speed);
+            project.clip_mut(&id).unwrap().retime = retime;
+            let output = dir.join(format!("out-{speed}-{retime:?}.mp4"));
+            let run = start(&project, &output, egui::Context::default()).unwrap();
+            assert_eq!(run.result.recv().unwrap(), Ok(()), "{speed} {retime:?}");
+            let made = crate::ffmpeg::probe(&output).unwrap();
+            assert!((made.frame_rate - 30.0).abs() < 0.01, "{speed} {retime:?}: {} fps", made.frame_rate);
+            assert!((made.duration - length).abs() < 0.1, "{speed} {retime:?}: {} s", made.duration);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     /// Needs FFmpeg on PATH: renders a real two-track timeline and checks the result plays for the right length.
     #[test]
     fn renders_a_timeline_with_ffmpeg() {
@@ -873,8 +931,9 @@ mod tests {
             ),
             "{graph}"
         );
-        assert!(graph.contains("crop=1080:1920:(iw-ow)*0.250:(ih-oh)*0.500,eq=brightness=0.000:contrast=1.000:saturation=1.500,fps="));
-        assert!(graph.contains("setpts=(PTS-STARTPTS)/2.0000,fade=t=in:st=0:d=0.500:alpha=1,fade=t=out:st=4.000:d=1.000:alpha=1"), "{graph}");
+        // The speed changes the frames' times first, then the project's frame rate is taken: exports stay at it.
+        assert!(graph.contains("crop=1080:1920:(iw-ow)*0.250:(ih-oh)*0.500,eq=brightness=0.000:contrast=1.000:saturation=1.500,setpts=(PTS-STARTPTS)/2.0000,fps="), "{graph}");
+        assert!(graph.contains("format=yuva420p,fade=t=in:st=0:d=0.500:alpha=1,fade=t=out:st=4.000:d=1.000:alpha=1"), "{graph}");
         assert!(graph.contains(
             "atempo=2.0000,afade=t=in:st=0:d=0.500,afade=t=out:st=4.000:d=1.000,adelay=0|0"
         ));

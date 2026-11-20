@@ -225,6 +225,12 @@ pub struct Clip {
     /// How fast the source plays: 2 is twice as fast (the clip covers twice the source in its length).
     #[serde(default = "normal_speed")]
     pub speed: f64,
+    /// How a clip at another speed fills the project's frames.
+    #[serde(default, skip_serializing_if = "Retime::is_nearest")]
+    pub retime: Retime,
+    /// Its sound changes pitch with its speed (Resolve's Pitch Correction off): higher sped up, lower slowed down.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pitch_shift: bool,
     /// Where its picture sits in the frame, how big, and what's cropped off (dragged on the preview).
     #[serde(default, skip_serializing_if = "Placement::is_full")]
     pub place: Placement,
@@ -323,7 +329,7 @@ fn normal_speed() -> f64 {
 }
 
 /// The slowest and fastest a clip can play.
-pub const SPEEDS: std::ops::RangeInclusive<f64> = 0.25..=4.0;
+pub const SPEEDS: std::ops::RangeInclusive<f64> = 0.1..=10.0;
 
 /// A clip's color, as FFmpeg's `eq` takes it: brightness from -1 to 1 (0 leaves it), contrast and saturation as
 /// multipliers (1 leaves them); then its color wheels.
@@ -758,6 +764,49 @@ impl Transition {
             Transition::BlurThrough => "Blur through",
         }
     }
+}
+
+/// How a clip played at another speed fills the project's frames (Resolve's Retime Process). Whatever it is, exports
+/// stay at the project's frame rate: sped up, frames are skipped; slowed down, there are frames to make.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Retime {
+    /// The nearest source frame: sharp, but slow motion shows each frame several times.
+    #[default]
+    Nearest,
+    /// Neighbouring frames mixed: smoother slow motion, a little soft.
+    Blend,
+    /// Frames made from the motion between them (FFmpeg's minterpolate): the smoothest, and slow to export.
+    Flow,
+}
+
+impl Retime {
+    pub const ALL: [Retime; 3] = [Retime::Nearest, Retime::Blend, Retime::Flow];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Retime::Nearest => "Repeat frames (sharp)",
+            Retime::Blend => "Blend frames (smoother)",
+            Retime::Flow => "Optical flow (smoothest, slow to export)",
+        }
+    }
+
+    pub fn is_nearest(&self) -> bool {
+        *self == Retime::Nearest
+    }
+
+    /// The FFmpeg filter that brings a sped-up or slowed-down picture to `fps` frames a second.
+    pub fn filter(self, fps: u32) -> String {
+        match self {
+            Retime::Nearest => format!("fps={fps}"),
+            Retime::Blend => format!("framerate=fps={fps}"),
+            Retime::Flow => format!("minterpolate=fps={fps}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1"),
+        }
+    }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// How blurred a blur-through gets at its blurriest: a Gaussian this fraction of the frame's height across.
@@ -1593,6 +1642,8 @@ impl Project {
             link: None,
             group: None,
             speed: 1.0,
+            retime: Retime::Nearest,
+            pitch_shift: false,
             place: Placement::default(),
         };
         let id = clip.id.clone();
@@ -2146,6 +2197,52 @@ impl Project {
         self.keep_linked(clip_id, |project| project.set_speed_alone(clip_id, speed))
     }
 
+    /// Sets a clip's speed and moves everything after it on the timeline by however much longer or shorter it got
+    /// (Resolve's Ripple Sequence): the clips that start at or after its end on every unlocked track, and the titles,
+    /// captions and markers there. Its linked clip changes with it.
+    pub fn set_speed_ripple(&mut self, clip_id: &str, speed: f64) -> bool {
+        let Some(clip) = self.clip(clip_id).cloned() else {
+            return false;
+        };
+        let speed = speed.clamp(*SPEEDS.start(), *SPEEDS.end());
+        let duration = (clip.source_length() / speed).max(MIN_CLIP);
+        let delta = duration - clip.duration;
+        let end = clip.end();
+        // The clip and the clips that go with it (linked sound, grouped layers).
+        let mut family = self.partners(clip_id);
+        family.push(clip_id.to_owned());
+        let after = |t: f64| t >= end - 1e-9;
+        for track in self.tracks.iter_mut().filter(|t| !t.locked) {
+            for c in track.clips.iter_mut() {
+                if family.contains(&c.id) {
+                    c.duration = duration;
+                    c.speed = speed;
+                    c.fade_in = c.fade_in.min(duration / 2.0);
+                    c.fade_out = c.fade_out.min(duration / 2.0);
+                } else if after(c.start) {
+                    c.start = (c.start + delta).max(0.0);
+                }
+            }
+        }
+        for title in self.titles.iter_mut().filter(|t| after(t.start)) {
+            title.start = (title.start + delta).max(0.0);
+            title.end = (title.end + delta).max(title.start);
+        }
+        for caption in self.captions.iter_mut().filter(|c| after(c.start)) {
+            caption.start = (caption.start + delta).max(0.0);
+            caption.end = (caption.end + delta).max(caption.start);
+        }
+        for marker in self.markers.iter_mut().filter(|m| after(m.t)) {
+            marker.t = (marker.t + delta).max(0.0);
+        }
+        true
+    }
+
+    /// How long a clip would be at `speed`: its source footage played at that speed.
+    pub fn length_at(&self, clip_id: &str, speed: f64) -> Option<f64> {
+        self.clip(clip_id).map(|c| (c.source_length() / speed.clamp(*SPEEDS.start(), *SPEEDS.end())).max(MIN_CLIP))
+    }
+
     fn set_speed_alone(&mut self, clip_id: &str, speed: f64) -> bool {
         let Some(at) = self.find(clip_id) else {
             return false;
@@ -2549,6 +2646,31 @@ mod tests {
             frame_rate: 30.0,
             attributes: Attributes::default(),
         }
+    }
+
+    #[test]
+    fn a_slower_clip_moves_what_comes_after_it() {
+        let (mut project, media) = project_with(4.0);
+        let first = project.place(&media, Some(0), 0.0).unwrap();
+        let second = project.place(&media, Some(0), 4.0).unwrap();
+        let title = project.add_title(5.0);
+        project.add_marker(6.0, "");
+        // Without the ripple a slower clip stops at the next one.
+        let mut kept = project.clone();
+        kept.set_speed(&first, 0.5);
+        assert_eq!(kept.clip(&first).unwrap().duration, 4.0);
+        assert_eq!(kept.clip(&second).unwrap().start, 4.0);
+        // With it, everything after moves along by the 4 seconds it grew.
+        assert!(project.set_speed_ripple(&first, 0.5));
+        assert_eq!(project.clip(&first).unwrap().duration, 8.0);
+        assert_eq!(project.clip(&second).unwrap().start, 8.0);
+        let moved = project.titles.iter().find(|t| t.id == title).unwrap();
+        assert_eq!((moved.start, moved.end), (9.0, 9.0 + 3.0));
+        assert_eq!(project.markers[0].t, 10.0);
+        // Faster again, and they come back.
+        assert!(project.set_speed_ripple(&first, 2.0));
+        assert_eq!(project.clip(&first).unwrap().duration, 2.0);
+        assert_eq!(project.clip(&second).unwrap().start, 2.0);
     }
 
     fn project_with(duration: f64) -> (Project, String) {

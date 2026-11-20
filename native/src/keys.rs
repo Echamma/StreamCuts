@@ -126,6 +126,7 @@ pub enum Cmd {
     MakeCaptions,
     ClipMenu,
     // The selected clip
+    ChangeSpeed,
     Fades,
     NoFades,
     Speed(f64),
@@ -239,6 +240,7 @@ pub const COMMANDS: &[Command] = &[
     c(Cmd::AddTitle, EDIT, "Add a title at the playhead", &[k(Key::T)]),
     c(Cmd::MakeCaptions, EDIT, "Make captions from speech", &[alt(Key::C)]),
     c(Cmd::ClipMenu, CLIP, "Open the Clip menu (Tab moves through it)", &[k(Key::Enter)]),
+    c(Cmd::ChangeSpeed, CLIP, "Change clip speed… (speed or length, slow motion, pitch, ripple)", &[ctrl(Key::S)]),
     c(Cmd::Fades, CLIP, "Fade in and out (half a second)", &[k(Key::F)]),
     c(Cmd::NoFades, CLIP, "No fades", &[shift(Key::F)]),
     c(Cmd::Speed(0.25), CLIP, "Speed 0.25Ã—", &[]),
