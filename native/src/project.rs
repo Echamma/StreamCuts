@@ -1621,7 +1621,35 @@ impl Project {
             media.duration.max(MIN_CLIP)
         };
         let start = self.free_start(track, at, duration, None);
-        let clip = Clip {
+        let clip = Self::new_clip(&media, start, duration);
+        let id = clip.id.clone();
+        self.tracks[track].clips.push(clip);
+        self.sort_track(track);
+        Some(id)
+    }
+
+    /// Puts a clip of the media where the pointer let go of it: at `at` on the track (or the first of its kind) when
+    /// it fits there; on top of other clips, in at the nearest cut, with everything after moving later to make room
+    /// (see `land`). Returns the clip's id and how it landed.
+    pub fn place_at(&mut self, media_id: &str, track: Option<usize>, at: f64) -> Option<(String, Landing)> {
+        let media = self.media(media_id)?.clone();
+        let kind = Self::track_kind_for(media.kind);
+        let track = match track {
+            Some(t) if self.tracks.get(t).map(|t| t.kind) == Some(kind) => t,
+            _ => self.track_of_kind(kind),
+        };
+        if self.tracks[track].locked {
+            return None;
+        }
+        let duration = if media.kind == MediaKind::Image { STILL_SECONDS } else { media.duration.max(MIN_CLIP) };
+        let clip = Self::new_clip(&media, at.max(0.0), duration);
+        let id = clip.id.clone();
+        let landing = self.land(vec![(track, clip)], Vec::new())?;
+        Some((id, landing))
+    }
+
+    fn new_clip(media: &Media, start: f64, duration: f64) -> Clip {
+        Clip {
             id: new_id(),
             media_id: media.id.clone(),
             start,
@@ -1645,11 +1673,7 @@ impl Project {
             retime: Retime::Nearest,
             pitch_shift: false,
             place: Placement::default(),
-        };
-        let id = clip.id.clone();
-        self.tracks[track].clips.push(clip);
-        self.sort_track(track);
-        Some(id)
+        }
     }
 
     fn sort_track(&mut self, track: usize) {
@@ -1984,6 +2008,192 @@ impl Project {
             self.captions.sort_by(|a, b| a.start.total_cmp(&b.start));
         }
         true
+    }
+
+    /// Moves clips together, `dt` seconds later (earlier when negative), with their partners (linked sound, the rest
+    /// of their groups); the given clips also go `rows` tracks down (up when negative) when every one of them has a
+    /// track of its kind there that isn't locked, else they stay on their tracks. Where they fit, they go exactly
+    /// there; where they'd land on other clips, they go in at the nearest cut and what's after makes room (see
+    /// `land`). Their captions go with them. Returns how they landed, or None, changing nothing, when they can't move.
+    pub fn move_clips(&mut self, clip_ids: &[String], dt: f64, rows: isize) -> Option<Landing> {
+        let before = self.clone();
+        let landing = self.try_move_clips(clip_ids, dt, rows);
+        if landing.is_none() {
+            *self = before;
+        }
+        landing
+    }
+
+    fn try_move_clips(&mut self, clip_ids: &[String], dt: f64, rows: isize) -> Option<Landing> {
+        let ids = self.with_linked(clip_ids);
+        let mut picked = Vec::new();
+        for id in &ids {
+            let at = self.find(id)?;
+            if self.tracks[at.track].locked {
+                return None;
+            }
+            picked.push((id.clone(), at.track, self.tracks[at.track].clips[at.index].start));
+        }
+        let earliest = picked.iter().map(|p| p.2).reduce(f64::min)?;
+        let dt = dt.max(-earliest);
+        let targets = |rows: isize| -> Option<Vec<usize>> {
+            picked
+                .iter()
+                .map(|(id, track, _)| {
+                    if !clip_ids.contains(id) || rows == 0 {
+                        return Some(*track);
+                    }
+                    let to = usize::try_from(*track as isize + rows).ok()?;
+                    let t = self.tracks.get(to)?;
+                    (t.kind == self.tracks[*track].kind && !t.locked).then_some(to)
+                })
+                .collect()
+        };
+        let targets = targets(rows).or_else(|| targets(0))?;
+        let mut lifted = Vec::new();
+        let mut captions = Vec::new();
+        for ((id, _, _), target) in picked.iter().zip(targets) {
+            let at = self.find(id)?;
+            let clip = self.tracks[at.track].clips.remove(at.index);
+            let (start, end) = (clip.start, clip.end());
+            let mut i = 0;
+            while i < self.captions.len() {
+                if self.captions[i].belongs_to(id, start, end) {
+                    let mut caption = self.captions.remove(i);
+                    caption.shift(dt);
+                    captions.push(caption);
+                } else {
+                    i += 1;
+                }
+            }
+            lifted.push((target, Clip { start: clip.start + dt, ..clip }));
+        }
+        self.land(lifted, captions)
+    }
+
+    /// Puts lifted clips down, each `(track, clip)` aimed at its own start, and their captions with them. Where they
+    /// all fit, that's where they go. Where they'd land on other clips, they move together to the nearest spot that
+    /// works: starting at a cut, with everything from that cut on (clips on unlocked tracks, titles, captions,
+    /// markers) moving later just enough to make room, or ending at a cut, in a gap. Clips that start before the cut
+    /// never move, so a spot where one of them is in the way doesn't work. Returns how they landed, or None (nothing
+    /// changed) when no spot works.
+    fn land(&mut self, lifted: Vec<(usize, Clip)>, captions: Vec<Caption>) -> Option<Landing> {
+        let first = lifted.iter().map(|(_, c)| c.start).reduce(f64::min)?;
+        let last = lifted.iter().map(|(_, c)| c.end()).reduce(f64::max)?;
+        let fits = |shift: f64| {
+            lifted.iter().all(|(t, c)| !Self::overlaps(&self.tracks[*t], c.start + shift, c.end() + shift, None))
+        };
+        // (shift, cut, push) of the nearest spot that works.
+        let mut best: Option<(f64, Option<f64>, f64)> = None;
+        if fits(0.0) {
+            best = Some((0.0, None, 0.0));
+        } else {
+            let mut cuts: Vec<f64> = lifted
+                .iter()
+                .flat_map(|(t, _)| self.tracks[*t].clips.iter().flat_map(|c| [c.start, c.end()]))
+                .collect();
+            cuts.sort_by(|a, b| (a - first).abs().total_cmp(&(b - first).abs()));
+            cuts.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+            let mut tried = Vec::new();
+            for cut in cuts {
+                for (shift, starts_there) in [(cut - first, true), (cut - last, false)] {
+                    tried.push((shift, cut, starts_there));
+                }
+            }
+            tried.sort_by(|a, b| a.0.abs().total_cmp(&b.0.abs()));
+            for (shift, cut, starts_there) in tried {
+                if first + shift < -1e-9 {
+                    continue;
+                }
+                if starts_there {
+                    if let Some(push) = self.room_at(&lifted, shift, cut) {
+                        best = Some((shift, Some(cut), push));
+                        break;
+                    }
+                } else if fits(shift) {
+                    best = Some((shift, None, 0.0));
+                    break;
+                }
+            }
+        }
+        let (shift, cut, push) = best?;
+        let insert_at = cut.filter(|_| push > 1e-9);
+        if let Some(cut) = insert_at {
+            self.push_from(cut, push);
+        }
+        let mut touched = Vec::new();
+        for (track, mut clip) in lifted {
+            clip.start += shift;
+            self.tracks[track].clips.push(clip);
+            touched.push(track);
+        }
+        for track in touched {
+            self.sort_track(track);
+        }
+        for mut caption in captions {
+            caption.shift(shift);
+            self.captions.push(caption);
+        }
+        self.captions.sort_by(|a, b| a.start.total_cmp(&b.start));
+        Some(Landing { insert_at, pushed: if insert_at.is_some() { push } else { 0.0 } })
+    }
+
+    /// How much everything from `cut` on would have to move later for the lifted clips, moved by `shift`, to fit on
+    /// their tracks; None when a clip that starts before the cut (which stays put) is in their way.
+    fn room_at(&self, lifted: &[(usize, Clip)], shift: f64, cut: f64) -> Option<f64> {
+        let mut push = 0.0;
+        for _ in 0..64 {
+            let mut more: f64 = 0.0;
+            for (t, c) in lifted {
+                let (start, end) = (c.start + shift, c.end() + shift);
+                for other in &self.tracks[*t].clips {
+                    let moves = other.start >= cut - 1e-6;
+                    let from = other.start + if moves { push } else { 0.0 };
+                    if start < from + other.duration - 1e-9 && end > from + 1e-9 {
+                        if !moves {
+                            return None;
+                        }
+                        more = more.max(end - from);
+                    }
+                }
+            }
+            if more < 1e-9 {
+                return Some(push);
+            }
+            push += more;
+        }
+        None
+    }
+
+    /// Moves everything from timeline time `at` on `by` seconds later, as an insert does: clips on unlocked tracks
+    /// (locked ones keep their clips where they are), captions (but those of a locked track's clips), titles and
+    /// markers.
+    fn push_from(&mut self, at: f64, by: f64) {
+        let from = at - 1e-6;
+        let mut stay = Vec::new();
+        for track in &mut self.tracks {
+            if track.locked {
+                stay.extend(track.clips.iter().map(|c| c.id.clone()));
+                continue;
+            }
+            for clip in track.clips.iter_mut().filter(|c| c.start >= from) {
+                clip.start += by;
+            }
+        }
+        for caption in self
+            .captions
+            .iter_mut()
+            .filter(|c| c.start >= from && !c.clip.as_ref().is_some_and(|id| stay.contains(id)))
+        {
+            caption.shift(by);
+        }
+        for title in self.titles.iter_mut().filter(|t| t.start >= from) {
+            title.start += by;
+            title.end += by;
+        }
+        for marker in self.markers.iter_mut().filter(|m| m.t >= from) {
+            marker.t += by;
+        }
     }
 
     /// The clip that ends exactly where `clip_id` starts on its track, if any (the two share a cut).
@@ -2381,7 +2591,7 @@ impl Project {
     }
 
     /// The ids with their partners (linked clips, the rest of their groups) added.
-    fn with_linked(&self, clip_ids: &[String]) -> Vec<String> {
+    pub fn with_linked(&self, clip_ids: &[String]) -> Vec<String> {
         let mut ids = clip_ids.to_vec();
         for id in clip_ids {
             for partner in self.partners(id) {
@@ -2580,6 +2790,15 @@ impl Project {
     }
 }
 
+/// How moved or dropped clips came down (see `Project::move_clips` and `Project::place_at`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Landing {
+    /// The cut they went in at, when what was from there on moved later to make room for them.
+    pub insert_at: Option<f64>,
+    /// How far it moved.
+    pub pushed: f64,
+}
+
 /// Undo and redo as whole-project snapshots: projects are small, and this can't drift out of step with the edits.
 #[derive(Default)]
 pub struct History {
@@ -2671,6 +2890,104 @@ mod tests {
         assert!(project.set_speed_ripple(&first, 2.0));
         assert_eq!(project.clip(&first).unwrap().duration, 2.0);
         assert_eq!(project.clip(&second).unwrap().start, 2.0);
+    }
+
+    /// Four 4-second clips end to end on the first video track, from 0 to 16.
+    fn four_in_a_row(project: &mut Project, footage: &str, track: usize) -> Vec<String> {
+        (0..4).map(|i| project.place(footage, Some(track), i as f64 * 4.0).unwrap()).collect()
+    }
+
+    fn starts(project: &Project, ids: &[String]) -> Vec<f64> {
+        ids.iter().map(|id| (project.clip(id).unwrap().start * 1000.0).round() / 1000.0).collect()
+    }
+
+    #[test]
+    fn dragged_clips_go_in_between_and_what_follows_makes_room() {
+        let (mut project, footage) = project_with(4.0);
+        // An overlay on a second video track (on top, so the main track is 1), and music on a locked audio track.
+        let overlay_track = project.add_track(TrackKind::Video);
+        let row = four_in_a_row(&mut project, &footage, 1);
+        let overlay = project.place(&footage, Some(overlay_track), 9.0).unwrap();
+        let music = project.add_media(media(MediaKind::Audio, 30.0));
+        let song = project.place(&music, Some(2), 9.0).unwrap();
+        project.tracks[2].locked = true;
+        project.add_marker(10.0, "");
+        let title = project.add_title(11.0);
+        // The second clip, dragged so it starts just past where the third did: it goes in before the third, and
+        // everything from there on moves later by its length, on every track but the locked one.
+        let landing = project.move_clips(&[row[1].clone()], 4.5, 0).unwrap();
+        assert_eq!(landing, Landing { insert_at: Some(8.0), pushed: 4.0 });
+        assert_eq!(starts(&project, &row), [0.0, 8.0, 12.0, 16.0]);
+        assert_eq!(project.clip(&overlay).unwrap().start, 13.0);
+        assert_eq!(project.clip(&song).unwrap().start, 9.0);
+        assert_eq!(project.markers[0].t, 14.0);
+        assert_eq!(project.titles.iter().find(|t| t.id == title).unwrap().start, 15.0);
+    }
+
+    #[test]
+    fn a_clip_nudged_among_others_stays_and_a_reordered_one_goes_in_at_the_cut() {
+        let (mut project, footage) = project_with(4.0);
+        let row = four_in_a_row(&mut project, &footage, 0);
+        let before = project.clone();
+        // Half a second right: it would cover the next clip, and the nearest cut is where it already is.
+        assert_eq!(project.move_clips(&[row[1].clone()], 0.5, 0), Some(Landing::default()));
+        assert_eq!(project, before);
+        // Dropped onto the last clip: it goes in before it, and its old spot stays open.
+        let landing = project.move_clips(&[row[1].clone()], 8.2, 0).unwrap();
+        assert_eq!(landing.insert_at, Some(12.0));
+        assert_eq!(starts(&project, &row), [0.0, 12.0, 8.0, 16.0]);
+    }
+
+    #[test]
+    fn selected_clips_move_together_keeping_their_spacing() {
+        let (mut project, footage) = project_with(4.0);
+        let row = four_in_a_row(&mut project, &footage, 0);
+        let picked = [row[0].clone(), row[2].clone()];
+        // Past the end, where they fit as they are.
+        assert_eq!(project.move_clips(&picked, 20.0, 0), Some(Landing::default()));
+        assert_eq!(starts(&project, &row), [20.0, 4.0, 28.0, 12.0]);
+        // Not before the start of the timeline: the earliest stops at 0 (where the first clip was).
+        let (mut project, footage) = project_with(4.0);
+        let row = four_in_a_row(&mut project, &footage, 0);
+        project.move_clips(&[row[2].clone(), row[3].clone()], -30.0, 0).unwrap();
+        assert_eq!(starts(&project, &row), [8.0, 12.0, 0.0, 4.0]);
+    }
+
+    #[test]
+    fn selected_clips_change_tracks_only_when_all_of_them_can() {
+        let (mut project, footage) = project_with(4.0);
+        let top = project.add_track(TrackKind::Video);
+        let row = four_in_a_row(&mut project, &footage, 1);
+        // One row up: onto the top video track.
+        project.move_clips(&[row[0].clone()], 0.0, -1).unwrap();
+        assert_eq!(project.find(&row[0]).unwrap().track, top);
+        // Two rows up there's no track: it stays on its own, moving in time only.
+        project.move_clips(&[row[1].clone()], 20.0, -2).unwrap();
+        assert_eq!(project.find(&row[1]).unwrap().track, 1);
+        assert_eq!(project.clip(&row[1]).unwrap().start, 24.0);
+        // Down onto the audio track: not a video track, so it stays.
+        project.move_clips(&[row[2].clone()], 0.0, 1).unwrap();
+        assert_eq!(project.find(&row[2]).unwrap().track, 1);
+    }
+
+    #[test]
+    fn dropped_media_goes_where_it_is_let_go() {
+        let (mut project, footage) = project_with(4.0);
+        let row: Vec<String> = (0..2).map(|i| project.place(&footage, Some(0), i as f64 * 4.0).unwrap()).collect();
+        // Onto the second clip, nearer its start: in before it, and it moves on.
+        let (new, landing) = project.place_at(&footage, Some(0), 5.0).unwrap();
+        assert_eq!(landing.insert_at, Some(4.0));
+        assert_eq!(project.clip(&new).unwrap().start, 4.0);
+        assert_eq!(starts(&project, &row), [0.0, 8.0]);
+        // In empty space it goes exactly there.
+        let (far, landing) = project.place_at(&footage, Some(0), 20.0).unwrap();
+        assert_eq!((project.clip(&far).unwrap().start, landing), (20.0, Landing::default()));
+        // A little too late for a gap: it ends against the clip after the gap, and nothing moves.
+        let (fitted, landing) = project.place_at(&footage, Some(0), 17.0).unwrap();
+        assert_eq!((project.clip(&fitted).unwrap().start, landing), (16.0, Landing::default()));
+        // Not on a locked track.
+        project.tracks[0].locked = true;
+        assert!(project.place_at(&footage, Some(0), 30.0).is_none());
     }
 
     fn project_with(duration: f64) -> (Project, String) {

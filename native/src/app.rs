@@ -44,6 +44,8 @@ const SHAPES: [(&str, u32, u32); 3] = [
 struct Pending {
     at: f64,
     track: Option<usize>,
+    /// Dropped on the timeline: it goes in where it was let go, and the clips there make room.
+    dropped: bool,
 }
 
 struct BossPlan {
@@ -339,9 +341,9 @@ impl StreamCuts {
         self.request_looks();
     }
 
-    fn import(&mut self, files: Vec<PathBuf>, at: f64, track: Option<usize>) {
+    fn import(&mut self, files: Vec<PathBuf>, at: f64, track: Option<usize>, dropped: bool) {
         for path in files {
-            self.pending.insert(path.clone(), Pending { at, track });
+            self.pending.insert(path.clone(), Pending { at, track, dropped });
             self.worker.send(Job::Probe(path));
         }
     }
@@ -364,7 +366,12 @@ impl StreamCuts {
                             self.history.record(&self.project);
                             let id = self.project.add_media(media);
                             if let Some(p) = pending {
-                                if let Some(clip) = self.project.place(&id, p.track, p.at) {
+                                let landed = p
+                                    .dropped
+                                    .then(|| self.project.place_at(&id, p.track, p.at))
+                                    .flatten()
+                                    .map(|(clip, _)| clip);
+                                if let Some(clip) = landed.or_else(|| self.project.place(&id, p.track, p.at)) {
                                     self.timeline.selection = vec![clip];
                                 }
                             }
@@ -732,7 +739,7 @@ impl StreamCuts {
             .pick_files()
         {
             let at = self.project.duration();
-            self.import(files, at, None);
+            self.import(files, at, None, false);
         }
     }
 
@@ -3605,6 +3612,7 @@ impl CanopyApp for StreamCuts {
                     .collect(),
                 at,
                 track,
+                true,
             );
         }
         self.projects_window(ui);
@@ -3636,7 +3644,7 @@ impl CanopyApp for StreamCuts {
             }
         }
         // Sent files land at the playhead, like pasting in StreamCuts on the web.
-        self.import(media, self.playhead, None);
+        self.import(media, self.playhead, None, false);
         receipt
     }
 

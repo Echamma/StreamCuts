@@ -2,7 +2,7 @@
 //! It edits the project through `Project`'s methods and reports seeks and drops back to the editor.
 
 use crate::filmstrip::Strip;
-use crate::project::{History, MediaKind, Project, TrackKind};
+use crate::project::{History, Landing, MediaKind, Project, TrackKind};
 use crate::waveform::Waveform;
 use canopy_ui::{DraggedFiles, Icon, SharedFile, color, font, icon_button};
 use egui::{
@@ -31,9 +31,18 @@ pub struct Looks {
 }
 
 enum Gesture {
+    /// Moves the selected clips together (and their partners). Each frame starts again from the project as it was
+    /// when the drag began, so the clips the selection passes over move aside and come back as it goes by.
     Move {
+        /// The clip under the pointer, and where in it the pointer took hold.
         clip: String,
         grab: f64,
+        /// The selected clips that move, and the track the one under the pointer was on.
+        ids: Vec<String>,
+        track: usize,
+        base: Box<Project>,
+        /// The last move worked out (seconds, rows), so holding still doesn't redo it.
+        last: Option<(f64, isize)>,
     },
     TrimStart {
         clip: String,
@@ -70,7 +79,23 @@ pub struct Timeline {
     gesture: Option<Gesture>,
     /// A title being dragged, and by which part.
     title_grab: Option<(String, Grab)>,
+    /// Where dragged clips are going in between others (the cut), shown as a line while the drag lasts.
+    insert_line: Option<f64>,
+    /// A medium from the bin held over the lanes: it's on the timeline already, where it would land, until it's let
+    /// go (then it stays) or taken away (then the project goes back to how it was).
+    drop_preview: Option<DropPreview>,
 }
+
+struct DropPreview {
+    base: Box<Project>,
+    /// What it was last worked out for (media, time, row), the clip it made and the cut it went in at.
+    last: (String, f64, Option<usize>),
+    clip: Option<String>,
+    insert_at: Option<f64>,
+}
+
+/// How long clips take to slide out of the way of a drag, in seconds.
+const SLIDE: f32 = 0.12;
 
 #[derive(Clone, Copy)]
 enum Grab {
@@ -88,6 +113,8 @@ impl Default for Timeline {
             snap: true,
             gesture: None,
             title_grab: None,
+            insert_line: None,
+            drop_preview: None,
         }
     }
 }
@@ -360,10 +387,27 @@ impl Timeline {
             .enumerate()
             .flat_map(|(i, t)| t.clips.iter().map(move |c| (i, c.clone())))
             .collect();
-        for (track_index, clip) in clips {
+        // While clips are dragged (or media is held over the lanes), the others slide to their new places instead of
+        // jumping; the dragged ones follow the pointer exactly.
+        let moving: Vec<String> = match (&self.gesture, &self.drop_preview) {
+            (Some(Gesture::Move { ids, .. }), _) => project.with_linked(ids),
+            (_, Some(preview)) => preview.clip.iter().cloned().collect(),
+            _ => Vec::new(),
+        };
+        let sliding = matches!(self.gesture, Some(Gesture::Move { .. })) || self.drop_preview.is_some();
+        for (track_index, mut clip) in clips {
             let Some(media) = project.media(&clip.media_id).cloned() else {
                 continue;
             };
+            let real_start = clip.start;
+            let shown = ui.ctx().animate_value_with_time(
+                ui.scope_id().with(("slide", &clip.id)),
+                clip.start as f32,
+                if sliding && !moving.contains(&clip.id) { SLIDE } else { 0.0 },
+            );
+            if shown != clip.start as f32 {
+                clip.start = shown as f64;
+            }
             let r = row(track_index);
             let clip_rect = Rect::from_min_max(
                 pos2(x_of(clip.start), r.top() + 4.0),
@@ -567,7 +611,7 @@ impl Timeline {
                         {
                             Gesture::Slide {
                                 clip: clip.id.clone(),
-                                grab: t_of(p.x) - clip.start,
+                                grab: t_of(p.x) - real_start,
                             }
                         } else if (p.x - clip_rect.left()).abs() <= EDGE {
                             Gesture::TrimStart {
@@ -577,9 +621,23 @@ impl Timeline {
                         } else if (p.x - clip_rect.right()).abs() <= EDGE {
                             Gesture::TrimEnd(clip.id.clone())
                         } else {
+                            // Dragging a selected clip takes all the selected clips along; any other clip goes alone.
+                            if !selected {
+                                self.selection = vec![clip.id.clone()];
+                            }
+                            let ids = self
+                                .selection
+                                .iter()
+                                .filter(|id| project.find(id).is_some())
+                                .cloned()
+                                .collect();
                             Gesture::Move {
                                 clip: clip.id.clone(),
-                                grab: t_of(p.x) - clip.start,
+                                grab: t_of(p.x) - real_start,
+                                ids,
+                                track: track_index,
+                                base: Box::new(project.clone()),
+                                last: None,
                             }
                         },
                     );
@@ -777,19 +835,27 @@ impl Timeline {
 
         // An active move or trim follows the pointer until release.
         let mut grew = 0.0;
+        let (mut moved, mut insert_line) = (None, None);
         if let (Some(gesture), Some(p)) = (&self.gesture, ui.input(|i| i.pointer.interact_pos())) {
             if ui.input(|i| i.pointer.primary_down()) {
                 let t = t_of(p.x);
                 match gesture {
-                    Gesture::Move { clip, grab } => {
-                        if let Some(at) = project.find(clip) {
-                            let duration = project.tracks[at.track].clips[at.index].duration;
+                    Gesture::Move {
+                        clip,
+                        grab,
+                        ids,
+                        track,
+                        base,
+                        last,
+                    } => {
+                        if let Some(was) = base.clip(clip) {
+                            // Snapped against the clips that stay (as they were), by whichever edge is nearer a point.
+                            let family = base.with_linked(ids);
+                            let ignore: Vec<&str> = family.iter().map(String::as_str).collect();
                             let start = t - grab;
-                            let snapped_start =
-                                self.snap(project, &[clip.as_str()], playhead, start);
+                            let snapped_start = self.snap(base, &ignore, playhead, start);
                             let snapped_end =
-                                self.snap(project, &[clip.as_str()], playhead, start + duration)
-                                    - duration;
+                                self.snap(base, &ignore, playhead, start + was.duration) - was.duration;
                             let start =
                                 if (snapped_start - start).abs() <= (snapped_end - start).abs() {
                                     snapped_start
@@ -797,17 +863,19 @@ impl Timeline {
                                     snapped_end
                                 };
                             let hovered = row_at(p.y);
-                            let track = if hovered >= 0.0
-                                && (hovered as usize) < project.tracks.len()
-                                && project.tracks[hovered as usize].kind
-                                    == project.tracks[at.track].kind
-                                && !project.tracks[hovered as usize].locked
-                            {
-                                hovered as usize
+                            let rows = if hovered >= 0.0 && (hovered as usize) < base.tracks.len() {
+                                hovered as isize - *track as isize
                             } else {
-                                at.track
+                                0
                             };
-                            output.changed |= project.move_clip(clip, start, track);
+                            let now = (start - was.start, rows);
+                            if *last != Some(now) {
+                                *project = (**base).clone();
+                                let landing = project.move_clips(ids, now.0, now.1);
+                                insert_line = Some(landing.and_then(|l| l.insert_at));
+                                moved = Some(now);
+                                output.changed = true;
+                            }
                         }
                     }
                     // The cut snaps to anything but the two clips it joins (their edges are the cut).
@@ -881,6 +949,12 @@ impl Timeline {
         if let Some(Gesture::TrimStart { grown, .. }) = &mut self.gesture {
             *grown += grew;
         }
+        if let (Some(Gesture::Move { last, .. }), Some(now)) = (&mut self.gesture, moved) {
+            *last = Some(now);
+        }
+        if let Some(line) = insert_line {
+            self.insert_line = line;
+        }
 
         // Clicking or dragging on the ruler or an empty lane moves the playhead.
         if self.gesture.is_none() && (background.clicked() || background.dragged()) {
@@ -907,34 +981,96 @@ impl Timeline {
             }
         }
 
-        // Drops from the media bin or Canopy's sidebar land at the pointer, on the row under it.
-        let dragging = DragAndDrop::has_payload_of_type::<MediaDrag>(ui.ctx())
-            || DragAndDrop::has_payload_of_type::<DraggedFiles>(ui.ctx());
-        if let Some(p) = pointer.filter(|p| dragging && lanes.contains(*p)) {
-            painter.line_segment(
-                [pos2(p.x, rect.top() + RULER), pos2(p.x, rect.bottom())],
-                Stroke::new(2.0, color::SELECT_LINE),
-            );
-            if ui.input(|i| i.pointer.any_released()) {
-                let at = self.snap(project, &[], playhead, t_of(p.x).max(0.0));
+        // Drops from the media bin or Canopy's sidebar land at the pointer, on the row under it. Media from the bin is
+        // put on the timeline as soon as it's over the lanes, so the clips there make room before it's let go.
+        let over_lanes = pointer.filter(|p| lanes.contains(*p));
+        let held = DragAndDrop::payload::<MediaDrag>(ui.ctx()).map(|m| m.0.clone());
+        let released = ui.input(|i| i.pointer.any_released());
+        match (held, over_lanes) {
+            (Some(media), Some(p)) => {
+                let base = match &self.drop_preview {
+                    Some(preview) => &preview.base,
+                    None => &*project,
+                };
+                let at = self.snap(base, &[], playhead, t_of(p.x).max(0.0));
                 let hovered = row_at(p.y);
-                let track = (hovered >= 0.0 && (hovered as usize) < project.tracks.len())
+                let track = (hovered >= 0.0 && (hovered as usize) < base.tracks.len())
                     .then_some(hovered as usize);
-                // Nothing lands on a locked track.
-                let locked = track.is_some_and(|t| project.tracks[t].locked);
-                // take_payload clears whatever payload there is, even one of another type: ask for the right one.
-                if let Some(drag) = DragAndDrop::has_payload_of_type::<MediaDrag>(ui.ctx())
-                    .then(|| DragAndDrop::take_payload::<MediaDrag>(ui.ctx()))
-                    .flatten()
-                    .filter(|_| !locked)
-                {
-                    history.record(project);
-                    if let Some(id) = project.place(&drag.0, track, at) {
-                        self.selection = vec![id];
-                        output.changed = true;
+                let preview = self.drop_preview.get_or_insert_with(|| DropPreview {
+                    base: Box::new(project.clone()),
+                    last: (String::new(), f64::NAN, None),
+                    clip: None,
+                    insert_at: None,
+                });
+                let now = (media.clone(), at, track);
+                if preview.last != now {
+                    *project = (*preview.base).clone();
+                    // Nothing lands on a locked track.
+                    let landed = track
+                        .is_none_or(|t| !project.tracks[t].locked)
+                        .then(|| project.place_at(&media, track, at))
+                        .flatten();
+                    (preview.clip, preview.insert_at) = match landed {
+                        Some((id, Landing { insert_at, .. })) => (Some(id), insert_at),
+                        None => (None, None),
+                    };
+                    preview.last = now;
+                    output.changed = true;
+                }
+                if released {
+                    // take_payload clears whatever payload there is, even one of another type: this one is ours.
+                    DragAndDrop::take_payload::<MediaDrag>(ui.ctx());
+                    if let Some(preview) = self.drop_preview.take() {
+                        if let Some(id) = preview.clip {
+                            history.record(&preview.base);
+                            self.selection = vec![id];
+                        }
                     }
-                } else if let Some(files) = DragAndDrop::take_payload::<DraggedFiles>(ui.ctx()) {
-                    output.dropped = Some((files.0.clone(), at, track));
+                }
+            }
+            _ => {
+                // Taken away from the lanes (or let go elsewhere): the project goes back to how it was.
+                if let Some(preview) = self.drop_preview.take() {
+                    *project = *preview.base;
+                    output.changed = true;
+                }
+                if let Some(p) =
+                    over_lanes.filter(|_| DragAndDrop::has_payload_of_type::<DraggedFiles>(ui.ctx()))
+                {
+                    painter.line_segment(
+                        [pos2(p.x, rect.top() + RULER), pos2(p.x, rect.bottom())],
+                        Stroke::new(2.0, color::SELECT_LINE),
+                    );
+                    if released {
+                        let at = self.snap(project, &[], playhead, t_of(p.x).max(0.0));
+                        let hovered = row_at(p.y);
+                        let track = (hovered >= 0.0 && (hovered as usize) < project.tracks.len())
+                            .then_some(hovered as usize);
+                        if let Some(files) = DragAndDrop::take_payload::<DraggedFiles>(ui.ctx()) {
+                            output.dropped = Some((files.0.clone(), at, track));
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(preview) = &self.drop_preview {
+            self.insert_line = preview.insert_at;
+        } else if self.gesture.is_none() {
+            self.insert_line = None;
+        }
+
+        // Where dragged clips go in between others: a line down the lanes at the cut, with a notch at each end.
+        if let Some(cut) = self.insert_line {
+            let x = x_of(cut);
+            if x >= lanes.left() && x <= rect.right() {
+                let (top, bottom) = (rect.top() + RULER, row(project.tracks.len()).top());
+                painter.line_segment([pos2(x, top), pos2(x, bottom)], Stroke::new(3.0, color::SELECT_LINE));
+                for (y, dir) in [(top, 1.0), (bottom, -1.0)] {
+                    painter.add(egui::Shape::convex_polygon(
+                        vec![pos2(x - 6.0, y), pos2(x + 6.0, y), pos2(x, y + 7.0 * dir)],
+                        color::SELECT_LINE,
+                        Stroke::NONE,
+                    ));
                 }
             }
         }
@@ -965,5 +1101,165 @@ impl Timeline {
         if playhead < self.scroll || playhead > self.scroll + visible * 0.9 {
             self.scroll = (playhead - visible * 0.1).max(0.0);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::project::{Attributes, Media};
+    use egui::{Event, PointerButton, Pos2, RawInput};
+    use std::path::PathBuf;
+
+    /// A timeline at 30 pixels a second, with four 4-second clips end to end on the video track (0 to 16 s).
+    struct Bench {
+        ctx: egui::Context,
+        timeline: Timeline,
+        project: Project,
+        history: History,
+        looks: Looks,
+        clips: Vec<String>,
+        footage: String,
+        area: Rect,
+        time: f64,
+    }
+
+    impl Bench {
+        fn new() -> Self {
+            let mut project = Project::new("Drag");
+            let footage = project.add_media(Media {
+                id: "m".into(),
+                path: PathBuf::from("C:/missing.mp4"),
+                name: "m".into(),
+                kind: MediaKind::Video,
+                duration: 4.0,
+                width: 1920,
+                height: 1080,
+                has_audio: true,
+                frame_rate: 30.0,
+                attributes: Attributes::default(),
+            });
+            let clips = (0..4).map(|i| project.place(&footage, Some(0), i as f64 * 4.0).unwrap()).collect();
+            let timeline = Timeline { pps: 30.0, snap: false, ..Default::default() };
+            let mut bench = Self {
+                ctx: egui::Context::default(),
+                timeline,
+                project,
+                history: History::default(),
+                looks: Looks::default(),
+                clips,
+                footage,
+                area: Rect::NOTHING,
+                time: 0.0,
+            };
+            bench.frame(Vec::new());
+            bench
+        }
+
+        fn frame(&mut self, events: Vec<Event>) {
+            self.time += 0.5;
+            let input = RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1400.0, 600.0))),
+                time: Some(self.time),
+                events,
+                ..Default::default()
+            };
+            let Self { ctx, timeline, project, history, looks, area, .. } = self;
+            let mut output = ctx.run_ui(input, |ui| {
+                *area = ui.available_rect_before_wrap();
+                timeline.ui(ui, project, history, 0.0, looks);
+            });
+            output.textures_delta.clear();
+        }
+
+        /// Where time `t` is on the first track's row.
+        fn at(&self, t: f64) -> Pos2 {
+            pos2(self.area.left() + HEADER + t as f32 * 30.0, self.area.top() + RULER + ROW / 2.0)
+        }
+
+        fn press(&mut self, p: Pos2, pressed: bool) {
+            self.frame(vec![
+                Event::PointerMoved(p),
+                Event::PointerButton { pos: p, button: PointerButton::Primary, pressed, modifiers: Default::default() },
+            ]);
+        }
+
+        /// Takes hold at time `from` and moves to `to` (in steps, as a hand would), without letting go.
+        fn drag(&mut self, from: f64, to: f64) {
+            let p = self.at(from);
+            self.frame(vec![Event::PointerMoved(p)]);
+            self.press(p, true);
+            for i in 1..=4 {
+                let t = from + (to - from) * i as f64 / 4.0;
+                self.frame(vec![Event::PointerMoved(self.at(t))]);
+            }
+        }
+
+        fn starts(&self) -> Vec<f64> {
+            self.clips.iter().map(|id| (self.project.clip(id).unwrap().start * 1000.0).round() / 1000.0).collect()
+        }
+    }
+
+    #[test]
+    fn dragging_a_selected_clip_takes_the_others_along() {
+        let mut bench = Bench::new();
+        bench.timeline.selection = vec![bench.clips[0].clone(), bench.clips[2].clone()];
+        // The first clip, held in its middle, 20 seconds later: the third goes with it, 8 seconds behind.
+        bench.drag(2.0, 22.0);
+        assert_eq!(bench.starts(), [20.0, 4.0, 28.0, 12.0]);
+        bench.press(bench.at(22.0), false);
+        bench.frame(Vec::new());
+        assert_eq!(bench.starts(), [20.0, 4.0, 28.0, 12.0]);
+        assert_eq!(bench.timeline.selection.len(), 2);
+        // One undo puts both back.
+        assert!(bench.history.undo(&mut bench.project));
+        assert_eq!(bench.starts(), [0.0, 4.0, 8.0, 12.0]);
+    }
+
+    #[test]
+    fn a_clip_dragged_between_others_goes_in_and_they_make_room() {
+        let mut bench = Bench::new();
+        // The last clip, held in its middle, over the second one's start: while held, the second and third have
+        // moved on to make room and a line marks the cut it goes in at.
+        bench.drag(14.0, 6.5);
+        assert_eq!(bench.starts(), [0.0, 8.0, 12.0, 4.0]);
+        assert_eq!(bench.timeline.insert_line, Some(4.0));
+        // Taken back to where it was, everything is as it was.
+        bench.frame(vec![Event::PointerMoved(bench.at(14.0))]);
+        assert_eq!(bench.starts(), [0.0, 4.0, 8.0, 12.0]);
+        assert_eq!(bench.timeline.insert_line, None);
+        // Over the cut again and let go: it stays in.
+        bench.frame(vec![Event::PointerMoved(bench.at(6.5))]);
+        bench.press(bench.at(6.5), false);
+        bench.frame(Vec::new());
+        assert_eq!(bench.starts(), [0.0, 8.0, 12.0, 4.0]);
+        assert_eq!(bench.timeline.insert_line, None);
+    }
+
+    #[test]
+    fn media_held_over_the_clips_makes_room_before_it_is_let_go() {
+        let mut bench = Bench::new();
+        DragAndDrop::set_payload(&bench.ctx, MediaDrag(bench.footage.clone()));
+        // Held over the third clip, nearer its start: it's on the timeline already, and the clips after make room.
+        bench.frame(vec![Event::PointerMoved(bench.at(8.5))]);
+        assert_eq!(bench.starts(), [0.0, 4.0, 12.0, 16.0]);
+        assert_eq!(bench.project.tracks[0].clips.len(), 5);
+        assert_eq!(bench.timeline.insert_line, Some(8.0));
+        // Taken off the lanes (over the track names): gone again.
+        let names = pos2(bench.area.left() + 20.0, bench.at(0.0).y);
+        bench.frame(vec![Event::PointerMoved(names)]);
+        assert_eq!(bench.starts(), [0.0, 4.0, 8.0, 12.0]);
+        assert_eq!(bench.project.tracks[0].clips.len(), 4);
+        // Back over the cut and let go: it stays, picked, as one undo step.
+        bench.frame(vec![Event::PointerMoved(bench.at(8.5))]);
+        bench.press(bench.at(8.5), false);
+        bench.frame(Vec::new());
+        assert_eq!(bench.starts(), [0.0, 4.0, 12.0, 16.0]);
+        assert_eq!(bench.project.tracks[0].clips.len(), 5);
+        let new = bench.timeline.selection[0].clone();
+        assert_eq!(bench.project.clip(&new).unwrap().start, 8.0);
+        assert!(!DragAndDrop::has_any_payload(&bench.ctx));
+        assert!(bench.history.undo(&mut bench.project));
+        assert_eq!(bench.project.tracks[0].clips.len(), 4);
     }
 }
