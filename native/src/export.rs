@@ -432,22 +432,28 @@ pub struct Export {
 
 /// Starts rendering `project` to `output` in the background.
 pub fn start(project: &Project, output: &Path, ctx: egui::Context) -> Result<Export, String> {
-    let args = arguments(project, output)?;
+    let mut args = arguments(project, output)?;
     let total = project.duration();
     let progress = Arc::new(AtomicU32::new(0));
     let cancel = Arc::new(AtomicBool::new(false));
     let (send, result) = std::sync::mpsc::channel();
-    // Captions: the ASS file and its font go in a folder of their own that FFmpeg runs in.
-    let folder = if !project.has_text() {
-        None
-    } else {
-        let folder = std::env::temp_dir().join(format!("streamcuts-export-{}", new_id()));
-        std::fs::create_dir_all(&folder)
-            .and_then(|_| std::fs::write(folder.join(CAPTIONS), captions::ass(project)))
+    // Each run gets a folder of its own that FFmpeg runs in: the filter graph goes in a file there (a timeline of a
+    // hundred-odd clips makes a graph longer than Windows lets a command line be), with the captions and their font.
+    let folder = std::env::temp_dir().join(format!("streamcuts-export-{}", new_id()));
+    std::fs::create_dir_all(&folder).map_err(|e| format!("Couldn't get the export ready ({e})."))?;
+    if let Some(at) = args.iter().position(|a| a == "-filter_complex") {
+        let graph = folder.join("graph.txt");
+        std::fs::write(&graph, &args[at + 1]).map_err(|e| format!("Couldn't get the export ready ({e})."))?;
+        // FFmpeg 7 and later read an option's value from a file when its name starts with "-/".
+        args[at] = "-/filter_complex".into();
+        args[at + 1] = graph.to_string_lossy().into_owned();
+    }
+    if project.has_text() {
+        std::fs::write(folder.join(CAPTIONS), captions::ass(project))
             .and_then(|_| std::fs::write(folder.join(captions::FONT_FILE), captions::font_bytes()))
             .map_err(|e| format!("Couldn't get the captions ready ({e})."))?;
-        Some(folder)
-    };
+    }
+    let folder = Some(folder);
     let mut ffmpeg_run = command(&ffmpeg());
     ffmpeg_run
         .args(&args)
@@ -775,6 +781,23 @@ mod tests {
             assert!((made.duration - length).abs() < 0.1, "{speed} {retime:?}: {} s", made.duration);
         }
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A check by hand on a real project: `STREAMCUTS_CHECK_PROJECT=<.streamcuts.json> STREAMCUTS_CHECK_OUT=<.mp4>
+    /// cargo test renders_a_project_file -- --ignored` exports it at 480×270 and prints its length and loudness.
+    #[test]
+    #[ignore]
+    fn renders_a_project_file() {
+        let path = PathBuf::from(std::env::var("STREAMCUTS_CHECK_PROJECT").unwrap());
+        let output = PathBuf::from(std::env::var("STREAMCUTS_CHECK_OUT").unwrap());
+        let mut project = crate::storage::load(&path).unwrap();
+        (project.width, project.height) = (480, 270);
+        let length = project.duration();
+        let run = start(&project, &output, egui::Context::default()).unwrap();
+        assert_eq!(run.result.recv().unwrap(), Ok(()));
+        let made = crate::ffmpeg::probe(&output).unwrap();
+        println!("timeline {length:.1} s, rendered {:.1} s at {} fps, sound {}", made.duration, made.frame_rate, made.has_audio);
+        assert!((made.duration - length).abs() < 1.0);
     }
 
     /// Needs FFmpeg on PATH: renders a real two-track timeline and checks the result plays for the right length.
