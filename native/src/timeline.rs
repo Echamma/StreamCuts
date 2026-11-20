@@ -84,6 +84,15 @@ pub struct Timeline {
     /// A medium from the bin held over the lanes: it's on the timeline already, where it would land, until it's let
     /// go (then it stays) or taken away (then the project goes back to how it was).
     drop_preview: Option<DropPreview>,
+    /// A box being dragged out over the lanes to pick everything it touches, as on the desktop.
+    marquee: Option<Marquee>,
+}
+
+struct Marquee {
+    /// Where the drag began: a time (so the box stays put while the timeline scrolls) and a height.
+    from: (f64, f32),
+    /// What was picked before, kept when Shift or Ctrl was held as the drag began.
+    keep: Vec<String>,
 }
 
 struct DropPreview {
@@ -115,6 +124,7 @@ impl Default for Timeline {
             title_grab: None,
             insert_line: None,
             drop_preview: None,
+            marquee: None,
         }
     }
 }
@@ -381,6 +391,8 @@ impl Timeline {
             rect.max,
         ));
         let mut clicked_clip = false;
+        // Where each clip, title and caption is drawn (not locked clips), for picking them with a box.
+        let mut boxes: Vec<(String, Rect)> = Vec::new();
         let clips: Vec<(usize, crate::project::Clip)> = project
             .tracks
             .iter()
@@ -534,6 +546,8 @@ impl Timeline {
             let locked = project.tracks[track_index].locked;
             if locked {
                 lane_painter.rect_filled(clip_rect, 6, color::VEIL_STRONG);
+            } else {
+                boxes.push((clip.id.clone(), clip_rect));
             }
             let response = ui.interact(
                 visible,
@@ -674,6 +688,7 @@ impl Timeline {
                     continue;
                 }
                 let selected = self.selection.contains(&title.id);
+                boxes.push((title.id.clone(), block));
                 lane_painter.rect_filled(block, 5, TITLE_FILL);
                 lane_painter.rect_stroke(
                     block,
@@ -790,6 +805,7 @@ impl Timeline {
                     continue;
                 }
                 let selected = self.selection.contains(&caption.id);
+                boxes.push((caption.id.clone(), block));
                 lane_painter.rect_filled(block, 5, CAPTION_FILL);
                 lane_painter.rect_stroke(
                     block,
@@ -956,8 +972,48 @@ impl Timeline {
             self.insert_line = line;
         }
 
-        // Clicking or dragging on the ruler or an empty lane moves the playhead.
-        if self.gesture.is_none() && (background.clicked() || background.dragged()) {
+        // Dragging on an empty lane draws a box: everything it touches is picked, as on the desktop (with Shift or
+        // Ctrl held, added to what was picked). Clicking an empty lane, or clicking or dragging on the ruler, moves
+        // the playhead.
+        if background.drag_started() {
+            let origin = ui.input(|i| i.pointer.press_origin()).or(background.interact_pointer_pos());
+            if let Some(p) = origin.filter(|p| p.x >= lanes.left() && p.y > ruler.bottom()) {
+                let add = ui.input(|i| i.modifiers.shift || i.modifiers.command);
+                self.marquee = Some(Marquee {
+                    from: (t_of(p.x), p.y),
+                    keep: if add { self.selection.clone() } else { Vec::new() },
+                });
+            }
+        }
+        if !background.dragged() {
+            self.marquee = None;
+        }
+        if let (Some(marquee), Some(p)) = (&self.marquee, background.interact_pointer_pos()) {
+            let area = Rect::from_two_pos(pos2(x_of(marquee.from.0), marquee.from.1), p)
+                .intersect(Rect::from_min_max(pos2(lanes.left(), ruler.bottom()), rect.max));
+            let mut picked = marquee.keep.clone();
+            for (id, _) in boxes.iter().filter(|(_, r)| r.intersects(area)) {
+                if !picked.contains(id) {
+                    picked.push(id.clone());
+                }
+            }
+            self.selection = picked;
+            painter.rect_filled(area, 2, color::SELECT_LINE.gamma_multiply(0.12));
+            painter.rect_stroke(area, 2, Stroke::new(1.0, color::SELECT_LINE), StrokeKind::Inside);
+            // Near either end of the lanes, the timeline scrolls so the box can reach further.
+            let edge = 28.0;
+            let step = if p.x > rect.right() - edge {
+                (p.x - (rect.right() - edge)) / edge
+            } else if p.x < lanes.left() + edge && self.scroll > 0.0 {
+                -((lanes.left() + edge - p.x) / edge)
+            } else {
+                0.0
+            };
+            if step != 0.0 {
+                self.scroll = (self.scroll + (step.clamp(-1.0, 1.0) * 12.0 / pps) as f64).max(0.0);
+                ui.ctx().request_repaint();
+            }
+        } else if self.gesture.is_none() && (background.clicked() || background.dragged()) {
             if let Some(p) = background
                 .interact_pointer_pos()
                 .filter(|p| p.x >= lanes.left())
@@ -1234,6 +1290,53 @@ mod tests {
         bench.frame(Vec::new());
         assert_eq!(bench.starts(), [0.0, 8.0, 12.0, 4.0]);
         assert_eq!(bench.timeline.insert_line, None);
+    }
+
+    #[test]
+    fn a_box_dragged_over_empty_lane_picks_what_it_touches() {
+        let mut bench = Bench::new();
+        // Under the clips (an empty lane) from 3 s to 9 s, up into the clips' row: the first three are touched.
+        let below = |b: &Bench, t: f64| pos2(b.at(t).x, b.at(t).y + ROW + 10.0);
+        let (from, to) = (below(&bench, 3.0), bench.at(9.0));
+        bench.frame(vec![Event::PointerMoved(from)]);
+        bench.press(from, true);
+        for i in 1..=4 {
+            let p = from + (to - from) * i as f32 / 4.0;
+            bench.frame(vec![Event::PointerMoved(p)]);
+        }
+        let picked = bench.clips[..3].to_vec();
+        assert_eq!(bench.timeline.selection, picked);
+        // Back down off the third: it lets go of it while the box is still out.
+        bench.frame(vec![Event::PointerMoved(below(&bench, 6.0) - vec2(0.0, ROW))]);
+        assert_eq!(bench.timeline.selection, bench.clips[..2].to_vec());
+        bench.press(below(&bench, 6.0) - vec2(0.0, ROW), false);
+        bench.frame(Vec::new());
+        assert_eq!(bench.timeline.selection, bench.clips[..2].to_vec());
+        // Nothing moved, and the playhead wasn't asked to go anywhere by the box.
+        assert_eq!(bench.starts(), [0.0, 4.0, 8.0, 12.0]);
+        // With Shift held, a second box adds the last clip to them.
+        let (from, to) = (below(&bench, 15.0), bench.at(13.0));
+        bench.frame(vec![Event::PointerMoved(from)]);
+        let shift = egui::Modifiers { shift: true, ..Default::default() };
+        bench.frame(vec![
+            Event::ModifiersChanged(shift),
+            Event::PointerMoved(from),
+            Event::PointerButton { pos: from, button: PointerButton::Primary, pressed: true, modifiers: shift },
+        ]);
+        for i in 1..=4 {
+            let p = from + (to - from) * i as f32 / 4.0;
+            bench.frame(vec![Event::PointerMoved(p)]);
+        }
+        bench.frame(vec![Event::ModifiersChanged(Default::default())]);
+        assert_eq!(bench.timeline.selection, [&bench.clips[..2], &bench.clips[3..]].concat());
+        // A plain click on the empty lane lets go of everything.
+        bench.press(to, false);
+        let empty = below(&bench, 30.0);
+        bench.frame(vec![Event::PointerMoved(empty)]);
+        bench.press(empty, true);
+        bench.press(empty, false);
+        bench.frame(Vec::new());
+        assert!(bench.timeline.selection.is_empty());
     }
 
     #[test]
