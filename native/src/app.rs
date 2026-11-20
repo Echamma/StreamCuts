@@ -7,6 +7,7 @@ use crate::captions;
 use crate::export::{self, Export, Preset, Queued, Status};
 use crate::ffmpeg::Frame;
 use crate::filmstrip::Strip;
+use crate::keys::{self, Cmd};
 use crate::preview::{Clock, Preview};
 use crate::project::{
     Effects, ExportFormat, Framing, Grade, History, MediaKind, Picture, Placement, Project, SPEEDS,
@@ -101,6 +102,40 @@ pub struct StreamCuts {
     show_projects: bool,
     toasts: Vec<String>,
     exported: Vec<PathBuf>,
+    /// The Commands window (F1): its search and which row the arrow keys are on.
+    palette: Option<Palette>,
+    /// Enter asked for the Clip menu: open it, then put the keyboard on its first field.
+    open_clip_menu: bool,
+    focus_clip_menu: bool,
+    /// Ctrl+F asked for the Media search; Page Up/Down picked a file to bring into view.
+    focus_media_search: bool,
+    media_scroll_to: Option<String>,
+    /// The timeline's width last frame (Z fits the whole timeline into it), and StreamCuts' pane.
+    lanes_width: f32,
+    pane: Rect,
+}
+
+#[derive(Default)]
+struct Palette {
+    query: String,
+    at: usize,
+    opened: bool,
+}
+
+/// The Clip menu's actions that do more than change a field, for the menu and the keyboard alike.
+#[derive(Clone, Copy)]
+enum ClipOp {
+    /// Make (true) or delete (false) the clip's media's editing proxy.
+    Proxy(bool),
+    /// Measure (false) or normalize (true) its loudness.
+    Loudness(bool),
+    Scenes,
+    Reframe,
+    /// Detach its sound (true) or unlink it (false).
+    Link(bool),
+    /// Show this many more seconds of footage before (true) or after (false).
+    Extend(bool, f64),
+    Ungroup,
 }
 
 /// Something on the preview that can be moved and sized there.
@@ -203,6 +238,13 @@ impl StreamCuts {
             show_projects: false,
             toasts: Vec::new(),
             exported: Vec::new(),
+            palette: None,
+            open_clip_menu: false,
+            focus_clip_menu: false,
+            focus_media_search: false,
+            media_scroll_to: None,
+            lanes_width: 800.0,
+            pane: Rect::NOTHING,
         };
         app.request_looks();
         app
@@ -586,138 +628,744 @@ impl StreamCuts {
         }
     }
 
+    /// The keyboard: every key in `keys::COMMANDS`, while StreamCuts has the focus and nothing is being typed in.
     fn shortcuts(&mut self, ui: &Ui, focused: bool) {
-        if !focused || ui.ctx().egui_wants_keyboard_input() {
+        // Not while typing, in the Commands window, or with a menu open (Escape then just closes the menu).
+        if !focused || ui.ctx().egui_wants_keyboard_input() || self.palette.is_some() || egui::Popup::is_any_open(ui.ctx()) {
             return;
         }
-        let ctx = ui.ctx();
-        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Space) | i.consume_key(Modifiers::NONE, Key::K)) {
-            self.toggle_play();
+        let ctx = ui.ctx().clone();
+        // Several presses can come in one frame (a held key, quick typing): each one runs.
+        while let Some(cmd) = ctx.input_mut(keys::pressed) {
+            self.run(cmd, &ctx);
         }
-        // J and L move a second back and on; Up and Down go to the cut before and after.
-        for (key, step) in [(Key::J, -1.0), (Key::L, 1.0)] {
-            if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, key)) {
-                self.seek(self.playhead + step);
+    }
+
+    /// The clips picked on the timeline (not titles or captions).
+    fn picked_clips(&self) -> Vec<String> {
+        self.timeline
+            .selection
+            .iter()
+            .filter(|id| self.project.clip(id).is_some())
+            .cloned()
+            .collect()
+    }
+
+    /// The one clip a Clip-menu command acts on: the picked clip, or the clip under the playhead when none is picked.
+    fn one_clip(&mut self) -> Option<String> {
+        let picked = self.picked_clips();
+        let clip = match picked.as_slice() {
+            [one] => Some(one.clone()),
+            [] => self.clips_in_hand().into_iter().next(),
+            _ => None,
+        };
+        if clip.is_none() {
+            self.toasts.push(if picked.len() > 1 { "Pick just one clip for that".into() } else { "Pick a clip first (C picks the one under the playhead)".into() });
+        }
+        clip
+    }
+
+    /// Changes every picked clip (or the clips under the playhead) in one undo step.
+    fn change_clips(&mut self, change: impl Fn(&mut crate::project::Clip, MediaKind)) {
+        let ids = self.clips_in_hand();
+        if ids.is_empty() {
+            self.toasts.push("Pick a clip first (C picks the one under the playhead)".into());
+            return;
+        }
+        let before = self.project.clone();
+        for id in &ids {
+            let kind = self.project.clip(id).and_then(|c| self.project.media(&c.media_id)).map(|m| m.kind);
+            if let (Some(kind), Some(clip)) = (kind, self.project.clip_mut(id)) {
+                change(clip, kind);
             }
         }
-        for (key, back) in [(Key::ArrowUp, true), (Key::ArrowDown, false)] {
-            if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, key)) {
+        if self.project != before {
+            self.history.record(&before);
+            self.edited();
+        }
+    }
+
+    /// The track the picked clip is on, or the first video track.
+    fn picked_track(&self) -> Option<usize> {
+        self.picked_clips()
+            .first()
+            .and_then(|id| self.project.find(id))
+            .map(|r| r.track)
+    }
+
+    fn import_dialog(&mut self) {
+        if let Some(files) = rfd::FileDialog::new()
+            .set_title("Import media")
+            .add_filter(
+                "Video, pictures and sound",
+                &[
+                    "mp4", "mov", "mkv", "webm", "avi", "m4v", "png", "jpg", "jpeg", "webp", "gif",
+                    "mp3", "wav", "m4a", "aac", "flac", "ogg",
+                ],
+            )
+            .pick_files()
+        {
+            let at = self.project.duration();
+            self.import(files, at, None);
+        }
+    }
+
+    fn set_shape(&mut self, i: usize) {
+        if (self.project.width, self.project.height) == (SHAPES[i].1, SHAPES[i].2) {
+            return;
+        }
+        self.history.record(&self.project);
+        (_, self.project.width, self.project.height) = SHAPES[i];
+        self.reset_preview();
+        self.edited();
+    }
+
+    /// Moves the picked clips by `by` seconds and `tracks` tracks, all or none: if one can't go (another clip is in
+    /// the way, the start of the timeline, a track of another kind), nothing moves.
+    fn move_picked(&mut self, by: f64, tracks: i32) {
+        let mut ids = self.picked_clips();
+        if ids.is_empty() {
+            self.toasts.push("Pick the clips to move first".into());
+            return;
+        }
+        // Clips that move along with another picked one (linked or grouped) move once, with it.
+        let mut seen = Vec::new();
+        ids.retain(|id| {
+            if seen.contains(id) {
+                return false;
+            }
+            seen.extend(self.project.partners(id));
+            true
+        });
+        // The ones in front go first, so they make room for the ones behind.
+        let start = |p: &Project, id: &String| p.clip(id).map_or(0.0, |c| c.start);
+        ids.sort_by(|a, b| start(&self.project, a).total_cmp(&start(&self.project, b)));
+        if by > 0.0 || tracks > 0 {
+            ids.reverse();
+        }
+        let before = self.project.clone();
+        let mut moved = true;
+        for id in &ids {
+            let (Some(clip), Some(at)) = (self.project.clip(id), self.project.find(id)) else {
+                continue;
+            };
+            let track = at.track as i32 + tracks;
+            let to = clip.start + by;
+            if to < -1e-9 || track < 0 || !self.project.move_clip(id, to.max(0.0), track as usize) {
+                moved = false;
+                break;
+            }
+        }
+        if moved && self.project != before {
+            self.history.record(&before);
+            self.edited();
+        } else {
+            self.project = before;
+            self.toasts.push(if tracks != 0 { "There's no room on that track".into() } else { "There's no room there".into() });
+        }
+    }
+
+    /// Picks the clip before or after the last picked one on its track (or, with nothing picked, the clip at or
+    /// after the playhead), and brings the playhead to it.
+    fn pick_neighbor(&mut self, back: bool, extend: bool) {
+        let anchor = self.picked_clips().last().cloned().or_else(|| self.clips_in_hand().into_iter().next());
+        let found = match anchor.as_deref().and_then(|id| self.project.find(id).map(|at| (id, at))) {
+            Some((id, at)) => {
+                let track = &self.project.tracks[at.track];
+                let me = self.project.clip(id).map_or(0.0, |c| c.start);
+                let mut clips: Vec<&crate::project::Clip> = track.clips.iter().collect();
+                clips.sort_by(|a, b| a.start.total_cmp(&b.start));
+                if back {
+                    clips.iter().rev().find(|c| c.start < me - 1e-9).map(|c| (c.id.clone(), c.start))
+                } else {
+                    clips.iter().find(|c| c.start > me + 1e-9).map(|c| (c.id.clone(), c.start))
+                }
+            }
+            None => self
+                .project
+                .tracks
+                .iter()
+                .filter(|t| !t.locked)
+                .flat_map(|t| t.clips.iter())
+                .filter(|c| if back { c.start <= self.playhead } else { c.end() > self.playhead })
+                .min_by(|a, b| (a.start - self.playhead).abs().total_cmp(&(b.start - self.playhead).abs()))
+                .map(|c| (c.id.clone(), c.start)),
+        };
+        match found {
+            Some((id, start)) => {
+                if !extend {
+                    self.timeline.selection.clear();
+                }
+                if !self.timeline.selection.contains(&id) {
+                    self.timeline.selection.push(id);
+                }
+                self.media_selected = None;
+                self.seek(start);
+            }
+            None => self.toasts.push(if back { "No clip before it".into() } else { "No clip after it".into() }),
+        }
+    }
+
+    /// Picks the clip under the playhead on the track above or below the picked clip's.
+    fn pick_on_track(&mut self, up: bool) {
+        let from = self.picked_track().map_or(if up { self.project.tracks.len() } else { usize::MAX }, |t| t);
+        let t = self.playhead;
+        let tracks: Vec<usize> = if up {
+            (0..from.min(self.project.tracks.len())).rev().collect()
+        } else {
+            (from.wrapping_add(1)..self.project.tracks.len()).collect()
+        };
+        let found = tracks.into_iter().find_map(|i| {
+            let track = &self.project.tracks[i];
+            (!track.locked).then(|| track.clips.iter().find(|c| c.start <= t && t < c.end())).flatten().map(|c| c.id.clone())
+        });
+        match found {
+            Some(id) => {
+                self.timeline.selection = vec![id];
+                self.media_selected = None;
+            }
+            None => self.toasts.push(if up { "Nothing above at the playhead".into() } else { "Nothing below at the playhead".into() }),
+        }
+    }
+
+    /// The files Media shows now (its search applied), in order.
+    fn shown_media(&self) -> Vec<String> {
+        self.project.media.iter().filter(|m| m.matches(&self.media_search)).map(|m| m.id.clone()).collect()
+    }
+
+    fn toggle_track(&mut self, which: &str) {
+        let Some(i) = self.picked_track() else {
+            self.toasts.push("Pick a clip on that track first".into());
+            return;
+        };
+        self.history.record(&self.project);
+        let track = &mut self.project.tracks[i];
+        let (on, word) = match which {
+            "mute" => {
+                track.muted = !track.muted;
+                (track.muted, if track.muted { "muted" } else { "unmuted" })
+            }
+            "hide" => {
+                track.hidden = !track.hidden;
+                (track.hidden, if track.hidden { "hidden" } else { "shown" })
+            }
+            _ => {
+                track.locked = !track.locked;
+                (track.locked, if track.locked { "locked" } else { "unlocked" })
+            }
+        };
+        let name = track.name.clone();
+        if which == "lock" && on {
+            // A locked track's clips can't stay picked.
+            let ids: Vec<String> = self.project.tracks[i].clips.iter().map(|c| c.id.clone()).collect();
+            self.timeline.selection.retain(|id| !ids.contains(id));
+        }
+        self.toasts.push(format!("{name} {word}"));
+        self.reset_preview();
+        self.edited();
+    }
+
+    /// Runs a command: from its key, the Commands window, or a button.
+    fn run(&mut self, cmd: Cmd, ctx: &egui::Context) {
+        let frame = 1.0 / self.project.fps as f64;
+        match cmd {
+            Cmd::PlayPause => self.toggle_play(),
+            Cmd::Seek(by) => self.seek(self.playhead + by),
+            Cmd::Frame(back) => self.seek(self.playhead + if back { -frame } else { frame }),
+            Cmd::Cut(back) => {
                 if let Some(t) = self.project.next_cut(self.playhead, back) {
                     self.seek(t);
                 }
             }
-        }
-        // Copy, cut, paste at the playhead, and duplicate right after.
-        let (copy, cut, paste, duplicate, all, none) = ctx.input_mut(|i| {
-            // The clipboard keys arrive as events on Windows; the plain keys cover the rest.
-            let copy = i.events.iter().any(|e| matches!(e, egui::Event::Copy));
-            let cut = i.events.iter().any(|e| matches!(e, egui::Event::Cut));
-            let paste = i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)));
-            (
-                i.consume_key(Modifiers::COMMAND, Key::C) || copy,
-                i.consume_key(Modifiers::COMMAND, Key::X) || cut,
-                i.consume_key(Modifiers::COMMAND, Key::V) || paste,
-                i.consume_key(Modifiers::COMMAND, Key::D),
-                i.consume_key(Modifiers::COMMAND, Key::A),
-                i.consume_key(Modifiers::NONE, Key::Escape),
-            )
-        });
-        if (copy || cut) && !self.timeline.selection.is_empty() {
-            self.clipboard = self.project.copy_clips(&self.timeline.selection);
-            let count = self.clipboard.len();
-            if cut {
-                self.delete_selection(false);
-            }
-            self.toasts.push(format!("{} {count} clip{}. Ctrl+V pastes at the playhead.", if cut { "Cut" } else { "Copied" }, if count == 1 { "" } else { "s" }));
-        }
-        if paste {
-            self.paste(self.clipboard.clone(), self.playhead);
-        }
-        if duplicate && !self.timeline.selection.is_empty() {
-            let clips = self.project.copy_clips(&self.timeline.selection);
-            if let Some(end) = self.project.end_of(&self.timeline.selection) {
-                self.paste(clips, end);
-            }
-        }
-        if all {
-            self.timeline.selection = self.project.tracks.iter().filter(|track| !track.locked).flat_map(|track| track.clips.iter().map(|c| c.id.clone())).collect();
-        }
-        if none {
-            self.timeline.selection.clear();
-            self.media_selected = None;
-        }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Q)) {
-            self.trim_to_playhead(true);
-        }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::W)) {
-            self.trim_to_playhead(false);
-        }
-        // + and - zoom the timeline.
-        let zoom = ctx.input_mut(|i| {
-            let closer = i.consume_key(Modifiers::NONE, Key::Plus) | i.consume_key(Modifiers::NONE, Key::Equals);
-            if closer { 1.25 } else if i.consume_key(Modifiers::NONE, Key::Minus) { 0.8 } else { 1.0 }
-        });
-        if zoom != 1.0 {
-            self.timeline.pps = (self.timeline.pps * zoom).clamp(2.0, 600.0);
-        }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::S)) {
-            self.split();
-        }
-        if ctx.input_mut(|i| {
-            i.consume_key(Modifiers::SHIFT, Key::Delete)
-                || i.consume_key(Modifiers::SHIFT, Key::Backspace)
-        }) {
-            self.delete_selection(true);
-        }
-        if ctx.input_mut(|i| {
-            i.consume_key(Modifiers::NONE, Key::Delete)
-                || i.consume_key(Modifiers::NONE, Key::Backspace)
-        }) {
-            // Clips selected on the timeline go first; with none, the file selected in Media.
-            match self.media_selected.clone() {
-                Some(id) if self.timeline.selection.is_empty() => self.remove_media(&id),
-                _ => self.delete_selection(false),
-            }
-        }
-        if ctx.input_mut(|i| {
-            i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z)
-                || i.consume_key(Modifiers::COMMAND, Key::Y)
-        }) {
-            if self.history.redo(&mut self.project) {
-                self.edited();
-            }
-        } else if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Z))
-            && self.history.undo(&mut self.project)
-        {
-            self.edited();
-        }
-        let frame = 1.0 / self.project.fps as f64;
-        // Before the plain arrows, which would also take Shift+arrow.
-        for (key, back) in [(Key::ArrowLeft, true), (Key::ArrowRight, false)] {
-            if ctx.input_mut(|i| i.consume_key(Modifiers::SHIFT, key)) {
+            Cmd::Marker(back) => {
                 if let Some(t) = self.project.next_marker(self.playhead, back) {
                     self.seek(t);
                 }
             }
-        }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::ArrowLeft)) {
-            self.seek(self.playhead - frame);
-        }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::ArrowRight)) {
-            self.seek(self.playhead + frame);
-        }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Home)) {
-            self.seek(0.0);
-        }
-        // Markers: M marks the playhead; Shift+Left / Shift+Right go to the one before or after.
-        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::M)) {
-            self.history.record(&self.project);
-            if self.project.add_marker(self.playhead, "") {
+            Cmd::Start => self.seek(0.0),
+            Cmd::End => self.seek(self.project.duration()),
+            Cmd::AddMarker => {
+                self.history.record(&self.project);
+                if self.project.add_marker(self.playhead, "") {
+                    self.edited();
+                }
+            }
+            Cmd::RemoveMarker => {
+                let near = self.project.markers.iter().position(|m| (m.t - self.playhead).abs() <= frame * 1.5);
+                match near {
+                    Some(i) => {
+                        self.history.record(&self.project);
+                        self.project.markers.remove(i);
+                        self.edited();
+                    }
+                    None => self.toasts.push("No marker at the playhead (Shift+← and Shift+→ go to one)".into()),
+                }
+            }
+            Cmd::Zoom(by) => self.timeline.pps = (self.timeline.pps * by).clamp(2.0, 600.0),
+            Cmd::ZoomFit => {
+                let length = self.project.duration().max(1.0);
+                self.timeline.pps = ((self.lanes_width - 140.0).max(100.0) / length as f32).clamp(2.0, 600.0);
+                self.timeline.scroll = 0.0;
+            }
+            Cmd::SelectAll => {
+                self.timeline.selection = self.project.tracks.iter().filter(|track| !track.locked).flat_map(|track| track.clips.iter().map(|c| c.id.clone())).collect();
+            }
+            Cmd::SelectNone => {
+                // Escape closes a window first.
+                if self.show_projects || self.show_deliver {
+                    (self.show_projects, self.show_deliver) = (false, false);
+                } else {
+                    self.timeline.selection.clear();
+                    self.media_selected = None;
+                }
+            }
+            Cmd::SelectAtPlayhead => match self.clips_in_hand_at_playhead() {
+                Some(id) => {
+                    self.timeline.selection = vec![id];
+                    self.media_selected = None;
+                }
+                None => self.toasts.push("No clip under the playhead".into()),
+            },
+            Cmd::SelectNeighbor { back, extend } => self.pick_neighbor(back, extend),
+            Cmd::SelectTrack(up) => self.pick_on_track(up),
+            Cmd::Split => self.split(),
+            Cmd::SplitAll => {
+                self.history.record(&self.project);
+                if self.project.split_all(self.playhead).is_empty() {
+                    self.toasts.push("Nothing to split at the playhead".into());
+                } else {
+                    self.edited();
+                }
+            }
+            Cmd::TrimToPlayhead(start) => self.trim_to_playhead(start),
+            Cmd::Delete => match self.media_selected.clone() {
+                // Clips picked on the timeline go first; with none, the file picked in Media.
+                Some(id) if self.timeline.selection.is_empty() => self.remove_media(&id),
+                _ => self.delete_selection(false),
+            },
+            Cmd::RippleDelete => self.delete_selection(true),
+            Cmd::Copy | Cmd::CutClips => {
+                if self.timeline.selection.is_empty() {
+                    return;
+                }
+                let cut = cmd == Cmd::CutClips;
+                self.clipboard = self.project.copy_clips(&self.timeline.selection);
+                let count = self.clipboard.len();
+                if cut {
+                    self.delete_selection(false);
+                }
+                self.toasts.push(format!("{} {count} clip{}. Ctrl+V pastes at the playhead.", if cut { "Cut" } else { "Copied" }, if count == 1 { "" } else { "s" }));
+            }
+            Cmd::Paste => self.paste(self.clipboard.clone(), self.playhead),
+            Cmd::Duplicate => {
+                if !self.timeline.selection.is_empty() {
+                    let clips = self.project.copy_clips(&self.timeline.selection);
+                    if let Some(end) = self.project.end_of(&self.timeline.selection) {
+                        self.paste(clips, end);
+                    }
+                }
+            }
+            Cmd::Undo => {
+                if self.history.undo(&mut self.project) {
+                    self.edited();
+                }
+            }
+            Cmd::Redo => {
+                if self.history.redo(&mut self.project) {
+                    self.edited();
+                }
+            }
+            Cmd::Nudge(by) => self.move_picked(by, 0),
+            Cmd::NudgeFrames(n) => self.move_picked(n as f64 * frame, 0),
+            Cmd::MoveTrack(up) => self.move_picked(0.0, if up { -1 } else { 1 }),
+            Cmd::SlipFrames(n) => {
+                if let Some(id) = self.one_clip() {
+                    let source_in = self.project.clip(&id).map_or(0.0, |c| c.source_in);
+                    let was = self.project.clone();
+                    if self.project.slip(&id, (source_in + n as f64 * frame).max(0.0)) {
+                        self.history.record(&was);
+                        self.edited();
+                    } else {
+                        self.toasts.push("That's the edge of its video".into());
+                    }
+                }
+            }
+            Cmd::AddTitle => {
+                self.history.record(&self.project);
+                let id = self.project.add_title(self.playhead);
+                self.timeline.selection = vec![id];
                 self.edited();
             }
+            Cmd::MakeCaptions => {
+                if self.transcribing == 0 {
+                    self.make_captions();
+                } else {
+                    self.toasts.push("Captions are still being made".into());
+                }
+            }
+            Cmd::ClipMenu => {
+                if let Some(id) = self.one_clip() {
+                    self.timeline.selection = vec![id];
+                    self.open_clip_menu = true;
+                }
+            }
+            Cmd::Fades => {
+                let all_faded = self.clips_in_hand().iter().all(|id| self.project.clip(id).is_some_and(|c| c.fade_in > 0.0 && c.fade_out > 0.0));
+                self.change_clips(|clip, _| {
+                    let fade = if all_faded { 0.0 } else { (clip.duration / 2.0).min(0.5) };
+                    (clip.fade_in, clip.fade_out) = (fade, fade);
+                });
+            }
+            Cmd::NoFades => self.change_clips(|clip, _| (clip.fade_in, clip.fade_out) = (0.0, 0.0)),
+            Cmd::Speed(speed) => {
+                let ids: Vec<String> = self.clips_in_hand().into_iter().filter(|id| self.project.clip(id).and_then(|c| self.project.media(&c.media_id)).is_some_and(|m| m.kind != MediaKind::Image)).collect();
+                if ids.is_empty() {
+                    self.toasts.push("Pick a video or sound clip first".into());
+                    return;
+                }
+                let before = self.project.clone();
+                for id in &ids {
+                    self.project.set_speed(id, speed);
+                }
+                if self.project != before {
+                    self.history.record(&before);
+                    self.edited();
+                }
+            }
+            Cmd::Volume(by) => {
+                self.change_clips(|clip, kind| {
+                    if kind != MediaKind::Image {
+                        clip.volume = ((clip.volume + by) * 10.0).round().clamp(0.0, 20.0) / 10.0;
+                    }
+                });
+                if let Some(clip) = self.clips_in_hand().first().and_then(|id| self.project.clip(id)) {
+                    self.toasts.push(format!("Volume {:.0}%", clip.volume * 100.0));
+                }
+            }
+            Cmd::FitOrFill => self.change_clips(|clip, kind| {
+                if kind != MediaKind::Audio {
+                    clip.framing = match clip.framing {
+                        Framing::Fit => Framing::Fill { x: 0.5, y: 0.5 },
+                        _ => Framing::Fit,
+                    };
+                }
+            }),
+            Cmd::ResetPlace => self.change_clips(|clip, _| clip.place = Placement::default()),
+            Cmd::ResetColor => self.change_clips(|clip, _| (clip.grade, clip.lut) = (Grade::default(), None)),
+            Cmd::ResetEffects => self.change_clips(|clip, _| clip.effects = Effects::default()),
+            Cmd::ShowMore { before, seconds } => {
+                if let Some(id) = self.one_clip() {
+                    self.clip_op(&id, ClipOp::Extend(before, seconds));
+                }
+            }
+            Cmd::Ungroup | Cmd::DetachSound | Cmd::Unlink | Cmd::MeasureLoudness | Cmd::Normalize | Cmd::Proxy | Cmd::DeleteProxy | Cmd::DetectScenes | Cmd::AutoReframe => {
+                let op = match cmd {
+                    Cmd::Ungroup => ClipOp::Ungroup,
+                    Cmd::DetachSound => ClipOp::Link(true),
+                    Cmd::Unlink => ClipOp::Link(false),
+                    Cmd::MeasureLoudness => ClipOp::Loudness(false),
+                    Cmd::Normalize => ClipOp::Loudness(true),
+                    Cmd::Proxy => ClipOp::Proxy(true),
+                    Cmd::DeleteProxy => ClipOp::Proxy(false),
+                    Cmd::DetectScenes => ClipOp::Scenes,
+                    _ => ClipOp::Reframe,
+                };
+                if let Some(id) = self.one_clip() {
+                    self.clip_op(&id, op);
+                }
+            }
+            Cmd::AddVideoTrack | Cmd::AddAudioTrack => {
+                self.history.record(&self.project);
+                let kind = if cmd == Cmd::AddVideoTrack { crate::project::TrackKind::Video } else { crate::project::TrackKind::Audio };
+                self.project.add_track(kind);
+                self.edited();
+            }
+            Cmd::MuteTrack => self.toggle_track("mute"),
+            Cmd::HideTrack => self.toggle_track("hide"),
+            Cmd::LockTrack => self.toggle_track("lock"),
+            Cmd::Snap => {
+                self.timeline.snap = !self.timeline.snap;
+                self.toasts.push(if self.timeline.snap { "Snapping on".into() } else { "Snapping off".into() });
+            }
+            Cmd::Import => self.import_dialog(),
+            Cmd::MediaStep(up) => {
+                let shown = self.shown_media();
+                if shown.is_empty() {
+                    return;
+                }
+                let at = self.media_selected.as_ref().and_then(|id| shown.iter().position(|m| m == id));
+                let next = match (at, up) {
+                    (None, _) => 0,
+                    (Some(i), true) => i.saturating_sub(1),
+                    (Some(i), false) => (i + 1).min(shown.len() - 1),
+                };
+                self.media_selected = Some(shown[next].clone());
+                self.media_scroll_to = Some(shown[next].clone());
+                self.timeline.selection.clear();
+            }
+            Cmd::PlaceMedia => match self.media_selected.clone() {
+                Some(id) => {
+                    self.history.record(&self.project);
+                    if let Some(clip) = self.project.place(&id, None, self.playhead) {
+                        self.timeline.selection = vec![clip];
+                        self.edited();
+                    }
+                }
+                None => self.toasts.push("Pick a file in Media first (Page Up and Page Down)".into()),
+            },
+            Cmd::FindMedia => self.focus_media_search = true,
+            Cmd::Projects => self.show_projects = !self.show_projects,
+            Cmd::NewProject => self.open(Project::new("Untitled cut")),
+            Cmd::Export => {
+                if self.export.is_none() {
+                    self.start_export(ctx);
+                } else {
+                    self.toasts.push("An export is already running".into());
+                }
+            }
+            Cmd::Queue => self.show_deliver = !self.show_deliver,
+            Cmd::Shape(i) => self.set_shape(i),
+            Cmd::EvenLoudness => {
+                self.history.record(&self.project);
+                self.project.even_loudness = !self.project.even_loudness;
+                self.toasts.push(if self.project.even_loudness { "Even loudness on: exports play at -14 LUFS".into() } else { "Even loudness off".into() });
+                self.edited();
+            }
+            Cmd::NextFormat => {
+                let all = ExportFormat::ALL;
+                let at = all.iter().position(|f| *f == self.project.export_format).unwrap_or(0);
+                self.history.record(&self.project);
+                self.project.export_format = all[(at + 1) % all.len()];
+                self.toasts.push(format!("Export makes {}", self.project.export_format.label()));
+                self.edited();
+            }
+            Cmd::Scopes => self.preview.scopes.on = !self.preview.scopes.on,
+            Cmd::Boss => {
+                if self.boss_running.is_none() {
+                    self.start_boss();
+                }
+            }
+            Cmd::Commands => self.palette = Some(Palette::default()),
         }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::End)) {
-            self.seek(self.project.duration());
+    }
+
+    /// The topmost clip under the playhead on a track that isn't locked.
+    fn clips_in_hand_at_playhead(&self) -> Option<String> {
+        let t = self.playhead;
+        self.project
+            .tracks
+            .iter()
+            .filter(|track| !track.locked)
+            .find_map(|track| track.clips.iter().find(|c| c.start <= t && t < c.end()))
+            .map(|c| c.id.clone())
+    }
+
+    /// The Commands window: every command with its keys, searchable; arrows pick, Enter runs, Escape closes.
+    fn commands_window(&mut self, ui: &mut Ui) {
+        let Some(palette) = self.palette.as_mut() else {
+            return;
+        };
+        let (up, down, enter, escape) = ui.input_mut(|i| {
+            (
+                i.consume_key(Modifiers::NONE, Key::ArrowUp),
+                i.consume_key(Modifiers::NONE, Key::ArrowDown),
+                i.consume_key(Modifiers::NONE, Key::Enter),
+                i.consume_key(Modifiers::NONE, Key::Escape),
+            )
+        });
+        let found = keys::search(&palette.query);
+        if down {
+            palette.at = (palette.at + 1).min(found.len().saturating_sub(1));
+        }
+        if up {
+            palette.at = palette.at.saturating_sub(1);
+        }
+        palette.at = palette.at.min(found.len().saturating_sub(1));
+        let mut chosen = (enter && !found.is_empty()).then(|| found[palette.at].cmd);
+        let pane = if self.pane.is_positive() { self.pane } else { ui.ctx().content_rect() };
+        let mut close = escape;
+        // Dims StreamCuts' pane only: the rest of Canopy stays usable.
+        let backdrop = egui::Area::new(ui.scope_id().with("commands-backdrop"))
+            .order(egui::Order::Middle)
+            .fixed_pos(pane.min)
+            .constrain(false)
+            .show(ui.ctx(), |ui| {
+                ui.painter().rect_filled(pane, 10.0, Color32::from_black_alpha(110));
+                ui.allocate_response(pane.size(), Sense::click())
+            })
+            .inner;
+        close |= backdrop.clicked();
+        let width = (pane.width() - 40.0).clamp(280.0, 560.0);
+        let mut search_id = None;
+        egui::Area::new(ui.scope_id().with("commands"))
+            .order(egui::Order::Foreground)
+            .pivot(Align2::CENTER_TOP)
+            .fixed_pos(pos2(pane.center().x, pane.top() + 40.0))
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_width(width);
+                    ui.label(egui::RichText::new("Commands").font(font::display(18.0)));
+                    let search = ui.add(
+                        egui::TextEdit::singleline(&mut palette.query)
+                            .hint_text("Type to find a command or a key")
+                            .desired_width(f32::INFINITY),
+                    );
+                    search_id = Some(search.id);
+                    if !palette.opened {
+                        search.request_focus();
+                        palette.opened = true;
+                    }
+                    if search.changed() {
+                        palette.at = 0;
+                    }
+                    ui.label(canopy_ui::muted("↑ ↓ pick · Enter runs · Esc closes · Tab and Enter work in any menu or window"));
+                    ui.add_space(4.0);
+                    egui::ScrollArea::vertical().max_height((pane.height() - 160.0).max(160.0)).show(ui, |ui| {
+                        let mut group = "";
+                        for (i, command) in found.iter().enumerate() {
+                            if command.group != group {
+                                group = command.group;
+                                ui.add_space(4.0);
+                                ui.label(egui::RichText::new(group).font(font::ui(12.0)).color(color::INK_MUTED));
+                            }
+                            let (rect, row) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::click());
+                            let on = i == palette.at;
+                            if on || row.hovered() {
+                                ui.painter().rect_filled(rect, 6, if on { color::VEIL_STRONG } else { color::VEIL_HOVER });
+                            }
+                            if on && (up || down) {
+                                row.scroll_to_me(None);
+                            }
+                            ui.painter().text(pos2(rect.left() + 8.0, rect.center().y), Align2::LEFT_CENTER, command.name, font::ui(14.0), color::INK);
+                            ui.painter().text(pos2(rect.right() - 8.0, rect.center().y), Align2::RIGHT_CENTER, keys::keys_label(command), font::ui(12.0), color::INK_SOFT);
+                            if row.clicked() {
+                                chosen = Some(command.cmd);
+                            }
+                        }
+                        if found.is_empty() {
+                            ui.label(canopy_ui::muted("Nothing matches."));
+                        }
+                    });
+                });
+            });
+        // Closing hands the keyboard back at once, or the next key press would still go to the search box.
+        if chosen.is_some() || close {
+            if let Some(id) = search_id {
+                ui.ctx().memory_mut(|m| m.surrender_focus(id));
+            }
+        }
+        if let Some(cmd) = chosen {
+            self.palette = None;
+            if cmd != Cmd::Commands {
+                let ctx = ui.ctx().clone();
+                self.run(cmd, &ctx);
+            }
+        } else if close {
+            self.palette = None;
+        }
+    }
+
+    /// The Clip menu's bigger actions, for the menu and the keyboard alike.
+    fn clip_op(&mut self, id: &str, op: ClipOp) {
+        let Some(clip) = self.project.clip(id).cloned() else {
+            return;
+        };
+        let media = self.project.media(&clip.media_id).cloned();
+        let path = media.as_ref().map(|m| m.path.clone());
+        let video = media.as_ref().is_some_and(|m| m.kind == MediaKind::Video);
+        let sound = media.as_ref().is_some_and(|m| m.has_audio) && !self.project.sounds_elsewhere(&clip);
+        match op {
+            ClipOp::Proxy(true) => {
+                if !video {
+                    return self.toasts.push("Proxies are for video clips".into());
+                }
+                if self.proxy_jobs.contains(&clip.media_id) {
+                    return;
+                }
+                match path.as_deref().and_then(|p| self.proxy_entry(p)) {
+                    Some(output) => {
+                        self.proxy_jobs.push(clip.media_id.clone());
+                        self.worker.send(Job::Proxy { media_id: clip.media_id.clone(), path: path.unwrap(), output });
+                        self.toasts.push("Making an editing proxy; long videos take a while".into());
+                    }
+                    None => self.toasts.push("Couldn't read the video to make a proxy".into()),
+                }
+            }
+            ClipOp::Proxy(false) => match self.preview.proxies.remove(&clip.media_id) {
+                Some(file) => {
+                    // Stop playing from it before deleting it.
+                    self.reset_preview();
+                    if std::fs::remove_file(&file).is_err() {
+                        self.toasts.push(format!("Couldn't delete the proxy; it's at {}", file.display()));
+                    }
+                }
+                None => self.toasts.push("This video has no editing proxy".into()),
+            },
+            ClipOp::Loudness(normalize) => {
+                let Some(path) = path.filter(|_| sound) else {
+                    return self.toasts.push("This clip has no sound of its own".into());
+                };
+                self.worker.send(Job::Loudness { clip: clip.id.clone(), path, from: clip.source_in, length: clip.source_length(), normalize });
+                self.toasts.push("Measuring loudness…".into());
+            }
+            ClipOp::Scenes => {
+                let Some(path) = path.filter(|_| video) else {
+                    return self.toasts.push("Scene detection is for video clips".into());
+                };
+                if self.scene_jobs.contains(&clip.media_id) {
+                    return;
+                }
+                self.scene_jobs.push(clip.media_id.clone());
+                self.worker.send(Job::Scenes { media_id: clip.media_id.clone(), path });
+                self.toasts.push("Finding scene changes; long videos take a while".into());
+            }
+            ClipOp::Reframe => {
+                let Some(path) = path.filter(|_| video) else {
+                    return self.toasts.push("Auto-reframe is for video clips".into());
+                };
+                if self.focus_jobs.contains(&clip.id) {
+                    return;
+                }
+                self.focus_jobs.push(clip.id.clone());
+                self.worker.send(Job::Focus { clip: clip.id.clone(), path, from: clip.source_in, length: clip.source_length() });
+                self.toasts.push("Following the action; long clips take a while".into());
+            }
+            ClipOp::Link(detach) => {
+                let was = self.project.clone();
+                let done = if detach {
+                    video && sound && self.project.linked(&clip.id).is_none() && self.project.detach_sound(&clip.id).is_some()
+                } else {
+                    self.project.unlink(&clip.id)
+                };
+                if done {
+                    self.history.record(&was);
+                    self.edited();
+                } else {
+                    self.toasts.push(if detach { "Only a video clip with its own sound can detach it".into() } else { "This clip isn't linked".into() });
+                }
+            }
+            ClipOp::Extend(before, seconds) => {
+                if media.as_ref().is_some_and(|m| m.kind == MediaKind::Image) {
+                    return self.toasts.push("A picture has no more footage to show".into());
+                }
+                let was = self.project.clone();
+                let grown = if before { self.project.extend_start(&clip.id, seconds) } else { self.project.extend_end(&clip.id, seconds) };
+                if grown > 0.0 {
+                    self.history.record(&was);
+                    self.edited();
+                } else {
+                    self.toasts.push(if before { "That's the start of its video".into() } else { "That's the end of its video".into() });
+                }
+            }
+            ClipOp::Ungroup => {
+                let was = self.project.clone();
+                if self.project.ungroup(&clip.id) {
+                    self.history.record(&was);
+                    self.edited();
+                } else {
+                    self.toasts.push("This clip isn't grouped".into());
+                }
+            }
         }
     }
 
@@ -745,25 +1393,12 @@ impl StreamCuts {
                 self.edited();
             }
             let import = if narrow {
-                icon_button(ui, Icon::Plus, "Import", false)
+                icon_button(ui, Icon::Plus, "Import (Ctrl+I)", false)
             } else {
-                quiet_button(ui, "Import", Some(Icon::Plus))
+                quiet_button(ui, "Import", Some(Icon::Plus)).on_hover_text("Ctrl+I")
             };
             if import.clicked() {
-                if let Some(files) = rfd::FileDialog::new()
-                    .set_title("Import media")
-                    .add_filter(
-                        "Video, pictures and sound",
-                        &[
-                            "mp4", "mov", "mkv", "webm", "avi", "m4v", "png", "jpg", "jpeg",
-                            "webp", "gif", "mp3", "wav", "m4a", "aac", "flac", "ogg",
-                        ],
-                    )
-                    .pick_files()
-                {
-                    let at = self.project.duration();
-                    self.import(files, at, None);
-                }
+                self.import_dialog();
             }
             let boss = if narrow {
                 icon_button(
@@ -799,13 +1434,10 @@ impl StreamCuts {
                 }
             }
             if let Some(i) = shape {
-                self.history.record(&self.project);
-                (_, self.project.width, self.project.height) = SHAPES[i];
-                self.reset_preview();
-                self.edited();
+                self.set_shape(i);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if primary_button(ui, "Export", Mood::Ember).clicked() && self.export.is_none() {
+                if primary_button(ui, "Export", Mood::Ember).on_hover_text("Ctrl+E").clicked() && self.export.is_none() {
                     self.start_export(ui.ctx());
                 }
                 let waiting = self
@@ -819,15 +1451,15 @@ impl StreamCuts {
                     "Queue".into()
                 };
                 if quiet_button(ui, &label, None)
-                    .on_hover_text("Render with presets, one after another, while you keep editing")
+                    .on_hover_text("Render with presets, one after another, while you keep editing (Ctrl+Shift+E)")
                     .clicked()
                 {
                     self.show_deliver = !self.show_deliver;
                 }
                 let projects = if narrow {
-                    icon_button(ui, Icon::Project, "Projects", self.show_projects)
+                    icon_button(ui, Icon::Project, "Projects (Ctrl+O)", self.show_projects)
                 } else {
-                    quiet_button(ui, "Projects", Some(Icon::Project))
+                    quiet_button(ui, "Projects", Some(Icon::Project)).on_hover_text("Ctrl+O")
                 };
                 if projects.clicked() {
                     self.show_projects = !self.show_projects;
@@ -1053,8 +1685,11 @@ impl StreamCuts {
         let searching = !self.media_search.trim().is_empty();
         ui.horizontal(|ui| {
             let width = ui.available_width() - if searching { 76.0 } else { 0.0 };
-            ui.add(egui::TextEdit::singleline(&mut self.media_search).hint_text("Search: words, #tag, 3*").desired_width(width))
-                .on_hover_text("Words match names, notes and tags; #tag needs that tag; 3* needs three stars or more");
+            let search = ui.add(egui::TextEdit::singleline(&mut self.media_search).hint_text("Search: words, #tag, 3*  (Ctrl+F)").desired_width(width))
+                .on_hover_text("Words match names, notes and tags; #tag needs that tag; 3* needs three stars or more. Enter or Esc goes back to editing.");
+            if std::mem::take(&mut self.focus_media_search) {
+                search.request_focus();
+            }
             if searching && ui.small_button("Save bin").on_hover_text("Keep this search as a smart bin").clicked() {
                 let query = self.media_search.trim().to_owned();
                 if !self.project.smart_bins.iter().any(|bin| bin.query == query) {
@@ -1113,12 +1748,17 @@ impl StreamCuts {
         if shown.is_empty() {
             ui.label(egui::RichText::new("Nothing matches this search.").color(color::INK_MUTED));
         }
+        let scroll_to = self.media_scroll_to.take();
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             for media in shown {
                 let missing = !media.path.is_file();
                 let used = self.project.tracks.iter().any(|t| t.clips.iter().any(|c| c.media_id == media.id));
                 // The row takes clicks and drags itself (see `canopy_ui::drag_source`).
                 let (rect, row) = ui.allocate_exact_size(vec2(ui.available_width(), 46.0), Sense::click_and_drag());
+                // Picked with Page Up or Page Down: bring it into view.
+                if scroll_to.as_deref() == Some(media.id.as_str()) {
+                    row.scroll_to_me(Some(egui::Align::Center));
+                }
                 let painter = ui.painter();
                 if self.media_selected.as_deref() == Some(media.id.as_str()) {
                     painter.rect(rect, 8, color::VEIL_STRONG, egui::Stroke::new(1.5, color::SUN), egui::StrokeKind::Inside);
@@ -1768,14 +2408,14 @@ impl StreamCuts {
             if icon_button(
                 ui,
                 Icon::Magnet,
-                "Snap to clips and the playhead",
+                "Snap to clips and the playhead (N)",
                 self.timeline.snap,
             )
             .clicked()
             {
                 self.timeline.snap = !self.timeline.snap;
             }
-            if icon_button(ui, Icon::Plus, "Add a video track", false).clicked() {
+            if icon_button(ui, Icon::Plus, "Add a video track (Ctrl+T)", false).clicked() {
                 self.history.record(&self.project);
                 self.project.add_track(crate::project::TrackKind::Video);
                 self.edited();
@@ -1783,7 +2423,7 @@ impl StreamCuts {
             let label = if self.transcribing > 0 {
                 "Making captions…"
             } else {
-                "Make captions from speech (the selected clips, or every clip with sound)"
+                "Make captions from speech, the selected clips or every clip with sound (Alt+C)"
             };
             if icon_button(ui, Icon::Captions, label, self.transcribing > 0).clicked()
                 && self.transcribing == 0
@@ -1797,7 +2437,7 @@ impl StreamCuts {
                         .color(color::INK_MUTED),
                 );
             }
-            if icon_button(ui, Icon::Text, "Add a title at the playhead", false).clicked() {
+            if icon_button(ui, Icon::Text, "Add a title at the playhead (T)", false).clicked() {
                 self.history.record(&self.project);
                 let id = self.project.add_title(self.playhead);
                 self.timeline.selection = vec![id];
@@ -1808,10 +2448,10 @@ impl StreamCuts {
             self.caption_editor(ui);
             self.title_editor(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if icon_button(ui, Icon::ZoomIn, "Zoom in (Ctrl+wheel)", false).clicked() {
+                if icon_button(ui, Icon::ZoomIn, "Zoom in (+, or Ctrl+wheel)", false).clicked() {
                     self.timeline.pps = (self.timeline.pps * 1.5).min(600.0);
                 }
-                if icon_button(ui, Icon::ZoomOut, "Zoom out (Ctrl+wheel)", false).clicked() {
+                if icon_button(ui, Icon::ZoomOut, "Zoom out (−, or Ctrl+wheel)", false).clicked() {
                     self.timeline.pps = (self.timeline.pps / 1.5).max(2.0);
                 }
             });
@@ -1885,8 +2525,10 @@ impl StreamCuts {
         // Some((true, s)) shows `s` more seconds of footage before the clip, Some((false, s)) after it.
         let mut extend = None;
         let mut ungroup = false;
-        egui::containers::menu::MenuButton::new(egui::RichText::new("Clip").font(font::ui(13.0))).config(stays_open()).ui(ui, |ui| {
+        let focus_first = std::mem::take(&mut self.focus_clip_menu);
+        let (menu_button, _) = egui::containers::menu::MenuButton::new(egui::RichText::new("Clip").font(font::ui(13.0))).config(stays_open()).ui(ui, |ui| {
             ui.set_min_width(230.0);
+            ui.label(canopy_ui::muted("Tab and Shift+Tab move through this menu; arrows change a number."));
             if kind != MediaKind::Image {
                 // A clip is a window on its whole video: it can always show more of what came before or after.
                 ui.label(canopy_ui::muted("Show more of the video"));
@@ -1976,7 +2618,11 @@ impl StreamCuts {
             }
             egui::Grid::new("clip-settings").num_columns(2).spacing(vec2(10.0, 8.0)).show(ui, |ui| {
                 ui.label("Fade in");
-                ui.add(egui::DragValue::new(&mut changed.fade_in).range(0.0..=longest).speed(0.02).fixed_decimals(2).suffix(" s"));
+                let fade_in = ui.add(egui::DragValue::new(&mut changed.fade_in).range(0.0..=longest).speed(0.02).fixed_decimals(2).suffix(" s"));
+                // Opened with Enter: the keyboard starts here.
+                if focus_first {
+                    fade_in.request_focus();
+                }
                 ui.end_row();
                 ui.label("Fade out");
                 ui.add(egui::DragValue::new(&mut changed.fade_out).range(0.0..=longest).speed(0.02).fixed_decimals(2).suffix(" s"));
@@ -2152,103 +2798,23 @@ impl StreamCuts {
         if !ui.input(|i| i.pointer.any_down()) {
             self.adjusting = false;
         }
-        match (proxy, media_path.clone()) {
-            (Some(true), Some(path)) => match self.proxy_entry(&path) {
-                Some(output) => {
-                    self.proxy_jobs.push(clip.media_id.clone());
-                    self.worker.send(Job::Proxy {
-                        media_id: clip.media_id.clone(),
-                        path,
-                        output,
-                    });
-                    self.toasts
-                        .push("Making an editing proxy; long videos take a while".into());
-                }
-                None => self
-                    .toasts
-                    .push("Couldn't read the video to make a proxy".into()),
-            },
-            (Some(false), _) => {
-                if let Some(file) = self.preview.proxies.remove(&clip.media_id) {
-                    // Stop playing from it before deleting it.
-                    self.reset_preview();
-                    if std::fs::remove_file(&file).is_err() {
-                        self.toasts.push(format!(
-                            "Couldn't delete the proxy; it's at {}",
-                            file.display()
-                        ));
-                    }
-                }
-            }
-            _ => {}
+        // Enter (the ClipMenu command) opens the menu; the next frame puts the keyboard on its first field.
+        if std::mem::take(&mut self.open_clip_menu) {
+            egui::Popup::open_id(ui.ctx(), egui::Popup::default_response_id(&menu_button));
+            self.focus_clip_menu = true;
         }
-        if let (Some(normalize), Some(path)) = (loudness, media_path.clone()) {
-            self.worker.send(Job::Loudness {
-                clip: clip.id.clone(),
-                path,
-                from: clip.source_in,
-                length: clip.source_length(),
-                normalize,
-            });
-            self.toasts.push("Measuring loudness…".into());
-        }
-        if let (true, Some(path)) = (find_scenes, media_path) {
-            self.scene_jobs.push(clip.media_id.clone());
-            self.worker.send(Job::Scenes {
-                media_id: clip.media_id.clone(),
-                path,
-            });
-            self.toasts
-                .push("Finding scene changes; long videos take a while".into());
-        }
-        if let (true, Some(path)) = (
-            reframe,
-            self.project.media(&clip.media_id).map(|m| m.path.clone()),
-        ) {
-            self.focus_jobs.push(clip.id.clone());
-            self.worker.send(Job::Focus {
-                clip: clip.id.clone(),
-                path,
-                from: clip.source_in,
-                length: clip.source_length(),
-            });
-            self.toasts
-                .push("Following the action; long clips take a while".into());
-        }
-        if let Some(detach) = link {
-            self.history.record(&self.project);
-            let done = if detach {
-                self.project.detach_sound(&clip.id).is_some()
-            } else {
-                self.project.unlink(&clip.id)
-            };
-            if done {
-                self.edited();
-            }
-        }
-        if let Some((before, seconds)) = extend {
-            let was = self.project.clone();
-            let grown = if before {
-                self.project.extend_start(&clip.id, seconds)
-            } else {
-                self.project.extend_end(&clip.id, seconds)
-            };
-            if grown > 0.0 {
-                self.history.record(&was);
-                self.edited();
-            } else {
-                self.toasts.push(if before {
-                    "That's the start of its video".into()
-                } else {
-                    "That's the end of its video".into()
-                });
-            }
-        }
-        if ungroup {
-            self.history.record(&self.project);
-            if self.project.ungroup(&clip.id) {
-                self.edited();
-            }
+        let _ = media_path;
+        let ops = [
+            proxy.map(ClipOp::Proxy),
+            loudness.map(ClipOp::Loudness),
+            find_scenes.then_some(ClipOp::Scenes),
+            reframe.then_some(ClipOp::Reframe),
+            link.map(ClipOp::Link),
+            extend.map(|(before, seconds)| ClipOp::Extend(before, seconds)),
+            ungroup.then_some(ClipOp::Ungroup),
+        ];
+        for op in ops.into_iter().flatten() {
+            self.clip_op(&clip.id, op);
         }
     }
 
@@ -2684,6 +3250,7 @@ impl StreamCuts {
 impl CanopyApp for StreamCuts {
     fn ui(&mut self, ui: &mut Ui, host: &mut dyn Host) {
         let ctx = ui.ctx().clone();
+        self.pane = ui.max_rect();
         self.drain_worker(&ctx);
         for toast in self.toasts.drain(..) {
             host.toast(toast);
@@ -2796,6 +3363,7 @@ impl CanopyApp for StreamCuts {
                 )
             })
             .inner;
+        self.lanes_width = lanes.width();
         if self.clock.playing {
             self.timeline.follow(self.playhead, lanes.width());
         }
@@ -2821,6 +3389,7 @@ impl CanopyApp for StreamCuts {
         self.render_next(&ctx);
         self.deliver_window(ui);
         self.export_window(ui, host);
+        self.commands_window(ui);
     }
 
     fn receive(&mut self, files: Vec<SharedFile>, _host: &mut dyn Host) -> Receipt {
@@ -3016,4 +3585,121 @@ fn star(painter: &egui::Painter, center: egui::Pos2, radius: f32, fill: Color32)
 fn stays_open() -> egui::containers::menu::MenuConfig {
     egui::containers::menu::MenuConfig::new()
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+}
+
+#[cfg(test)]
+mod keyboard_tests {
+    use super::*;
+    use crate::project::{Attributes, Media, TrackKind};
+
+    struct TestHost(Vec<String>);
+    impl Host for TestHost {
+        fn toast(&mut self, text: String) {
+            self.0.push(text);
+        }
+        fn exported(&mut self, _: PathBuf) {}
+    }
+
+    fn key(key: Key, modifiers: Modifiers) -> Vec<egui::Event> {
+        vec![egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }]
+    }
+
+    fn frame(app: &mut StreamCuts, ctx: &egui::Context, host: &mut TestHost, events: Vec<egui::Event>) {
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1400.0, 900.0))),
+            events,
+            ..Default::default()
+        };
+        ctx.run_ui(input, |ui| app.ui(ui, host)).textures_delta.clear();
+    }
+
+    fn start(app: &StreamCuts, id: &str) -> f64 {
+        app.project.clip(id).unwrap().start
+    }
+
+    #[test]
+    fn the_whole_edit_works_from_the_keyboard() {
+        let dir = std::env::temp_dir().join(format!("streamcuts-keys-{}", std::process::id()));
+        let place = Place {
+            space: None,
+            projects_dir: dir.join("projects"),
+            data_dir: dir.join("data"),
+            exports_dir: dir.join("exports"),
+        };
+        let ctx = egui::Context::default();
+        let mut app = StreamCuts::new(place, &ctx);
+        let mut project = Project::new("Keys");
+        let media = project.add_media(Media {
+            id: "m".into(),
+            path: dir.join("missing.mp4"),
+            name: "m".into(),
+            kind: MediaKind::Video,
+            duration: 4.0,
+            width: 1920,
+            height: 1080,
+            has_audio: true,
+            frame_rate: 30.0,
+            attributes: Attributes::default(),
+        });
+        let first = project.place(&media, Some(0), 0.0).unwrap();
+        let second = project.place(&media, Some(0), 4.0).unwrap();
+        project.add_track(TrackKind::Video);
+        let lower = project.tracks.iter().rposition(|t| t.kind == TrackKind::Video).unwrap();
+        app.open(project);
+        let mut host = TestHost(Vec::new());
+        frame(&mut app, &ctx, &mut host, Vec::new());
+
+        // C picks the clip under the playhead; ] the one after, bringing the playhead to it.
+        app.playhead = 1.0;
+        frame(&mut app, &ctx, &mut host, key(Key::C, Modifiers::NONE));
+        assert_eq!(app.timeline.selection, [first.clone()]);
+        frame(&mut app, &ctx, &mut host, key(Key::CloseBracket, Modifiers::NONE));
+        assert_eq!(app.timeline.selection, [second.clone()]);
+        assert!((app.playhead - 4.0).abs() < 1e-9);
+
+        // Alt+→ moves it a frame later; Alt+↓ moves it to the track below.
+        frame(&mut app, &ctx, &mut host, key(Key::ArrowRight, Modifiers::ALT));
+        assert!((start(&app, &second) - (4.0 + 1.0 / 30.0)).abs() < 1e-6);
+        frame(&mut app, &ctx, &mut host, key(Key::ArrowDown, Modifiers::ALT));
+        assert_eq!(app.project.find(&second).unwrap().track, lower);
+
+        // F fades it in and out; Ctrl+Z undoes that, and only that.
+        frame(&mut app, &ctx, &mut host, key(Key::F, Modifiers::NONE));
+        assert!(app.project.clip(&second).unwrap().fade_in > 0.0);
+        frame(&mut app, &ctx, &mut host, key(Key::Z, Modifiers::COMMAND));
+        assert_eq!(app.project.clip(&second).unwrap().fade_in, 0.0);
+        assert_eq!(app.project.find(&second).unwrap().track, lower);
+
+        // Enter opens the Clip menu with the keyboard on its first field; Escape leaves it.
+        frame(&mut app, &ctx, &mut host, key(Key::Enter, Modifiers::NONE));
+        frame(&mut app, &ctx, &mut host, Vec::new());
+        frame(&mut app, &ctx, &mut host, Vec::new());
+        assert!(egui::Popup::is_any_open(&ctx), "the Clip menu is open");
+        assert!(ctx.memory(|m| m.focused().is_some()), "a field in it has the keyboard");
+        // While it does, plain keys type into it instead of editing: S doesn't split.
+        let clips = app.project.tracks.iter().map(|t| t.clips.len()).sum::<usize>();
+        frame(&mut app, &ctx, &mut host, key(Key::S, Modifiers::NONE));
+        assert_eq!(app.project.tracks.iter().map(|t| t.clips.len()).sum::<usize>(), clips);
+        frame(&mut app, &ctx, &mut host, key(Key::Escape, Modifiers::NONE));
+        frame(&mut app, &ctx, &mut host, Vec::new());
+        assert!(!ctx.memory(|m| m.focused().is_some()));
+        assert!(!egui::Popup::is_any_open(&ctx), "Escape closes the menu");
+        assert_eq!(app.timeline.selection, [second.clone()], "and keeps the clip picked");
+
+        // F1 opens Commands; typing finds one, Enter runs it.
+        let snap = app.timeline.snap;
+        frame(&mut app, &ctx, &mut host, key(Key::F1, Modifiers::NONE));
+        assert!(app.palette.is_some());
+        frame(&mut app, &ctx, &mut host, Vec::new());
+        frame(&mut app, &ctx, &mut host, vec![egui::Event::Text("snapping".into())]);
+        frame(&mut app, &ctx, &mut host, key(Key::Enter, Modifiers::NONE));
+        assert!(app.palette.is_none());
+        assert_eq!(app.timeline.snap, !snap);
+
+        // Delete removes the picked clip.
+        app.timeline.selection = vec![first.clone()];
+        frame(&mut app, &ctx, &mut host, key(Key::Delete, Modifiers::NONE));
+        assert!(app.project.clip(&first).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

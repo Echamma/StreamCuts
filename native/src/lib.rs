@@ -8,6 +8,7 @@ pub mod captions;
 pub mod export;
 pub mod ffmpeg;
 pub mod filmstrip;
+pub mod keys;
 pub mod preview;
 pub mod project;
 pub mod scopes;
