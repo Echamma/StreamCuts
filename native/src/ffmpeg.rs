@@ -462,15 +462,107 @@ pub fn crossfade_frames(
     progress: f32,
     transition: Transition,
 ) -> Frame {
+    let p = progress.clamp(0.0, 1.0);
+    if outgoing.size != incoming.size {
+        return blend_frames(outgoing, incoming, p);
+    }
+    let [w, h] = incoming.size;
+    let solid = |value: u8| Frame {
+        time: incoming.time,
+        size: incoming.size,
+        rgba: incoming.rgba.chunks_exact(4).flat_map(|px| [value, value, value, px[3]]).collect(),
+    };
     match transition {
-        Transition::Dissolve => blend_frames(outgoing, incoming, progress),
+        Transition::Dissolve => blend_frames(outgoing, incoming, p),
         Transition::BlurThrough => {
             let sigma = BLUR_THROUGH * incoming.size[1] as f32;
-            let leaving = blend_frames(outgoing, &blurred(outgoing, sigma), progress);
-            let arriving = blend_frames(incoming, &blurred(incoming, sigma), 1.0 - progress);
-            blend_frames(&leaving, &arriving, progress)
+            let leaving = blend_frames(outgoing, &blurred(outgoing, sigma), p);
+            let arriving = blend_frames(incoming, &blurred(incoming, sigma), 1.0 - p);
+            blend_frames(&leaving, &arriving, p)
+        }
+        // Through a color, as FFmpeg's fadewhite and fadeblack: the outgoing picture is gone into the color early on,
+        // and the incoming one comes out of it gradually.
+        Transition::DipToWhite | Transition::DipToBlack => {
+            let color = solid(if transition == Transition::DipToWhite { 255 } else { 0 });
+            let smoothstep = |edge0: f32, edge1: f32, x: f32| {
+                let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+                t * t * (3.0 - 2.0 * t)
+            };
+            let q = 1.0 - p;
+            let leaving = blend_frames(outgoing, &color, 1.0 - smoothstep(0.8, 1.0, q));
+            let arriving = blend_frames(&color, incoming, 1.0 - smoothstep(0.2, 1.0, q));
+            blend_frames(&leaving, &arriving, p)
+        }
+        // Both pictures in blocks, biggest halfway, while one dissolves into the other.
+        Transition::Pixelate => {
+            let block = 1 + ((1.0 - (2.0 * p - 1.0).abs()) * h as f32 / 18.0) as usize;
+            blend_frames(&pixelated(outgoing, block), &pixelated(incoming, block), p)
+        }
+        // The rest bring the incoming picture in over the outgoing one: how much of it shows at each pixel (its
+        // alpha), and from where in it (a slide moves it in from a side).
+        _ => {
+            let (wf, hf) = (w as f32, h as f32);
+            let diagonal = (wf * wf + hf * hf).sqrt() / 2.0;
+            let mut rgba = outgoing.rgba.clone();
+            for y in 0..h {
+                for x in 0..w {
+                    let (xf, yf) = (x as f32 + 0.5, y as f32 + 0.5);
+                    let (alpha, sx, sy): (f32, f32, f32) = match transition {
+                        Transition::WipeLeft => ((xf >= wf * (1.0 - p)) as u8 as f32, xf, yf),
+                        Transition::WipeRight => ((xf < wf * p) as u8 as f32, xf, yf),
+                        Transition::WipeUp => ((yf >= hf * (1.0 - p)) as u8 as f32, xf, yf),
+                        Transition::WipeDown => ((yf < hf * p) as u8 as f32, xf, yf),
+                        Transition::SlideLeft => (1.0, xf - wf * (1.0 - p), yf),
+                        Transition::SlideRight => (1.0, xf + wf * (1.0 - p), yf),
+                        Transition::SlideUp => (1.0, xf, yf - hf * (1.0 - p)),
+                        Transition::SlideDown => (1.0, xf, yf + hf * (1.0 - p)),
+                        Transition::SoftWipe => {
+                            let t = (xf / wf + 2.0 * p - 1.0).clamp(0.0, 1.0);
+                            (t * t * (3.0 - 2.0 * t), xf, yf)
+                        }
+                        Transition::CircleOpen => {
+                            let distance = ((xf - wf / 2.0).powi(2) + (yf - hf / 2.0).powi(2)).sqrt();
+                            // As FFmpeg's circleopen: a wide soft edge growing out from the middle.
+                            let t = (distance / diagonal + (0.5 - p) * 3.0).clamp(0.0, 1.0);
+                            (1.0 - t * t * (3.0 - 2.0 * t), xf, yf)
+                        }
+                        // A hand sweeping round with a soft edge, as FFmpeg's radial.
+                        _ => {
+                            let angle = (xf - wf / 2.0).atan2(yf - hf / 2.0);
+                            let t = (angle + (p - 0.5) * 2.5 * std::f32::consts::PI).clamp(0.0, 1.0);
+                            (t * t * (3.0 - 2.0 * t), xf, yf)
+                        }
+                    };
+                    if alpha <= 0.0 || sx < 0.0 || sy < 0.0 || sx >= wf || sy >= hf {
+                        continue;
+                    }
+                    let from = ((sy as usize) * w + sx as usize) * 4;
+                    let to = (y * w + x) * 4;
+                    for c in 0..3 {
+                        let (a, b) = (rgba[to + c] as f32, incoming.rgba[from + c] as f32);
+                        rgba[to + c] = (a + (b - a) * alpha).round() as u8;
+                    }
+                }
+            }
+            Frame { time: incoming.time, size: incoming.size, rgba }
         }
     }
+}
+
+/// The picture in blocks of `block` pixels, each the color of its top-left pixel.
+fn pixelated(frame: &Frame, block: usize) -> Frame {
+    let [w, h] = frame.size;
+    let mut rgba = frame.rgba.clone();
+    if block > 1 {
+        for y in 0..h {
+            for x in 0..w {
+                let from = ((y / block * block) * w + x / block * block) * 4;
+                let to = (y * w + x) * 4;
+                rgba.copy_within(from..from + 3, to);
+            }
+        }
+    }
+    Frame { time: frame.time, size: frame.size, rgba }
 }
 
 /// A Gaussian-like blur of `sigma` pixels: three box blurs across and three down, so the preview blurs like FFmpeg's

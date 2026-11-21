@@ -745,24 +745,102 @@ pub struct Picture {
     pub effects: Effects,
 }
 
-/// How a crossfade looks, as the web StreamCuts' transitions: a plain dissolve, or both pictures blurring through it
-/// (the outgoing one blurs as it fades out, the incoming one comes into focus as it fades in).
+/// How a crossfade looks: a plain dissolve, both pictures blurring through it (the outgoing one blurs as it fades out,
+/// the incoming one comes into focus as it fades in), or the incoming picture arriving over the outgoing one in a
+/// shape or from a side: wipes, slides, a circle, a clock hand, pixels, or a dip through white or black.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Transition {
     #[default]
     Dissolve,
     BlurThrough,
+    WipeLeft,
+    WipeRight,
+    WipeUp,
+    WipeDown,
+    SlideLeft,
+    SlideRight,
+    SlideUp,
+    SlideDown,
+    SoftWipe,
+    CircleOpen,
+    ClockWipe,
+    Pixelate,
+    DipToWhite,
+    DipToBlack,
 }
 
 impl Transition {
-    pub const ALL: [Transition; 2] = [Transition::Dissolve, Transition::BlurThrough];
+    pub const ALL: [Transition; 16] = [
+        Transition::Dissolve,
+        Transition::BlurThrough,
+        Transition::WipeLeft,
+        Transition::WipeRight,
+        Transition::WipeUp,
+        Transition::WipeDown,
+        Transition::SlideLeft,
+        Transition::SlideRight,
+        Transition::SlideUp,
+        Transition::SlideDown,
+        Transition::SoftWipe,
+        Transition::CircleOpen,
+        Transition::ClockWipe,
+        Transition::Pixelate,
+        Transition::DipToWhite,
+        Transition::DipToBlack,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             Transition::Dissolve => "Dissolve",
             Transition::BlurThrough => "Blur through",
+            Transition::WipeLeft => "Wipe left",
+            Transition::WipeRight => "Wipe right",
+            Transition::WipeUp => "Wipe up",
+            Transition::WipeDown => "Wipe down",
+            Transition::SlideLeft => "Slide in from the right",
+            Transition::SlideRight => "Slide in from the left",
+            Transition::SlideUp => "Slide in from below",
+            Transition::SlideDown => "Slide in from above",
+            Transition::SoftWipe => "Soft wipe",
+            Transition::CircleOpen => "Circle",
+            Transition::ClockWipe => "Clock wipe",
+            Transition::Pixelate => "Pixelate",
+            Transition::DipToWhite => "Flash (dip to white)",
+            Transition::DipToBlack => "Dip to black",
         }
+    }
+
+    /// Its name in project files (and for Codex): "wipe-left", "dip-to-black".
+    pub fn key(self) -> String {
+        serde_json::to_value(self).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default()
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|t| t.key() == key.trim().to_lowercase())
+    }
+
+    /// The FFmpeg `xfade` transition that draws it in exports, on the incoming clip coming in over a transparent
+    /// start (so whatever is under it, the outgoing clip, shows where it hasn't arrived yet). None for the dissolve and
+    /// the blur-through, which fade the clip's alpha.
+    pub fn xfade(self) -> Option<&'static str> {
+        Some(match self {
+            Transition::Dissolve | Transition::BlurThrough => return None,
+            Transition::WipeLeft => "wipeleft",
+            Transition::WipeRight => "wiperight",
+            Transition::WipeUp => "wipeup",
+            Transition::WipeDown => "wipedown",
+            Transition::SlideLeft => "slideleft",
+            Transition::SlideRight => "slideright",
+            Transition::SlideUp => "slideup",
+            Transition::SlideDown => "slidedown",
+            Transition::SoftWipe => "smoothleft",
+            Transition::CircleOpen => "circleopen",
+            Transition::ClockWipe => "radial",
+            Transition::Pixelate => "pixelize",
+            Transition::DipToWhite => "fadewhite",
+            Transition::DipToBlack => "fadeblack",
+        })
     }
 }
 

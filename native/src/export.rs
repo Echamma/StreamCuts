@@ -268,7 +268,21 @@ pub fn arguments(project: &Project, output: &Path) -> Result<Vec<String>, String
                         format!("(1-clip(T/{crossfade_in:.3},0,1))"),
                     );
                 }
-                let fade_in = if crossfade_in > 0.0 {
+                // A wipe, slide, circle and the like: FFmpeg's xfade from a transparent start of the crossfade's length
+                // into the clip, so the clip arrives over the one going out underneath it. A placed (resized) clip
+                // isn't frame-sized, so it dissolves in instead.
+                let xfade = clip
+                    .transition
+                    .xfade()
+                    .filter(|_| crossfade_in > 0.0 && placed.is_none());
+                if let Some(style) = xfade {
+                    chain.push_str(&format!(
+                        ",settb=1/{fps}[c{input}];color=black@0:s={w}x{h}:r={fps}:d={crossfade_in:.3},format=yuva420p,settb=1/{fps}[t{input}];[t{input}][c{input}]xfade=transition={style}:duration={crossfade_in:.3}:offset=0"
+                    ));
+                }
+                let fade_in = if xfade.is_some() {
+                    0.0
+                } else if crossfade_in > 0.0 {
                     crossfade_in
                 } else {
                     clip.fade_in
@@ -1109,6 +1123,81 @@ mod tests {
             pixel[0] > 45 && pixel[2] > 45,
             "both colors should be visible through the blur: {pixel:?}"
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Every wipe, slide and dip renders halfway through as the preview draws it: the same parts of the frame show
+    /// the outgoing red, the incoming blue, white, black or a mix.
+    #[test]
+    fn transitions_render_as_the_preview_draws_them() {
+        use crate::project::Transition;
+        let dir = std::env::temp_dir().join(format!("streamcuts-transitions-{}", new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (red, blue) = (dir.join("red.mp4"), dir.join("blue.mp4"));
+        for (path, color) in [(&red, "red"), (&blue, "blue")] {
+            assert!(command(&ffmpeg())
+                .args(["-v", "error", "-y", "-f", "lavfi", "-i", &format!("color=c={color}:s=64x64:r=30:d=3"), "-pix_fmt", "yuv420p"])
+                .arg(path)
+                .status()
+                .unwrap()
+                .success());
+        }
+        let kind = |px: &[u8]| {
+            let (r, g, b) = (px[0] as i32, px[1] as i32, px[2] as i32);
+            if r > 190 && g > 190 && b > 190 {
+                "white"
+            } else if r < 50 && g < 50 && b < 50 {
+                "black"
+            } else if r > b + 80 {
+                "red"
+            } else if b > r + 80 {
+                "blue"
+            } else {
+                "mix"
+            }
+        };
+        let points = [(10, 10), (54, 10), (10, 54), (54, 54), (40, 22), (22, 40)];
+        let mut checked = 0;
+        for transition in Transition::ALL.into_iter().filter(|t| t.xfade().is_some()) {
+            let mut project = Project::new("Wipes");
+            (project.width, project.height) = (64, 64);
+            let red_id = project.add_media(crate::ffmpeg::probe(&red).unwrap());
+            let blue_id = project.add_media(crate::ffmpeg::probe(&blue).unwrap());
+            let outgoing = project.place(&red_id, None, 0.0).unwrap();
+            project.trim_end(&outgoing, 2.0);
+            let incoming = project.place(&blue_id, None, 2.0).unwrap();
+            project.set_crossfade(&incoming, 1.0);
+            project.clip_mut(&incoming).unwrap().transition = transition;
+            let output = dir.join(format!("{}.mp4", transition.key()));
+            let run = start(&project, &output, egui::Context::default()).unwrap();
+            assert_eq!(run.result.recv().unwrap(), Ok(()), "{transition:?}");
+            let rendered = crate::ffmpeg::still(&output, 2.5, 64, 64, crate::project::Picture::default()).unwrap();
+            let solid = |color: [u8; 4]| crate::ffmpeg::Frame { time: 0.0, size: [64, 64], rgba: color.repeat(64 * 64) };
+            let drawn = crate::ffmpeg::crossfade_frames(&solid([255, 0, 0, 255]), &solid([0, 0, 255, 255]), 0.5, transition);
+            let at = |frame: &crate::ffmpeg::Frame, (x, y): (usize, usize)| kind(&frame.rgba[4 * (y * 64 + x)..][..4]);
+            // Red and blue against each other, and how bright: within a little of each other at every point (a soft
+            // edge's gradient differs by a frame's worth of progress).
+            let measure = |frame: &crate::ffmpeg::Frame, (x, y): (usize, usize)| {
+                let px = &frame.rgba[4 * (y * 64 + x)..][..4];
+                (px[2] as i32 - px[0] as i32, (px[0] as i32 + px[1] as i32 + px[2] as i32) / 3)
+            };
+            for &point in &points {
+                let (e, d) = (measure(&rendered, point), measure(&drawn, point));
+                assert!(
+                    (e.0 - d.0).abs() <= 70 && (e.1 - d.1).abs() <= 50,
+                    "{transition:?} halfway at {point:?}: export {} {e:?}, preview {} {d:?}",
+                    at(&rendered, point),
+                    at(&drawn, point)
+                );
+            }
+            // Before it starts, only the outgoing clip; after it, only the incoming one.
+            let before = crate::ffmpeg::still(&output, 1.9, 64, 64, crate::project::Picture::default()).unwrap();
+            let after = crate::ffmpeg::still(&output, 3.1, 64, 64, crate::project::Picture::default()).unwrap();
+            assert_eq!(at(&before, (32, 32)), "red", "{transition:?} before");
+            assert_eq!(at(&after, (32, 32)), "blue", "{transition:?} after");
+            checked += 1;
+        }
+        assert_eq!(checked, 14);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
