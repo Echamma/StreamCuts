@@ -289,7 +289,7 @@ pub const COMMANDS: &[Command] = &[
     c(Cmd::EvenLoudness, PROJECT, "Even loudness on export, on or off", &[alt(Key::E)]),
     c(Cmd::NextFormat, PROJECT, "Next export format", &[alt(Key::X)]),
     c(Cmd::Scopes, PROJECT, "Video scopes on or off", &[alt(Key::S)]),
-    c(Cmd::Boss, PROJECT, "Boss AI: find shorts in a video", &[alt(Key::B)]),
+    c(Cmd::Boss, PROJECT, "Codex: edit the video with Codex (chat, full edit, shorts)", &[alt(Key::B)]),
     c(Cmd::Commands, PROJECT, "All commands and keys", &[k(Key::F1), ctrl_shift(Key::P), shift(Key::Questionmark), k(Key::Questionmark), shift(Key::Slash)]),
 ];
 

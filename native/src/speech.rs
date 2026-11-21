@@ -27,11 +27,14 @@ pub struct Spoken {
     pub text: String,
 }
 
-/// A media file's words so far, in source seconds, and the stretches they cover.
+/// A media file's words so far, in source seconds, the stretches they cover, and the noises in them: sound with no words
+/// heard (a laugh, a shout, or words the model missed; their text is empty).
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Heard {
     covered: Vec<(f64, f64)>,
     words: Vec<Spoken>,
+    #[serde(default)]
+    noises: Vec<Spoken>,
 }
 
 fn entry(data_dir: &Path, media: &Path) -> Option<PathBuf> {
@@ -234,19 +237,26 @@ fn transcribe_in(
             #[derive(Deserialize)]
             struct Out {
                 words: Vec<(f64, f64, String)>,
+                #[serde(default)]
+                noises: Vec<(f64, f64)>,
             }
             let words: Out = serde_json::from_slice(&std::fs::read(&out).map_err(|e| e.to_string())?)
                 .map_err(|e| format!("The speech model said something unexpected ({e})."))?;
             // Words whose middle is in the piece (the padding's words belong to the pieces either side).
-            known.words.retain(|w| (w.start + w.end) / 2.0 < a || (w.start + w.end) / 2.0 >= b);
-            known.words.extend(words.words.into_iter().filter_map(|(s, e, text)| {
+            let outside = |w: &Spoken| (w.start + w.end) / 2.0 < a || (w.start + w.end) / 2.0 >= b;
+            known.words.retain(outside);
+            known.noises.retain(outside);
+            let inside = |(s, e, text): (f64, f64, String)| {
                 let (s, e) = (from + s, from + e);
                 let middle = (s + e) / 2.0;
                 (middle >= a && middle < b).then_some(Spoken { start: s, end: e, text })
-            }));
+            };
+            known.words.extend(words.words.into_iter().filter_map(inside));
+            known.noises.extend(words.noises.into_iter().map(|(s, e)| (s, e, String::new())).filter_map(inside));
             known.covered.push((a, b));
         }
         known.words.sort_by(|x, y| x.start.total_cmp(&y.start));
+        known.noises.sort_by(|x, y| x.start.total_cmp(&y.start));
         known.covered = merge(known.covered, 0.01);
         if let Some(e) = entry(data_dir, &path) {
             cache::write(&e, &serde_json::to_vec(&known).unwrap());
@@ -257,6 +267,15 @@ fn transcribe_in(
 
 /// The words said on the timeline, in timeline seconds, from what's known (stretches never transcribed are left out).
 pub fn timeline_words(data_dir: &Path, project: &Project, skip: &Path) -> Vec<Spoken> {
+    on_timeline(data_dir, project, skip, |heard| &heard.words)
+}
+
+/// The noises on the timeline (sound with no words heard), in timeline seconds.
+pub fn timeline_noises(data_dir: &Path, project: &Project, skip: &Path) -> Vec<Spoken> {
+    on_timeline(data_dir, project, skip, |heard| &heard.noises)
+}
+
+fn on_timeline(data_dir: &Path, project: &Project, skip: &Path, pick: fn(&Heard) -> &Vec<Spoken>) -> Vec<Spoken> {
     let mut cached: Vec<(PathBuf, Heard)> = Vec::new();
     let mut out: Vec<Spoken> = Vec::new();
     for (clip, media) in speaking_clips(project, skip) {
@@ -265,7 +284,7 @@ pub fn timeline_words(data_dir: &Path, project: &Project, skip: &Path) -> Vec<Sp
         }
         let known = &cached.iter().find(|(p, _)| *p == media.path).unwrap().1;
         let (from, to) = (clip.source_in, clip.source_in + clip.source_length());
-        for w in known.words.iter().filter(|w| (w.start + w.end) / 2.0 >= from && (w.start + w.end) / 2.0 < to) {
+        for w in pick(known).iter().filter(|w| (w.start + w.end) / 2.0 >= from && (w.start + w.end) / 2.0 < to) {
             let at = |s: f64| clip.start + (s.clamp(from, to) - from) / clip.speed;
             let word = Spoken { start: at(w.start), end: at(w.end), text: w.text.clone() };
             // The same footage on two tracks at once (a Short's layers) says each word once.
@@ -346,11 +365,18 @@ mod tests {
                 .into_iter()
                 .map(|(t, w)| Spoken { start: t, end: t + 0.5, text: w.into() })
                 .collect(),
+            noises: vec![
+                Spoken { start: 15.0, end: 16.0, text: String::new() },
+                Spoken { start: 25.0, end: 26.0, text: String::new() },
+            ],
         };
         cache::write(&entry(&dir, &file).unwrap(), &serde_json::to_vec(&known).unwrap());
         let words = timeline_words(&dir, &project, Path::new("Z:/nowhere"));
         let said: Vec<(f64, &str)> = words.iter().map(|w| (w.start, w.text.as_str())).collect();
         assert_eq!(said, [(2.0, "hello"), (9.0, "there"), (12.0, "fast")]);
+        // A noise where the timeline plays is there (in timeline seconds); one in a stretch it doesn't play isn't.
+        let noises: Vec<f64> = timeline_noises(&dir, &project, Path::new("Z:/nowhere")).iter().map(|n| n.start).collect();
+        assert_eq!(noises, [5.0]);
         assert_eq!(to_do(&dir, &wanted, false), 0.0);
         assert_eq!(to_do(&dir, &wanted, true), 20.0);
         // Codex's own additions don't count.

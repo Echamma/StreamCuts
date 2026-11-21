@@ -31,6 +31,9 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
+#[path = "codex_panel.rs"]
+mod codex_panel;
+
 const BIN_WIDTH: f32 = 250.0;
 /// Below this width (half of a split Canopy window) the toolbar folds its text buttons into icons.
 const NARROW: f32 = 780.0;
@@ -62,7 +65,8 @@ pub struct StreamCuts {
     looks: Looks,
     /// Transcriptions still running.
     transcribing: usize,
-    boss_running: Option<String>,
+    /// Codex, the editor: its chat panel and whatever it's working on.
+    codex: codex_panel::CodexPanel,
     /// Media whose scenes are being found.
     scene_jobs: Vec<String>,
     /// Media whose editing proxy is being made.
@@ -236,7 +240,7 @@ impl StreamCuts {
             worker: Worker::new(ctx.clone()),
             looks: Looks::default(),
             transcribing: 0,
-            boss_running: None,
+            codex: Default::default(),
             scene_jobs: Vec::new(),
             proxy_jobs: Vec::new(),
             focus_jobs: Vec::new(),
@@ -500,21 +504,6 @@ impl StreamCuts {
                                 n => format!("{n} scene changes marked"),
                             });
                         }
-                        Err(error) => self.toasts.push(error),
-                    }
-                }
-                Done::Boss { media_id, result } => {
-                    self.boss_running = None;
-                    match result {
-                        Ok(suggestions) if !suggestions.is_empty() => {
-                            self.boss_plan = Some(BossPlan {
-                                media_id,
-                                suggestions,
-                            })
-                        }
-                        Ok(_) => self
-                            .toasts
-                            .push("Boss AI found no shorts in this video".into()),
                         Err(error) => self.toasts.push(error),
                     }
                 }
@@ -1192,11 +1181,7 @@ impl StreamCuts {
                 self.edited();
             }
             Cmd::Scopes => self.preview.scopes.on = !self.preview.scopes.on,
-            Cmd::Boss => {
-                if self.boss_running.is_none() {
-                    self.start_boss();
-                }
-            }
+            Cmd::Boss => self.codex_toggle(),
             Cmd::Commands => self.palette = Some(Palette::default()),
         }
     }
@@ -1621,18 +1606,13 @@ impl StreamCuts {
             if import.clicked() {
                 self.import_dialog();
             }
-            let boss = if narrow {
-                icon_button(
-                    ui,
-                    Icon::Scissors,
-                    "Boss AI: find shorts in a video",
-                    self.boss_running.is_some(),
-                )
+            let codex = if narrow {
+                icon_button(ui, Icon::Text, "Codex: edit with Codex (Alt+B)", self.codex.open)
             } else {
-                quiet_button(ui, "Boss AI", Some(Icon::Scissors))
+                quiet_button(ui, "Codex", Some(Icon::Text)).on_hover_text("Edit with Codex (Alt+B)")
             };
-            if boss.clicked() && self.boss_running.is_none() {
-                self.start_boss();
+            if codex.clicked() {
+                self.codex_toggle();
             }
             let current = SHAPES
                 .iter()
@@ -1716,47 +1696,6 @@ impl StreamCuts {
                 }
             });
         });
-    }
-
-    fn start_boss(&mut self) {
-        if std::env::var_os("GEMINI_API_KEY").is_none()
-            && std::env::var_os("STREAMCUTS_BOSS_RESPONSE").is_none()
-        {
-            self.toasts.push("Set GEMINI_API_KEY to use Boss AI".into());
-            return;
-        }
-        let selected = self
-            .timeline
-            .selection
-            .iter()
-            .find_map(|id| self.project.clip(id))
-            .map(|clip| clip.media_id.as_str());
-        let media = selected
-            .and_then(|id| self.project.media(id))
-            .filter(|m| m.kind == MediaKind::Video)
-            .or_else(|| {
-                self.project
-                    .media
-                    .iter()
-                    .find(|m| m.kind == MediaKind::Video)
-            });
-        let Some(media) = media else {
-            self.toasts.push("Import a video to find shorts".into());
-            return;
-        };
-        if !media.path.is_file() {
-            self.toasts.push(format!("{} is missing", media.name));
-            return;
-        }
-        self.boss_running = Some(media.id.clone());
-        self.worker.send(Job::Boss {
-            media_id: media.id.clone(),
-            path: media.path.clone(),
-            duration: media.duration,
-        });
-        self.toasts.push(
-            "Boss AI is transcribing and finding shorts; long videos can take a while".into(),
-        );
     }
 
     fn boss_window(&mut self, ui: &mut Ui) {
@@ -3482,6 +3421,7 @@ impl CanopyApp for StreamCuts {
         let ctx = ui.ctx().clone();
         self.pane = ui.max_rect();
         self.drain_worker(&ctx);
+        self.codex_poll();
         for toast in self.toasts.drain(..) {
             host.toast(toast);
         }
@@ -3616,6 +3556,7 @@ impl CanopyApp for StreamCuts {
             );
         }
         self.projects_window(ui);
+        self.codex_window(ui);
         self.boss_window(ui);
         self.render_next(&ctx);
         self.deliver_window(ui);

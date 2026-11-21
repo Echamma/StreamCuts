@@ -2,7 +2,7 @@
 //! (`apply`): overlays and sounds where it said, transitions, titles, captions, punch-ins, volume and speed changes,
 //! and the cuts last (latest first, so its times stay right), then a transition on every bare cut of the main video.
 
-use crate::codex::{Kind, Op, Plan};
+use crate::codex::{Kind, Plan};
 use crate::project::{Caption, Media, MediaKind, Placement, Project, TrackKind, Transition, Word, new_id};
 use crate::speech::Spoken;
 use crate::stock::Want;
@@ -264,7 +264,9 @@ pub fn apply(
                 }
             }
             Kind::Title => {
-                let (Some(text), Some(start)) = (op.text.clone().filter(|t| !t.trim().is_empty()), op.start) else {
+                // The text, or (if Codex put it there instead) the query.
+                let text = op.text.clone().or(op.query.clone()).filter(|t| !t.trim().is_empty());
+                let (Some(text), Some(start)) = (text, op.start) else {
                     problem(&mut report, "A title had no text or time.".into());
                     continue;
                 };
@@ -416,7 +418,7 @@ pub fn transitions_on_bare_cuts(project: &mut Project, style: Transition, second
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codex::BareCuts;
+    use crate::codex::{BareCuts, Op};
     use crate::project::Attributes;
 
     fn media(kind: MediaKind, duration: f64, (width, height): (u32, u32)) -> Media {

@@ -1,7 +1,6 @@
 //! Slow work (probing files, thumbnails, preview stills, waveforms) runs on background threads; results come back on
 //! a channel the editor drains every frame.
 
-use crate::boss::{self, Suggestion};
 use crate::ffmpeg::{self, Frame};
 use crate::filmstrip::{self, Film};
 use crate::project::{Caption, Media, Picture};
@@ -65,11 +64,6 @@ pub enum Job {
         speed: f64,
         at: f64,
     },
-    Boss {
-        media_id: String,
-        path: PathBuf,
-        duration: f64,
-    },
     /// Where a video cuts to another scene.
     Scenes {
         media_id: String,
@@ -111,10 +105,6 @@ pub enum Done {
         from: f64,
         to: f64,
         result: Result<Vec<Caption>, String>,
-    },
-    Boss {
-        media_id: String,
-        result: Result<Vec<Suggestion>, String>,
     },
     Scenes {
         media_id: String,
@@ -287,17 +277,6 @@ impl Worker {
                             aside(&finished, &ctx, move || Done::Scenes {
                                 media_id,
                                 result: ffmpeg::scenes(&path, 0.3),
-                            });
-                            continue;
-                        }
-                        Job::Boss {
-                            media_id,
-                            path,
-                            duration,
-                        } => {
-                            aside(&finished, &ctx, move || Done::Boss {
-                                media_id,
-                                result: boss::suggest(&path, duration),
                             });
                             continue;
                         }

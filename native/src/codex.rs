@@ -128,7 +128,7 @@ fn clock(t: f64) -> String {
 
 /// The project as Codex reads it: its tracks top first with every clip, the titles, captions and markers, and what's
 /// said when, all in timeline seconds.
-pub fn describe(project: &Project, words: &[Spoken], sounds: &[String]) -> String {
+pub fn describe(project: &Project, words: &[Spoken], noises: &[Spoken], sounds: &[String]) -> String {
     let mut out = String::new();
     let w = &mut out;
     let _ = writeln!(w, "# The project now");
@@ -211,8 +211,12 @@ pub fn describe(project: &Project, words: &[Spoken], sounds: &[String]) -> Strin
     if words.is_empty() {
         let _ = writeln!(w, "Nothing transcribed.");
     }
-    for (start, end, text) in speech::lines(words) {
-        let _ = writeln!(w, "[{}-{}] {}", clock(start), clock(end), text.trim());
+    // The lines, with the noises (sound but no words heard) among them in time.
+    let mut lines: Vec<(f64, f64, String)> = speech::lines(words).into_iter().map(|(s, e, t)| (s, e, t.trim().to_owned())).collect();
+    lines.extend(noises.iter().map(|n| (n.start, n.end, "(sound, no words heard)".to_owned())));
+    lines.sort_by(|a, b| a.0.total_cmp(&b.0));
+    for (start, end, text) in lines {
+        let _ = writeln!(w, "[{}-{}] {text}", clock(start), clock(end));
     }
     let _ = writeln!(w, "\n## Sounds in the person's sound folder");
     if sounds.is_empty() {
@@ -239,7 +243,7 @@ Answer in the given JSON shape: "reply" (what you did, or the answer to a questi
 - After your operations, every cut on the main video track (two clips meeting) that has no transition and nothing playing above it gets "transition_for_bare_cuts" (a style and seconds, 0.2-1.0), unless that is null. Use it whenever you edit the video; null only when the person says they want no transitions.
 
 # Operations
-- cut: start, end. Takes that stretch out of the whole timeline (every track that isn't locked); what comes after moves up. Cut on the pauses between words, never through a word: use the word times. Use it for dead air, false starts, repeats and boring stretches.
+- cut: start, end. Takes that stretch out of the whole timeline (every track that isn't locked); what comes after moves up. Cut on the pauses between words, never through a word: use the word times. Use it for dead air, false starts, repeats and boring stretches. Lines marked "(sound, no words heard)" have sound the transcript couldn't make out: a laugh, a reaction, or words it missed. They aren't silence: don't cut them unless you're cutting the whole moment they belong to.
 - remove: clip (an id from the lists, a clip or a title). Deletes it.
 - move: clip, start. Moves a clip or title so it starts there.
 - gif: query (2-4 words for GIPHY), sticker (true: a cut-out sticker with no background; false: a rectangular GIF), start, end, x, y, size. Plays it over the video from start to end (it loops).
@@ -489,9 +493,10 @@ mod tests {
             Spoken { start: 1.5, end: 1.9, text: "there".into() },
             Spoken { start: 4.0, end: 4.5, text: "later".into() },
         ];
-        let text = describe(&project, &words, &["boom.mp3".into()]);
+        let noises = vec![Spoken { start: 2.5, end: 3.0, text: String::new() }];
+        let text = describe(&project, &words, &noises, &["boom.mp3".into()]);
         assert!(text.contains(&format!("- clip {clip} \"v.mp4\" 0.00-10.00 (source 0.00-10.00)")), "{text}");
-        assert!(text.contains("[1.00-1.90] hello there\n[4.00-4.50] later"), "{text}");
+        assert!(text.contains("[1.00-1.90] hello there\n[2.50-3.00] (sound, no words heard)\n[4.00-4.50] later"), "{text}");
         assert!(text.contains("boom.mp3"));
     }
 }
