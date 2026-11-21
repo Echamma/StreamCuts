@@ -2,9 +2,11 @@
 
 pub mod app;
 pub mod audio;
+pub mod autoedit;
 pub mod boss;
 pub mod cache;
 pub mod captions;
+pub mod codex;
 pub mod export;
 pub mod ffmpeg;
 pub mod filmstrip;
@@ -12,6 +14,8 @@ pub mod keys;
 pub mod preview;
 pub mod project;
 pub mod scopes;
+pub mod speech;
+pub mod stock;
 pub mod storage;
 pub mod timeline;
 pub mod transcribe;

@@ -2805,6 +2805,86 @@ impl Project {
         removed
     }
 
+    /// Takes the stretch `from`..`to` out of the timeline: on every unlocked track, clips across its ends are cut there
+    /// and what's inside goes, then everything after moves up by its length; titles, captions and markers in it go
+    /// (or are shortened), and those after it move up too. Locked tracks stay as they are. Returns whether anything
+    /// changed.
+    pub fn remove_range(&mut self, from: f64, to: f64) -> bool {
+        let (from, to) = (from.max(0.0), to.min(self.duration()));
+        let length = to - from;
+        if length < 0.01 {
+            return false;
+        }
+        // A clip across the start is cut there (with its partners, so linked halves stay linked).
+        let across: Vec<String> = self
+            .tracks
+            .iter()
+            .filter(|t| !t.locked)
+            .flat_map(|t| t.clips.iter())
+            .filter(|c| c.start < from - 1e-6 && c.end() > from + 1e-6)
+            .map(|c| c.id.clone())
+            .collect();
+        for id in across {
+            if self.clip(&id).is_some_and(|c| c.start < from - 1e-6 && c.end() > from + 1e-6) {
+                self.split(&id, from);
+            }
+        }
+        let mut gone = Vec::new();
+        for track in self.tracks.iter_mut().filter(|t| !t.locked) {
+            for clip in &mut track.clips {
+                // Too close to the start to have been cut there: it ends at the start instead.
+                if clip.start < from - 1e-6 && clip.end() > from + 1e-6 {
+                    clip.duration = from - clip.start;
+                    clip.fade_out = clip.fade_out.min(clip.duration / 2.0);
+                }
+                // From inside the stretch to past its end: it now starts at the end, playing on from there.
+                if clip.start >= from - 1e-6 && clip.start < to - 1e-6 && clip.end() > to + 1e-6 {
+                    let cut = to - clip.start;
+                    clip.source_in += cut * clip.speed;
+                    clip.duration -= cut;
+                    clip.start = to;
+                    clip.fade_in = clip.fade_in.min(clip.duration / 2.0);
+                    clip.crossfade_in = 0.0;
+                    clip.crossfade_from = None;
+                }
+                if clip.start >= from - 1e-6 && clip.end() <= to + 1e-6 {
+                    gone.push(clip.id.clone());
+                }
+            }
+            track.clips.retain(|c| !gone.contains(&c.id));
+            for clip in track.clips.iter_mut().filter(|c| c.start >= to - 1e-6) {
+                clip.start -= length;
+            }
+        }
+        // Text: what's inside goes, what overlaps is shortened, what's after moves up.
+        let squeeze = |start: &mut f64, end: &mut f64| -> bool {
+            let shift = |t: f64| if t >= to { t - length } else if t > from { from } else { t };
+            let (s, e) = (shift(*start), shift(*end));
+            if e - s < 0.05 {
+                return false;
+            }
+            (*start, *end) = (s, e);
+            true
+        };
+        self.titles.retain_mut(|t| squeeze(&mut t.start, &mut t.end));
+        self.captions.retain_mut(|c| {
+            let keep = squeeze(&mut c.start, &mut c.end);
+            if keep {
+                c.words.retain(|w| w.end <= from || w.start >= to);
+                for w in c.words.iter_mut().filter(|w| w.start >= to) {
+                    w.start -= length;
+                    w.end -= length;
+                }
+            }
+            keep
+        });
+        self.markers.retain(|m| m.t < from || m.t >= to);
+        for marker in self.markers.iter_mut().filter(|m| m.t >= to) {
+            marker.t -= length;
+        }
+        true
+    }
+
     /// The clip in front at time `t`: the topmost visible video track with a clip there.
     pub fn front_clip(&self, t: f64) -> Option<(&Clip, &Media)> {
         self.tracks
@@ -2968,6 +3048,32 @@ mod tests {
         assert!(project.set_speed_ripple(&first, 2.0));
         assert_eq!(project.clip(&first).unwrap().duration, 2.0);
         assert_eq!(project.clip(&second).unwrap().start, 2.0);
+    }
+
+    #[test]
+    fn a_stretch_taken_out_closes_up_every_unlocked_track() {
+        let (mut project, footage) = project_with(10.0);
+        // One 10 s clip with its sound on an audio track, a title and a marker after the stretch, and a locked track.
+        let video = project.place(&footage, Some(0), 0.0).unwrap();
+        let sound = project.detach_sound(&video).unwrap();
+        let title = project.add_title(6.0);
+        project.add_marker(8.0, "");
+        project.add_marker(3.0, "inside");
+        let locked = project.add_track(TrackKind::Video);
+        let still = project.place(&footage, Some(locked), 2.0).unwrap();
+        project.tracks[locked].locked = true;
+        assert!(project.remove_range(2.0, 5.0));
+        // The clip is in two: 0-2 and the rest (from 5 s of its source) right after; its sound the same, still linked.
+        let main: Vec<(f64, f64, f64)> = project.tracks.iter().find(|t| t.clips.iter().any(|c| c.id == video)).unwrap()
+            .clips.iter().map(|c| (c.start, c.duration, c.source_in)).collect();
+        assert_eq!(main, [(0.0, 2.0, 0.0), (2.0, 5.0, 5.0)]);
+        let right = project.right_neighbor(&video).unwrap();
+        assert!(project.linked(&right).is_some_and(|s| s != sound && project.clip(&s).unwrap().start == 2.0));
+        let t = project.titles.iter().find(|t| t.id == title).unwrap();
+        assert_eq!((t.start, t.end), (3.0, 6.0));
+        assert_eq!(project.markers.iter().map(|m| m.t).collect::<Vec<_>>(), [5.0]);
+        assert_eq!(project.clip(&still).unwrap().start, 2.0, "the locked track stays");
+        assert_eq!(project.duration(), 12.0);
     }
 
     /// Four 4-second clips end to end on the first video track, from 0 to 16.
