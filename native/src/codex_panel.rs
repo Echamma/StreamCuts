@@ -15,7 +15,6 @@ use std::sync::Mutex;
 use std::sync::mpsc::{Receiver, channel};
 
 const FULL_EDIT: &str = "Edit this video properly: cut the dead air, false starts and boring bits; add GIFs, pictures, sound effects and titles where they fit; and give the cuts transitions.";
-const WIDTH: f32 = 380.0;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -258,39 +257,19 @@ impl StreamCuts {
         &self.codex.words
     }
 
-    pub(super) fn codex_window(&mut self, ui: &mut Ui) {
-        if !self.codex.open {
+    /// The panel, in the column it's given (at the right of the preview, while it's open).
+    pub(super) fn codex_panel(&mut self, ui: &mut Ui) {
+        self.codex_load();
+        // Alt+B closes it even while typing in it (when StreamCuts' own shortcuts wait).
+        if ui.input_mut(|i| i.consume_key(Modifiers::ALT, Key::B)) {
+            self.codex.open = false;
             return;
         }
-        self.codex_load();
-        let pane = if self.pane.is_positive() { self.pane } else { ui.ctx().content_rect() };
-        let width = WIDTH.min(pane.width() - 24.0).max(260.0);
-        let rect = Rect::from_min_max(
-            pos2(pane.right() - width - 10.0, pane.top() + 54.0),
-            pos2(pane.right() - 10.0, pane.bottom() - 10.0),
-        );
-        let ctx = ui.ctx().clone();
-        egui::Area::new(ui.scope_id().with("codex-panel"))
-            .order(egui::Order::Foreground)
-            .fixed_pos(rect.min)
-            .constrain(false)
-            .show(&ctx, |ui| {
-                ui.set_max_size(rect.size());
-                egui::Frame::new()
-                    .fill(Mood::Ember.pane())
-                    .stroke(Stroke::new(1.0, color::HAIRLINE_STRONG))
-                    .corner_radius(12)
-                    .shadow(egui::epaint::Shadow { offset: [0, 6], blur: 24, spread: 0, color: color::SHADOW })
-                    .inner_margin(12)
-                    .show(ui, |ui| {
-                        ui.set_width(rect.width() - 24.0);
-                        ui.set_min_height(rect.height() - 24.0);
-                        self.codex_contents(ui, rect.height() - 24.0);
-                    });
-            });
+        ui.set_clip_rect(ui.max_rect());
+        self.codex_contents(ui);
     }
 
-    fn codex_contents(&mut self, ui: &mut Ui, height: f32) {
+    fn codex_contents(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
         let busy = self.codex.running.is_some();
         // Header.
@@ -301,15 +280,17 @@ impl StreamCuts {
                 if icon_button(ui, Icon::Close, "Close (Alt+B)", false).clicked() {
                     self.codex.open = false;
                 }
-                if quiet_button(ui, "Settings", None).clicked() {
+                let label = if self.codex.show_settings { "Back to chat" } else { "Settings" };
+                if quiet_button(ui, label, None).clicked() {
                     self.codex.show_settings = !self.codex.show_settings;
                 }
             });
         });
         ui.add_space(4.0);
+        // Settings take the panel's place while they're open.
         if self.codex.show_settings {
-            self.codex_settings_ui(ui);
-            ui.separator();
+            egui::ScrollArea::vertical().id_salt("codex-settings-scroll").show(ui, |ui| self.codex_settings_ui(ui));
+            return;
         }
         // The transcript Codex reads.
         let words = self.codex_words().len();
@@ -385,8 +366,7 @@ impl StreamCuts {
         });
         ui.separator();
         // The chat, then the box to type in.
-        let input_height = 96.0;
-        let chat_height = (height - ui.min_rect().height() - input_height).max(120.0);
+        let chat_height = (ui.available_height() - 100.0).max(80.0);
         egui::ScrollArea::vertical()
             .id_salt("codex-chat")
             .max_height(chat_height)
@@ -435,6 +415,10 @@ impl StreamCuts {
         let input_id = ui.scope_id().with("codex-input");
         let had_focus = ui.memory(|m| m.has_focus(input_id));
         let enter = had_focus && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
+        // Escape leaves the box, so StreamCuts' keys work again.
+        if had_focus && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+            ui.memory_mut(|m| m.surrender_focus(input_id));
+        }
         let edit = ui.add_sized(
             [ui.available_width(), 52.0],
             egui::TextEdit::multiline(&mut self.codex.input)
@@ -714,5 +698,121 @@ mod live {
         std::fs::write(out.join("edited.streamcuts.json"), serde_json::to_vec_pretty(&project).unwrap()).unwrap();
         assert!(words.len() > 100);
         assert!(!plan.operations.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codex::{Kind, Op};
+    use crate::project::Attributes;
+
+    struct TestHost;
+    impl Host for TestHost {
+        fn toast(&mut self, _: String) {}
+        fn exported(&mut self, _: PathBuf) {}
+    }
+
+    fn frame(app: &mut StreamCuts, ctx: &egui::Context, events: Vec<egui::Event>) -> Vec<egui::epaint::ClippedShape> {
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1400.0, 900.0))),
+            events,
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| app.ui(ui, &mut TestHost));
+        output.textures_delta.clear();
+        output.shapes
+    }
+
+    fn texts(shapes: &[egui::epaint::ClippedShape]) -> String {
+        let mut out = String::new();
+        for shape in shapes {
+            if let egui::Shape::Text(text) = &shape.shape {
+                out.push_str(text.galley.text());
+                out.push('\n');
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn the_panel_opens_and_carries_out_what_codex_sends() {
+        let dir = std::env::temp_dir().join(format!("streamcuts-codex-panel-{}", crate::project::new_id()));
+        let place = Place { space: None, projects_dir: dir.join("projects"), data_dir: dir.join("data"), exports_dir: dir.join("exports") };
+        let ctx = egui::Context::default();
+        let mut app = StreamCuts::new(place, &ctx);
+        let mut project = Project::new("Panel");
+        let media = project.add_media(Media {
+            id: "m".into(),
+            path: dir.join("missing.mp4"),
+            name: "m".into(),
+            kind: MediaKind::Video,
+            duration: 8.0,
+            width: 1920,
+            height: 1080,
+            has_audio: true,
+            frame_rate: 30.0,
+            attributes: Attributes::default(),
+        });
+        project.place(&media, Some(0), 0.0).unwrap();
+        app.open(project);
+        frame(&mut app, &ctx, Vec::new());
+        // Alt+B opens it, with its buttons.
+        let alt = egui::Modifiers { alt: true, ..Default::default() };
+        frame(&mut app, &ctx, vec![egui::Event::Key { key: Key::B, physical_key: None, pressed: true, repeat: false, modifiers: alt }]);
+        assert!(app.codex.open);
+        let shown = texts(&frame(&mut app, &ctx, Vec::new()));
+        for label in ["Codex", "Edit my video", "Find shorts", "Refresh transcript", "Settings"] {
+            assert!(shown.contains(label), "{label} in:\n{shown}");
+        }
+        // Settings opens on a click, in place of the chat, and goes back.
+        let settings_at = |shapes: &[egui::epaint::ClippedShape], label: &str| {
+            shapes.iter().find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == label => Some(text.pos + text.galley.rect.center().to_vec2()),
+                _ => None,
+            })
+        };
+        let shapes = frame(&mut app, &ctx, Vec::new());
+        let at = settings_at(&shapes, "Settings").expect("a Settings button");
+        let click = |at: Pos2| {
+            vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() },
+                egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() },
+            ]
+        };
+        frame(&mut app, &ctx, click(at));
+        let shown = texts(&frame(&mut app, &ctx, Vec::new()));
+        assert!(app.codex.show_settings && shown.contains("GIPHY key") && shown.contains("Back to chat"), "{shown}");
+        let back = settings_at(&frame(&mut app, &ctx, Vec::new()), "Back to chat").unwrap();
+        frame(&mut app, &ctx, click(back));
+        assert!(!app.codex.show_settings);
+        // What Codex sends back is carried out, said in the chat, and undone in one go.
+        let (send, done) = channel();
+        app.codex.running = Some(Running { status: Arc::new(Mutex::new("Asking Codex".into())), started: Instant::now(), stopper: codex::Stopper::default(), done });
+        let shown = texts(&frame(&mut app, &ctx, Vec::new()));
+        assert!(shown.contains("Asking Codex"), "the status shows:\n{shown}");
+        let title = Op { kind: Kind::Title, clip: None, start: Some(1.0), end: Some(3.0), query: None, text: Some("Day one".into()), style: None, x: None, y: None, size: None, value: None, sticker: None };
+        send.send(Finished::Edited {
+            project: app.project.id.clone(),
+            thread: Some("thread-1".into()),
+            plan: Plan { reply: "Added a title.".into(), operations: vec![title], transition_for_bare_cuts: None },
+            fetched: HashMap::new(),
+            words: Vec::new(),
+        })
+        .unwrap();
+        let shown = texts(&frame(&mut app, &ctx, Vec::new()));
+        assert!(app.codex.running.is_none());
+        assert_eq!(app.project.titles.iter().map(|t| t.text.as_str()).collect::<Vec<_>>(), ["Day one"]);
+        assert!(shown.contains("Added a title.") && shown.contains("Added 1 title."), "{shown}");
+        assert_eq!(app.codex.saved.thread.as_deref(), Some("thread-1"));
+        // The chat is kept with the project.
+        assert!(app.codex_dir().join("chat.json").is_file());
+        assert!(app.history.undo(&mut app.project));
+        assert!(app.project.titles.is_empty());
+        // Alt+B again closes it.
+        frame(&mut app, &ctx, vec![egui::Event::Key { key: Key::B, physical_key: None, pressed: true, repeat: false, modifiers: alt }]);
+        assert!(!app.codex.open);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

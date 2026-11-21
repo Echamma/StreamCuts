@@ -3500,8 +3500,18 @@ impl CanopyApp for StreamCuts {
             upper.min,
             vec2((rect.width() * 0.2).clamp(150.0, BIN_WIDTH), upper.height()),
         );
-        let preview = Rect::from_min_max(pos2(bin.right() + 6.0, upper.top()), upper.max);
+        // Codex's panel, when it's open, is a column at the right of the preview, like the bin at its left.
+        let codex = self.codex.open.then(|| {
+            Rect::from_min_max(pos2(upper.right() - (rect.width() * 0.3).clamp(300.0, 420.0), upper.top()), upper.max)
+        });
+        let preview = Rect::from_min_max(
+            pos2(bin.right() + 6.0, upper.top()),
+            pos2(codex.map_or(upper.right(), |c| c.left() - 6.0), upper.bottom()),
+        );
         ui.painter().add(pane_frame(Mood::Ember).paint(bin));
+        if let Some(column) = codex {
+            ui.painter().add(pane_frame(Mood::Ember).paint(column));
+        }
         ui.scope_builder(UiBuilder::new().max_rect(bin.shrink(8.0)), |ui| {
             self.media_bin(ui)
         });
@@ -3556,7 +3566,10 @@ impl CanopyApp for StreamCuts {
             );
         }
         self.projects_window(ui);
-        self.codex_window(ui);
+        // Codex's panel goes in last, so nothing laid over the whole editor (drops, the timeline) takes its clicks.
+        if let Some(column) = codex {
+            ui.scope_builder(UiBuilder::new().max_rect(column.shrink(10.0)), |ui| self.codex_panel(ui));
+        }
         self.boss_window(ui);
         self.render_next(&ctx);
         self.deliver_window(ui);
