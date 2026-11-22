@@ -1239,6 +1239,13 @@ pub struct Title {
     /// Text size as a fraction of the frame's height.
     #[serde(default = "title_size")]
     pub size: f32,
+    /// Which text track it sits on in the timeline (0 is the first): titles at the same time go on separate ones.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub row: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 fn caption_gap() -> f32 {
@@ -1395,11 +1402,72 @@ impl Project {
             y: middle(),
             x: middle(),
             size: title_size(),
+            row: 0,
         };
         let id = title.id.clone();
-        self.titles.push(title);
+        // On the first text track that's free for its whole time, or a new one below the others.
+        self.settle_title_rows();
+        let rows = self.title_rows();
+        let taken = |row: usize| {
+            self.titles
+                .iter()
+                .zip(&rows)
+                .any(|(t, r)| *r == row && t.start < title.end && title.start < t.end)
+        };
+        let row = (0..).find(|row| !taken(*row)).unwrap_or(0);
+        self.titles.push(Title { row, ..title });
         self.titles.sort_by(|a, b| a.start.total_cmp(&b.start));
         id
+    }
+
+    /// The text track each title is shown on, in `titles`' order. A title keeps its own `row` unless another one
+    /// there overlaps it in time; then it goes on the first track that's free. Tracks nothing is on close up, so the
+    /// numbers run from 0 with no gaps.
+    pub fn title_rows(&self) -> Vec<usize> {
+        // Empty tracks close up first, so titles that stay where they are keep their place on the screen.
+        let mut used: Vec<usize> = self.titles.iter().map(|t| t.row).collect();
+        used.sort_unstable();
+        used.dedup();
+        let mut rows: Vec<usize> = self
+            .titles
+            .iter()
+            .map(|t| used.binary_search(&t.row).unwrap_or(0))
+            .collect();
+        let mut order: Vec<usize> = (0..self.titles.len()).collect();
+        order.sort_by(|&a, &b| {
+            rows[a]
+                .cmp(&rows[b])
+                .then(self.titles[a].start.total_cmp(&self.titles[b].start))
+        });
+        // Those that fit stay; the ones in the way of an earlier title on their track move once the others are down.
+        let mut placed: Vec<usize> = Vec::new();
+        let mut bumped = Vec::new();
+        let fits = |placed: &[usize], rows: &[usize], i: usize, row: usize| {
+            let t = &self.titles[i];
+            !placed.iter().any(|&j| {
+                rows[j] == row && self.titles[j].start < t.end && t.start < self.titles[j].end
+            })
+        };
+        for i in order {
+            if fits(&placed, &rows, i, rows[i]) {
+                placed.push(i);
+            } else {
+                bumped.push(i);
+            }
+        }
+        for i in bumped {
+            rows[i] = (0..).find(|&r| fits(&placed, &rows, i, r)).unwrap_or(0);
+            placed.push(i);
+        }
+        rows
+    }
+
+    /// Stores where `title_rows` shows each title, so titles stay on their tracks from then on.
+    pub fn settle_title_rows(&mut self) {
+        let rows = self.title_rows();
+        for (title, row) in self.titles.iter_mut().zip(rows) {
+            title.row = row;
+        }
     }
 
     pub fn title_mut(&mut self, id: &str) -> Option<&mut Title> {
@@ -3815,6 +3883,37 @@ mod tests {
         assert!(project.has_text());
         assert_eq!(project.delete(&[id]), 1);
         assert_eq!(project.duration(), 10.0);
+    }
+
+    #[test]
+    fn titles_at_the_same_time_go_on_their_own_text_tracks() {
+        let (mut project, _) = project_with(10.0);
+        let a = project.add_title(2.0);
+        let b = project.add_title(2.0);
+        let c = project.add_title(3.0);
+        // After the others are over, a title goes back on the first track.
+        let d = project.add_title(6.0);
+        let row = |p: &Project, id: &str| {
+            let rows = p.title_rows();
+            rows[p.titles.iter().position(|t| t.id == id).unwrap()]
+        };
+        assert_eq!(
+            [&a, &b, &c, &d].map(|id| row(&project, id)),
+            [0, 1, 2, 0]
+        );
+        // Moved onto a title on its track, a title goes on the first free one; emptied tracks close up.
+        project.delete(&[b.clone()]);
+        assert_eq!([&a, &c].map(|id| row(&project, id)), [0, 1]);
+        project.title_mut(&d).unwrap().start = 3.5;
+        project.title_mut(&d).unwrap().end = 6.5;
+        assert_eq!(
+            [&a, &c, &d].map(|id| row(&project, id)),
+            [0, 1, 2],
+            "d overlaps a and c"
+        );
+        // Old projects have no rows saved: overlapping titles still come apart.
+        let json = serde_json::to_string(&project.titles[0]).unwrap();
+        assert!(!json.contains("\"row\""), "row 0 isn't written: {json}");
     }
 
     #[test]

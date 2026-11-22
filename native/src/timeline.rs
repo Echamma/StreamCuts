@@ -74,6 +74,8 @@ pub struct Timeline {
     pub pps: f32,
     /// The time at the left edge of the lanes.
     pub scroll: f64,
+    /// How far the rows are scrolled down, in pixels (Shift+wheel), when there are more than fit.
+    pub vscroll: f32,
     pub selection: Vec<String>,
     pub snap: bool,
     gesture: Option<Gesture>,
@@ -89,7 +91,7 @@ pub struct Timeline {
 }
 
 struct Marquee {
-    /// Where the drag began: a time (so the box stays put while the timeline scrolls) and a height.
+    /// Where the drag began: a time and a height among the rows (so the box stays put while the timeline scrolls).
     from: (f64, f32),
     /// What was picked before, kept when Shift or Ctrl was held as the drag began.
     keep: Vec<String>,
@@ -118,6 +120,7 @@ impl Default for Timeline {
         Self {
             pps: 60.0,
             scroll: 0.0,
+            vscroll: 0.0,
             selection: Vec::new(),
             snap: true,
             gesture: None,
@@ -202,17 +205,29 @@ impl Timeline {
         let background = ui.allocate_rect(rect, Sense::click_and_drag());
         let painter = ui.painter_at(rect);
         let lanes = Rect::from_min_max(pos2(rect.left() + HEADER, rect.top()), rect.max);
-        let (pps, scroll) = (self.pps, self.scroll);
+        // Rows, top to bottom: the tracks, the one to drop media on, the text tracks (titles that overlap in time go
+        // on separate ones), then captions. When they don't all fit, Shift+wheel scrolls them.
+        let title_rows = project.title_rows();
+        let text_tracks = title_rows.iter().max().map_or(0, |r| r + 1);
+        let first_text = project.tracks.len() + 1;
+        let lane_count = first_text + text_tracks + usize::from(!project.captions.is_empty());
+        let overflow = (RULER + lane_count as f32 * ROW - rect.height()).max(0.0);
+        self.vscroll = self.vscroll.clamp(0.0, overflow);
+        let (pps, scroll, vscroll) = (self.pps, self.scroll, self.vscroll);
         let x_of = |t: f64| lanes.left() + ((t - scroll) as f32) * pps;
         let t_of = |x: f32| scroll + ((x - lanes.left()) / pps) as f64;
         let row = |i: usize| {
             Rect::from_min_size(
-                pos2(rect.left(), rect.top() + RULER + i as f32 * ROW),
+                pos2(rect.left(), rect.top() + RULER + i as f32 * ROW - vscroll),
                 vec2(rect.width(), ROW),
             )
         };
         let pointer = ui.input(|i| i.pointer.hover_pos());
-        let row_at = |y: f32| ((y - rect.top() - RULER) / ROW).floor();
+        let row_at = |y: f32| ((y - rect.top() - RULER + vscroll) / ROW).floor();
+        // Everything under the ruler: rows scrolled up out of it are cut off there.
+        let body = Rect::from_min_max(pos2(rect.left(), rect.top() + RULER), rect.max);
+        let body_painter = painter.with_clip_rect(body);
+        let lane_area = Rect::from_min_max(pos2(lanes.left(), body.top()), rect.max);
 
         // Ruler
         let ruler = Rect::from_min_max(
@@ -287,14 +302,14 @@ impl Timeline {
         // Tracks
         for (index, track) in project.tracks.iter().enumerate() {
             let r = row(index);
-            painter.line_segment(
+            body_painter.line_segment(
                 [
                     pos2(rect.left(), r.bottom()),
                     pos2(rect.right(), r.bottom()),
                 ],
                 Stroke::new(1.0, color::HAIRLINE),
             );
-            painter.text(
+            body_painter.text(
                 pos2(r.left() + 10.0, r.top() + 14.0),
                 Align2::LEFT_CENTER,
                 &track.name,
@@ -310,7 +325,11 @@ impl Timeline {
                 pos2(r.left() + 6.0, r.top() + 22.0),
                 vec2(HEADER - 12.0, 30.0),
             );
+            if !buttons.intersects(body) {
+                continue;
+            }
             ui.scope_builder(UiBuilder::new().max_rect(buttons), |ui| {
+                ui.set_clip_rect(ui.clip_rect().intersect(body));
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
                     if icon_button(
@@ -377,7 +396,7 @@ impl Timeline {
             output.changed = true;
         }
         let add_row = row(project.tracks.len());
-        painter.text(
+        body_painter.text(
             pos2(add_row.left() + 10.0, add_row.top() + 16.0),
             Align2::LEFT_CENTER,
             "Drop media to add a track",
@@ -386,13 +405,11 @@ impl Timeline {
         );
 
         // Clips
-        let lane_painter = painter.with_clip_rect(Rect::from_min_max(
-            pos2(lanes.left(), rect.top() + RULER),
-            rect.max,
-        ));
+        let lane_painter = painter.with_clip_rect(lane_area);
         let mut clicked_clip = false;
         // Where each clip, title and caption is (not locked clips), for picking them with a box: in time, so ones
-        // scrolled out of sight while the box is out stay in it, and in height on the screen (the rows don't scroll).
+        // scrolled out of sight while the box is out stay in it, and in height among the rows (on the screen, plus
+        // how far the rows are scrolled).
         let mut boxes: Vec<(String, f64, f64, f32, f32)> = Vec::new();
         let clips: Vec<(usize, crate::project::Clip)> = project
             .tracks
@@ -423,14 +440,20 @@ impl Timeline {
             }
             let r = row(track_index);
             if !project.tracks[track_index].locked {
-                boxes.push((clip.id.clone(), real_start, real_start + clip.duration, r.top() + 4.0, r.bottom() - 4.0));
+                boxes.push((
+                    clip.id.clone(),
+                    real_start,
+                    real_start + clip.duration,
+                    r.top() + 4.0 + vscroll,
+                    r.bottom() - 4.0 + vscroll,
+                ));
             }
             let clip_rect = Rect::from_min_max(
                 pos2(x_of(clip.start), r.top() + 4.0),
                 pos2(x_of(clip.end()), r.bottom() - 4.0),
             );
-            let visible = clip_rect.intersect(lanes);
-            if visible.width() <= 0.0 {
+            let visible = clip_rect.intersect(lane_area);
+            if visible.width() <= 0.0 || visible.height() <= 0.0 {
                 continue;
             }
             let selected = self.selection.contains(&clip.id);
@@ -664,21 +687,34 @@ impl Timeline {
             }
         }
 
-        // Text lanes under the tracks: titles (click to select, drag to move in time), then captions (click to select).
-        let mut next_lane = project.tracks.len() + 1;
-        if !project.titles.is_empty() {
-            let lane = row(next_lane);
-            next_lane += 1;
-            painter.text(
+        // Text tracks under the tracks: titles (click to select, drag to move in time or onto another text track), then
+        // captions (click to select).
+        for k in 0..text_tracks {
+            let lane = row(first_text + k);
+            body_painter.line_segment(
+                [pos2(rect.left(), lane.bottom()), pos2(rect.right(), lane.bottom())],
+                Stroke::new(1.0, color::HAIRLINE),
+            );
+            body_painter.text(
                 pos2(lane.left() + 10.0, lane.top() + 14.0),
                 Align2::LEFT_CENTER,
-                "Titles",
+                if k == 0 { "Titles".to_string() } else { format!("Titles {}", k + 1) },
                 font::ui(12.0),
                 color::INK_SOFT,
             );
-            let (mut grabbed, mut moved) = (false, None);
-            for title in &project.titles {
-                boxes.push((title.id.clone(), title.start, title.end, lane.top() + 6.0, lane.top() + 34.0));
+        }
+        if !project.titles.is_empty() {
+            let (mut grabbed, mut moved, mut dropped) = (false, None, false);
+            let mut to_row = None;
+            for (title, &title_row) in project.titles.iter().zip(&title_rows) {
+                let lane = row(first_text + title_row);
+                boxes.push((
+                    title.id.clone(),
+                    title.start,
+                    title.end,
+                    lane.top() + 6.0 + vscroll,
+                    lane.top() + 34.0 + vscroll,
+                ));
                 let block = Rect::from_min_max(
                     pos2(x_of(title.start), lane.top() + 6.0),
                     pos2(
@@ -686,8 +722,8 @@ impl Timeline {
                         lane.top() + 34.0,
                     ),
                 );
-                let visible = block.intersect(lanes);
-                if visible.width() <= 0.0 {
+                let visible = block.intersect(lane_area);
+                if visible.width() <= 0.0 || visible.height() <= 0.0 {
                     continue;
                 }
                 let selected = self.selection.contains(&title.id);
@@ -755,12 +791,35 @@ impl Timeline {
                 if response.dragged() && response.drag_delta().x != 0.0 {
                     moved = Some((title.id.clone(), (response.drag_delta().x / pps) as f64));
                 }
+                // Held by its middle over another text track (or the row under the last one, for a new track), it goes
+                // there.
+                let by_middle = matches!(&self.title_grab, Some((id, Grab::Move)) if id == &title.id);
+                if response.dragged() && by_middle {
+                    if let Some(p) = response.interact_pointer_pos() {
+                        let over = row_at(p.y) - first_text as f32;
+                        if over >= 0.0 {
+                            let over = (over as usize).min(text_tracks);
+                            if over != title_row {
+                                to_row = Some((title.id.clone(), over));
+                            }
+                        }
+                    }
+                }
                 if response.drag_stopped() {
                     self.title_grab = None;
+                    dropped = true;
                 }
             }
             if grabbed {
                 history.record(project);
+                // Rows as shown, so a title dragged onto another track lands where it's pointed at.
+                project.settle_title_rows();
+            }
+            if let Some((id, row)) = to_row {
+                if let Some(title) = project.title_mut(&id) {
+                    title.row = row;
+                    output.changed = true;
+                }
             }
             if let Some((id, dt)) = moved {
                 let grab = self
@@ -784,10 +843,15 @@ impl Timeline {
                     output.changed = true;
                 }
             }
+            // Let go on top of another title, it moves to the first text track free for its time.
+            if dropped {
+                project.settle_title_rows();
+                output.changed = true;
+            }
         }
         if !project.captions.is_empty() {
-            let lane = row(next_lane);
-            painter.text(
+            let lane = row(first_text + text_tracks);
+            body_painter.text(
                 pos2(lane.left() + 10.0, lane.top() + 14.0),
                 Align2::LEFT_CENTER,
                 "Captions",
@@ -795,7 +859,13 @@ impl Timeline {
                 color::INK_SOFT,
             );
             for caption in &project.captions {
-                boxes.push((caption.id.clone(), caption.start, caption.end, lane.top() + 6.0, lane.top() + 34.0));
+                boxes.push((
+                    caption.id.clone(),
+                    caption.start,
+                    caption.end,
+                    lane.top() + 6.0 + vscroll,
+                    lane.top() + 34.0 + vscroll,
+                ));
                 let block = Rect::from_min_max(
                     pos2(x_of(caption.start), lane.top() + 6.0),
                     pos2(
@@ -803,8 +873,8 @@ impl Timeline {
                         lane.top() + 34.0,
                     ),
                 );
-                let visible = block.intersect(lanes);
-                if visible.width() <= 0.0 {
+                let visible = block.intersect(lane_area);
+                if visible.width() <= 0.0 || visible.height() <= 0.0 {
                     continue;
                 }
                 let selected = self.selection.contains(&caption.id);
@@ -982,7 +1052,7 @@ impl Timeline {
             if let Some(p) = origin.filter(|p| p.x >= lanes.left() && p.y > ruler.bottom()) {
                 let add = ui.input(|i| i.modifiers.shift || i.modifiers.command);
                 self.marquee = Some(Marquee {
-                    from: (t_of(p.x), p.y),
+                    from: (t_of(p.x), p.y + vscroll),
                     keep: if add { self.selection.clone() } else { Vec::new() },
                 });
             }
@@ -991,13 +1061,14 @@ impl Timeline {
             self.marquee = None;
         }
         if let (Some(marquee), Some(p)) = (&self.marquee, background.interact_pointer_pos()) {
-            let area = Rect::from_two_pos(pos2(x_of(marquee.from.0), marquee.from.1), p)
-                .intersect(Rect::from_min_max(pos2(lanes.left(), ruler.bottom()), rect.max));
+            let area = Rect::from_two_pos(pos2(x_of(marquee.from.0), marquee.from.1 - vscroll), p)
+                .intersect(lane_area);
             let mut picked = marquee.keep.clone();
             // What the box covers in time runs from where it began to the pointer, wherever the timeline has scrolled.
             let x = p.x.clamp(lanes.left(), rect.right());
             let (t0, t1) = (marquee.from.0.min(t_of(x)), marquee.from.0.max(t_of(x)));
-            let (y0, y1) = (marquee.from.1.min(p.y), marquee.from.1.max(p.y));
+            let y = p.y + vscroll;
+            let (y0, y1) = (marquee.from.1.min(y), marquee.from.1.max(y));
             let touched = |(_, start, end, top, bottom): &&(String, f64, f64, f32, f32)| {
                 *start <= t1 && *end >= t0 && *top <= y1 && *bottom >= y0
             };
@@ -1034,16 +1105,34 @@ impl Timeline {
             }
         }
 
-        // Wheel scrolls through time; Ctrl+wheel zooms around the pointer.
+        // Wheel scrolls through time; Shift+wheel scrolls the rows up and down; Ctrl+wheel zooms around the pointer.
         if let Some(p) = pointer.filter(|p| rect.contains(*p)) {
-            let (zoom, delta) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta()));
+            let (zoom, delta, shift) =
+                ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta(), i.modifiers.shift));
             if zoom != 1.0 {
                 let anchor = t_of(p.x);
                 self.pps = (self.pps * zoom).clamp(2.0, 600.0);
                 self.scroll = (anchor - ((p.x - lanes.left()) / self.pps) as f64).max(0.0);
+            } else if shift && (delta.x != 0.0 || delta.y != 0.0) {
+                // egui turns Shift+wheel sideways; down the wheel is down the rows either way.
+                self.vscroll = (self.vscroll - (delta.x + delta.y)).clamp(0.0, overflow);
             } else if delta.x != 0.0 || delta.y != 0.0 {
                 self.scroll = (self.scroll - ((delta.x + delta.y) / self.pps) as f64).max(0.0);
             }
+        }
+
+        // When the rows don't all fit, a thin bar at the right edge shows where they're scrolled to.
+        if overflow > 0.0 {
+            let track = Rect::from_min_max(pos2(rect.right() - 6.0, body.top() + 2.0), rect.max - vec2(2.0, 2.0));
+            let shown = body.height() / (body.height() + overflow);
+            let thumb_h = (track.height() * shown).max(18.0);
+            let top = track.top() + (track.height() - thumb_h) * (vscroll / overflow);
+            painter.rect_filled(track, 2, color::VEIL);
+            painter.rect_filled(
+                Rect::from_min_size(pos2(track.left(), top), vec2(track.width(), thumb_h)),
+                2,
+                color::INK_FAINT,
+            );
         }
 
         // Drops from the media bin or Canopy's sidebar land at the pointer, on the row under it. Media from the bin is
@@ -1128,7 +1217,7 @@ impl Timeline {
         if let Some(cut) = self.insert_line {
             let x = x_of(cut);
             if x >= lanes.left() && x <= rect.right() {
-                let (top, bottom) = (rect.top() + RULER, row(project.tracks.len()).top());
+                let (top, bottom) = (rect.top() + RULER, row(project.tracks.len()).top().max(rect.top() + RULER));
                 painter.line_segment([pos2(x, top), pos2(x, bottom)], Stroke::new(3.0, color::SELECT_LINE));
                 for (y, dir) in [(top, 1.0), (bottom, -1.0)] {
                     painter.add(egui::Shape::convex_polygon(
@@ -1263,6 +1352,79 @@ mod tests {
         fn starts(&self) -> Vec<f64> {
             self.clips.iter().map(|id| (self.project.clip(id).unwrap().start * 1000.0).round() / 1000.0).collect()
         }
+    }
+
+    fn wheel(bench: &mut Bench, down: f32, shift: bool) {
+        let modifiers = egui::Modifiers { shift, ..Default::default() };
+        let p = bench.at(2.0);
+        bench.frame(vec![
+            Event::PointerMoved(p),
+            Event::ModifiersChanged(modifiers),
+            Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: vec2(0.0, -down),
+                phase: egui::TouchPhase::Move,
+                source: egui::MouseWheelSource::Wheel,
+                modifiers,
+            },
+        ]);
+        // The wheel is smoothed over a few frames.
+        for _ in 0..10 {
+            bench.frame(vec![Event::PointerMoved(p)]);
+        }
+    }
+
+    #[test]
+    fn shift_wheel_scrolls_the_rows_when_they_dont_all_fit() {
+        let mut bench = Bench::new();
+        // Nothing to scroll while everything fits.
+        wheel(&mut bench, 200.0, true);
+        assert_eq!(bench.timeline.vscroll, 0.0);
+        // Seven titles at once: seven text tracks, more rows than the 600-pixel window has room for.
+        for _ in 0..7 {
+            bench.project.add_title(1.0);
+        }
+        bench.frame(Vec::new());
+        wheel(&mut bench, 200.0, true);
+        assert!(bench.timeline.vscroll > 0.0, "scrolled down {}", bench.timeline.vscroll);
+        assert_eq!(bench.timeline.scroll, 0.0, "Shift+wheel doesn't move through time");
+        // Never past the last row, and back up to the top.
+        wheel(&mut bench, 5000.0, true);
+        let rows = bench.project.tracks.len() + 1 + 7;
+        assert_eq!(bench.timeline.vscroll, RULER + rows as f32 * ROW - 600.0);
+        wheel(&mut bench, -5000.0, true);
+        assert_eq!(bench.timeline.vscroll, 0.0);
+        // The wheel alone still moves through time.
+        wheel(&mut bench, 200.0, false);
+        assert!(bench.timeline.scroll > 0.0);
+        assert_eq!(bench.timeline.vscroll, 0.0);
+    }
+
+    #[test]
+    fn a_title_dragged_down_goes_on_that_text_track() {
+        let mut bench = Bench::new();
+        let a = bench.project.add_title(2.0);
+        let b = bench.project.add_title(2.0);
+        let c = bench.project.add_title(10.0);
+        bench.frame(Vec::new());
+        let rows = |bench: &Bench| {
+            let rows = bench.project.title_rows();
+            [&a, &b, &c].map(|id| rows[bench.project.titles.iter().position(|t| &t.id == id).unwrap()])
+        };
+        assert_eq!(rows(&bench), [0, 1, 0]);
+        // The third, held by its middle on the first text track and taken down one row, onto the second.
+        let first_text = (bench.project.tracks.len() + 1) as f32;
+        let on = |bench: &Bench, k: f32| bench.at(11.5) + vec2(0.0, (first_text + k) * ROW - ROW / 2.0 + 20.0);
+        let from = on(&bench, 0.0);
+        bench.frame(vec![Event::PointerMoved(from)]);
+        bench.press(from, true);
+        for i in 1..=4 {
+            bench.frame(vec![Event::PointerMoved(from + vec2(0.0, ROW * i as f32 / 4.0))]);
+        }
+        bench.press(on(&bench, 1.0), false);
+        bench.frame(Vec::new());
+        assert_eq!(rows(&bench), [0, 1, 1]);
+        assert_eq!(bench.project.titles.iter().find(|t| t.id == c).unwrap().start, 10.0);
     }
 
     #[test]
