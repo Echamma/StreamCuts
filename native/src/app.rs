@@ -49,6 +49,8 @@ struct Pending {
     track: Option<usize>,
     /// Dropped on the timeline: it goes in where it was let go, and the clips there make room.
     dropped: bool,
+    /// A frame grabbed from this clip: it goes in front of it (see `Project::place_grab`).
+    over: Option<String>,
 }
 
 struct BossPlan {
@@ -347,7 +349,7 @@ impl StreamCuts {
 
     fn import(&mut self, files: Vec<PathBuf>, at: f64, track: Option<usize>, dropped: bool) {
         for path in files {
-            self.pending.insert(path.clone(), Pending { at, track, dropped });
+            self.pending.insert(path.clone(), Pending { at, track, dropped, over: None });
             self.worker.send(Job::Probe(path));
         }
     }
@@ -369,7 +371,16 @@ impl StreamCuts {
                         Ok(media) => {
                             self.history.record(&self.project);
                             let id = self.project.add_media(media);
-                            if let Some(p) = pending {
+                            if let Some(from) = pending.as_ref().and_then(|p| p.over.clone()) {
+                                let at = pending.as_ref().map_or(self.playhead, |p| p.at);
+                                match self.project.place_grab(&id, &from, at) {
+                                    Some(clip) => {
+                                        self.timeline.selection = vec![clip];
+                                        self.toasts.push("Frame grabbed: drag it on the picture to move it, a corner to resize, an edge to crop".into());
+                                    }
+                                    None => self.toasts.push("The frame is in Media: the clip it came from is gone".into()),
+                                }
+                            } else if let Some(p) = pending {
                                 let landed = p
                                     .dropped
                                     .then(|| self.project.place_at(&id, p.track, p.at))
@@ -479,6 +490,13 @@ impl StreamCuts {
                         Err(error) => self.toasts.push(error),
                     }
                 }
+                Done::Grabbed { clip, at, output, result } => match result {
+                    Ok(()) => {
+                        self.pending.insert(output.clone(), Pending { at, track: None, dropped: false, over: Some(clip) });
+                        self.worker.send(Job::Probe(output));
+                    }
+                    Err(error) => self.toasts.push(error),
+                },
                 Done::Proxy { media_id, result } => {
                     self.proxy_jobs.retain(|id| id != &media_id);
                     match result {
@@ -1092,6 +1110,7 @@ impl StreamCuts {
                 }
             }),
             Cmd::ResetPlace => self.change_clips(|clip, _| clip.place = Placement::default()),
+            Cmd::GrabFrame => self.grab_frame(None, None),
             Cmd::ResetColor => self.change_clips(|clip, _| (clip.grade, clip.lut) = (Grade::default(), None)),
             Cmd::ResetEffects => self.change_clips(|clip, _| clip.effects = Effects::default()),
             Cmd::ShowMore { before, seconds } => {
@@ -1469,6 +1488,51 @@ impl StreamCuts {
             let now = self.project.clip(&dialog.clip).map_or(was, |c| c.duration);
             self.toasts.push(format!("Speed {:.0}%: {was:.2} s → {now:.2} s", dialog.speed * 100.0));
         }
+    }
+
+    /// Saves a frame of a video clip as a PNG and puts it in front of the clip as a picture, ready to move around. The
+    /// clip is `clip`, else the one picked, else the video clip in front under the playhead. The frame is the one under
+    /// the playhead when that's on the clip, else the one at `at` (where it was right-clicked), else its first.
+    fn grab_frame(&mut self, clip: Option<String>, at: Option<f64>) {
+        let is_video = |p: &Project, id: &str| {
+            p.find(id).is_some_and(|r| p.tracks[r.track].kind == crate::project::TrackKind::Video)
+                && p.clip(id).and_then(|c| p.media(&c.media_id)).is_some_and(|m| m.kind == MediaKind::Video)
+        };
+        let picked = self.picked_clips();
+        let id = clip
+            .or_else(|| match picked.as_slice() {
+                [one] if is_video(&self.project, one) => Some(one.clone()),
+                _ => None,
+            })
+            .or_else(|| {
+                let t = self.playhead;
+                self.project
+                    .tracks
+                    .iter()
+                    .filter(|track| !track.hidden)
+                    .flat_map(|track| track.clips.iter())
+                    .find(|c| c.contains(t) && is_video(&self.project, &c.id))
+                    .map(|c| c.id.clone())
+            });
+        let Some(clip) = id.filter(|id| is_video(&self.project, id)).and_then(|id| self.project.clip(&id).cloned()) else {
+            return self.toasts.push("Pick a video clip, or put the playhead on one, to grab its frame".into());
+        };
+        let Some(media) = self.project.media(&clip.media_id).cloned() else {
+            return;
+        };
+        if !media.path.is_file() {
+            return self.toasts.push("The video is missing: find it in Media first".into());
+        }
+        let t = if clip.contains(self.playhead) { self.playhead } else { at.unwrap_or(clip.start) };
+        let t = t.clamp(clip.start, clip.end() - 1e-3);
+        let source_at = clip.source_time(t).clamp(0.0, (media.duration - 1e-3).max(0.0));
+        let stem = media.path.file_stem().map_or_else(|| "Frame".into(), |s| s.to_string_lossy().into_owned());
+        let whole = source_at.floor() as u64;
+        let name = format!("{stem} at {}m{:02}s{:03}.png", whole / 60, whole % 60, ((source_at - whole as f64) * 1000.0).round() as u64 % 1000);
+        // One folder per video, so two videos of the same name don't share frames.
+        let output = self.place.data_dir.join("frames").join(&media.id).join(name);
+        self.worker.send(Job::GrabFrame { clip: clip.id.clone(), at: t, path: media.path.clone(), source_at, output });
+        self.toasts.push(format!("Grabbing the frame at {}", timecode(t, self.project.fps)));
     }
 
     /// The Clip menu's bigger actions, for the menu and the keyboard alike.
@@ -3552,6 +3616,12 @@ impl CanopyApp for StreamCuts {
         }
         if let Some(t) = output.seek {
             self.seek(t);
+        }
+        if let Some(choice) = output.menu {
+            match choice.cmd {
+                Cmd::GrabFrame => self.grab_frame(Some(choice.clip), Some(choice.at)),
+                cmd => self.run(cmd, ui.ctx()),
+            }
         }
         if let Some((files, at, track)) = output.dropped {
             self.import(

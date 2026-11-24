@@ -758,6 +758,29 @@ pub fn still(
     })
 }
 
+/// The frame at `at` seconds of the video at `path`, at its own size, saved as a PNG at `output`. Blocking: call it
+/// off the UI thread.
+pub fn grab_frame(path: &Path, at: f64, output: &Path) -> Result<(), String> {
+    if let Some(dir) = output.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("Couldn't make {} ({e}).", dir.display()))?;
+    }
+    let done = command(&ffmpeg())
+        .args(["-v", "error", "-y", "-ss", &seek_to(at)])
+        .arg("-i")
+        .arg(path)
+        // `-update 1`: the name is just a name, so a `%` in it isn't read as a numbered sequence.
+        .args(["-frames:v", "1", "-an", "-update", "1"])
+        .arg(output)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| format!("FFmpeg couldn't start ({e})."))?;
+    if !done.success() || !output.is_file() {
+        return Err("Couldn't grab a frame there.".into());
+    }
+    Ok(())
+}
+
 /// A small PNG-sized thumbnail for the media bin and clips.
 pub fn thumbnail(path: &Path, at: f64) -> Result<Frame, String> {
     still(path, at, 192, 108, Picture::default())

@@ -56,7 +56,7 @@ pub fn main_track(project: &Project) -> Option<usize> {
 
 /// Where an overlay of `media` goes so it's `size` of the frame's width with its middle at `x`, `y`, kept in the frame:
 /// the framed picture's padding (it's fitted into the frame's shape first) cut off, so no bars show.
-fn overlay_place(project: &Project, media: &Media, x: f32, y: f32, size: f32) -> Placement {
+pub(crate) fn overlay_place(project: &Project, media: &Media, x: f32, y: f32, size: f32) -> Placement {
     let frame = project.width as f32 / project.height.max(1) as f32;
     let own = if media.height > 0 { media.width as f32 / media.height as f32 } else { frame };
     let size = size.clamp(0.08, 1.0);
@@ -79,7 +79,7 @@ fn overlay_place(project: &Project, media: &Media, x: f32, y: f32, size: f32) ->
 
 /// A track of `kind` that's free from `start` to `end` and isn't locked: for video, one above `main` (in front of the
 /// video); a new one when there's none.
-fn free_track(project: &mut Project, kind: TrackKind, start: f64, end: f64, main: Option<usize>) -> usize {
+pub(crate) fn free_track(project: &mut Project, kind: TrackKind, start: f64, end: f64, main: Option<usize>) -> usize {
     let free = |p: &Project, i: usize| {
         let t = &p.tracks[i];
         t.kind == kind && !t.locked && !t.clips.iter().any(|c| c.start < end - 1e-6 && c.end() > start + 1e-6)

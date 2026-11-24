@@ -90,6 +90,15 @@ pub enum Job {
         length: f64,
         normalize: bool,
     },
+    /// The frame at `source_at` in `path` saved as a PNG at `output`, to become a picture over `clip` at timeline time
+    /// `at`.
+    GrabFrame {
+        clip: String,
+        at: f64,
+        path: PathBuf,
+        source_at: f64,
+        output: PathBuf,
+    },
 }
 
 pub enum Done {
@@ -122,6 +131,12 @@ pub enum Done {
     Focus {
         clip: String,
         result: Result<Vec<crate::project::Focus>, String>,
+    },
+    Grabbed {
+        clip: String,
+        at: f64,
+        output: PathBuf,
+        result: Result<(), String>,
     },
 }
 
@@ -270,6 +285,15 @@ impl Worker {
                                 clip,
                                 normalize,
                                 result: ffmpeg::loudness(&path, from, length),
+                            });
+                            continue;
+                        }
+                        Job::GrabFrame { clip, at, path, source_at, output } => {
+                            aside(&finished, &ctx, move || Done::Grabbed {
+                                clip,
+                                at,
+                                result: ffmpeg::grab_frame(&path, source_at, &output),
+                                output,
                             });
                             continue;
                         }

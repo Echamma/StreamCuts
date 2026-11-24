@@ -1794,6 +1794,24 @@ impl Project {
         Some((id, landing))
     }
 
+    /// A picture grabbed from a frame of the clip `from` (`media_id`), put in front of it: at `at`, on a free video
+    /// track above `from`'s (a new one when there's none), half the frame wide in the middle so it's plain to see
+    /// that it can be moved, and colored like `from`. Returns its id.
+    pub fn place_grab(&mut self, media_id: &str, from: &str, at: f64) -> Option<String> {
+        let media = self.media(media_id)?.clone();
+        let source = self.clip(from)?.clone();
+        let main = self.find(from)?.track;
+        let start = at.max(0.0);
+        let track = crate::autoedit::free_track(self, TrackKind::Video, start, start + STILL_SECONDS, Some(main));
+        let mut clip = Self::new_clip(&media, start, STILL_SECONDS);
+        clip.place = crate::autoedit::overlay_place(self, &media, 0.5, 0.5, 0.5);
+        (clip.grade, clip.lut, clip.effects) = (source.grade, source.lut, source.effects);
+        let id = clip.id.clone();
+        self.tracks[track].clips.push(clip);
+        self.sort_track(track);
+        Some(id)
+    }
+
     fn new_clip(media: &Media, start: f64, duration: f64) -> Clip {
         Clip {
             id: new_id(),
@@ -3246,6 +3264,27 @@ mod tests {
         let mut project = Project::new("Test");
         let id = project.add_media(media(MediaKind::Video, duration));
         (project, id)
+    }
+
+    #[test]
+    fn a_grabbed_frame_goes_in_front_of_its_clip_half_size_and_colored_alike() {
+        let (mut project, video) = project_with(20.0);
+        let source = project.place(&video, None, 0.0).unwrap();
+        project.clip_mut(&source).unwrap().lut = Some(PathBuf::from("C:/looks/warm.cube"));
+        let below = project.find(&source).unwrap().track;
+        let frame = project.add_media(media(MediaKind::Image, 0.0));
+        let grab = project.place_grab(&frame, &source, 3.0).unwrap();
+        let (track, clip) = (project.find(&grab).unwrap().track, project.clip(&grab).unwrap().clone());
+        let below = project.find(&source).unwrap().track.max(below);
+        assert!(track < below, "in front of the video: track {track}, video on {below}");
+        assert_eq!((clip.start, clip.duration), (3.0, STILL_SECONDS));
+        let shown = clip.place.shown();
+        assert!((shown[2] - shown[0] - 0.5).abs() < 0.01, "half the frame wide: {:?}", clip.place);
+        assert_eq!(clip.lut, project.clip(&source).unwrap().lut);
+        // A second grab overlapping the first doesn't cover it: it gets a track of its own.
+        let again = project.place_grab(&frame, &source, 4.0).unwrap();
+        assert_ne!(project.find(&again).unwrap().track, project.find(&grab).unwrap().track);
+        assert_eq!(project.clip(&again).unwrap().start, 4.0);
     }
 
     #[test]

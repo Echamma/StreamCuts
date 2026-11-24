@@ -2,7 +2,8 @@
 //! It edits the project through `Project`'s methods and reports seeks and drops back to the editor.
 
 use crate::filmstrip::Strip;
-use crate::project::{History, Landing, MediaKind, Project, TrackKind};
+use crate::keys::{self, Cmd};
+use crate::project::{Clip, History, Landing, MediaKind, Project, TrackKind};
 use crate::waveform::Waveform;
 use canopy_ui::{DraggedFiles, Icon, SharedFile, color, font, icon_button};
 use egui::{
@@ -88,6 +89,8 @@ pub struct Timeline {
     drop_preview: Option<DropPreview>,
     /// A box being dragged out over the lanes to pick everything it touches, as on the desktop.
     marquee: Option<Marquee>,
+    /// The time where a clip was last right-clicked, for its menu.
+    menu_at: f64,
 }
 
 struct Marquee {
@@ -128,6 +131,7 @@ impl Default for Timeline {
             insert_line: None,
             drop_preview: None,
             marquee: None,
+            menu_at: 0.0,
         }
     }
 }
@@ -138,6 +142,94 @@ pub struct Output {
     /// Files dropped from Canopy's sidebar: import them, then place them here.
     pub dropped: Option<(Vec<SharedFile>, f64, Option<usize>)>,
     pub changed: bool,
+    /// What was chosen in a clip's right-click menu.
+    pub menu: Option<MenuChoice>,
+}
+
+/// A command chosen in a clip's right-click menu: the clip, and the time where it was right-clicked.
+pub struct MenuChoice {
+    pub cmd: Cmd,
+    pub clip: String,
+    pub at: f64,
+}
+
+/// What a right-clicked clip is, for which of its menu's entries make sense.
+struct MenuFacts<'a> {
+    clip: &'a Clip,
+    /// Audio for any clip on an audio track (a video's detached sound included).
+    kind: MediaKind,
+    has_sound: bool,
+    /// How many clips are picked (the right-clicked one among them).
+    picked: usize,
+    playhead: f64,
+    at: f64,
+    fps: u32,
+}
+
+/// A clip's right-click menu: the usual edits, then what this clip can do. Each entry shows its key.
+fn clip_menu(ui: &mut Ui, facts: &MenuFacts) -> Option<Cmd> {
+    ui.set_min_width(250.0);
+    let mut chosen = None;
+    let mut item = |ui: &mut Ui, cmd: Cmd, label: &str| {
+        let keys = keys::COMMANDS
+            .iter()
+            .find(|c| c.cmd == cmd)
+            .and_then(|c| c.keys.first())
+            .map(keys::Shortcut::label)
+            .unwrap_or_default();
+        if ui.add(egui::Button::new(label).shortcut_text(keys)).clicked() {
+            chosen = Some(cmd);
+        }
+    };
+    let clip = facts.clip;
+    let one = facts.picked <= 1;
+    let video = facts.kind == MediaKind::Video;
+    if one && video {
+        // The frame under the playhead when it's on this clip, else the one where it was right-clicked.
+        let t = if clip.contains(facts.playhead) { facts.playhead } else { facts.at };
+        item(ui, Cmd::GrabFrame, &format!("Grab the frame at {} as a picture", timecode(t, facts.fps)));
+        ui.separator();
+    }
+    if clip.contains(facts.playhead) && clip.start < facts.playhead {
+        item(ui, Cmd::Split, "Split at the playhead");
+    }
+    item(ui, Cmd::Copy, "Copy");
+    item(ui, Cmd::CutClips, "Cut");
+    item(ui, Cmd::Duplicate, "Duplicate");
+    item(ui, Cmd::Delete, "Delete");
+    item(ui, Cmd::RippleDelete, "Delete and close the gap");
+    ui.separator();
+    if facts.kind != MediaKind::Image {
+        item(ui, Cmd::ChangeSpeed, "Change speed…");
+    }
+    if clip.fade_in > 0.0 || clip.fade_out > 0.0 {
+        item(ui, Cmd::NoFades, "No fades");
+    } else {
+        item(ui, Cmd::Fades, "Fade in and out");
+    }
+    if facts.kind != MediaKind::Audio {
+        item(ui, Cmd::FitOrFill, "Fit or fill the frame");
+        if !clip.place.is_full() {
+            item(ui, Cmd::ResetPlace, "Reset size, place and crop");
+        }
+    }
+    if one {
+        if video && facts.has_sound && clip.link.is_none() {
+            item(ui, Cmd::DetachSound, "Detach sound");
+        }
+        if clip.link.is_some() {
+            item(ui, Cmd::Unlink, "Unlink");
+        }
+        if clip.group.is_some() {
+            item(ui, Cmd::Ungroup, "Ungroup");
+        }
+        if video {
+            item(ui, Cmd::DetectScenes, "Detect scenes");
+        }
+        ui.separator();
+        item(ui, Cmd::ClipMenu, "More in the Clip menu…");
+    }
+    chosen
 }
 
 fn tick_step(pps: f32) -> f64 {
@@ -606,6 +698,39 @@ impl Timeline {
                 } else {
                     self.selection = vec![clip.id.clone()];
                 }
+            }
+            // A right-click picks the clip (or keeps the picked ones, when it's one of them) and opens its menu.
+            if response.secondary_clicked() {
+                clicked_clip = true;
+                if !selected {
+                    self.selection = vec![clip.id.clone()];
+                }
+                if let Some(p) = response.interact_pointer_pos() {
+                    self.menu_at = t_of(p.x).clamp(real_start, real_start + clip.duration - 1e-3);
+                }
+            }
+            let facts = MenuFacts {
+                clip: &clip,
+                kind,
+                has_sound: media.has_audio && kind != MediaKind::Image,
+                picked: self.selection.len(),
+                playhead,
+                at: self.menu_at,
+                fps: project.fps,
+            };
+            let menu_at = self.menu_at;
+            if let Some(Some(cmd)) = egui::Popup::context_menu(&response)
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                .show(|ui| {
+                    let chosen = clip_menu(ui, &facts);
+                    if chosen.is_some() {
+                        ui.close();
+                    }
+                    chosen
+                })
+                .map(|shown| shown.inner)
+            {
+                output.menu = Some(MenuChoice { cmd, clip: clip.id.clone(), at: menu_at });
             }
             if response.drag_started() {
                 // Where the button went down: a quick drag has already left a clip's edge when the drag begins.
