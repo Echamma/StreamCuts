@@ -1,8 +1,8 @@
 //! The Codex panel, at the right of StreamCuts' pane: a chat with Codex about the open project. "Edit my video" asks
 //! for a full edit; anything typed asks for a change (or a question); each answer is carried out at once as one undo
-//! step and said in the chat. The transcript Codex reads can be worked out again ("Refresh transcript"), its keys for
-//! GIPHY, Pixabay and Freesound and the sound folder are set here, and "Find shorts" looks for moments to cut out as
-//! 9:16 shorts. The chat (and Codex's side of the conversation) is kept per project in the app's data folder.
+//! step and said in the chat. The transcript Codex reads can be worked out again ("Refresh transcript"), and "Find
+//! shorts" looks for moments to cut out as 9:16 shorts. The keys for GIPHY, Pixabay and Freesound and the sound,
+//! picture and video folders are Canopy's shared settings (its gear; here too when StreamCuts runs alone). The chat (and Codex's side of the conversation) is kept per project in the app's data folder.
 
 use super::*;
 use crate::autoedit;
@@ -19,6 +19,8 @@ const FULL_EDIT: &str = "Edit this video properly: cut the dead air, false start
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 struct Settings {
+    /// Canopy's shared settings as last read (never saved here: see `stock::migrate`).
+    #[serde(skip)]
     keys: Keys,
     model: String,
 }
@@ -84,6 +86,8 @@ pub(super) struct CodexPanel {
     words: Vec<Spoken>,
     words_for: Option<(String, Option<Instant>)>,
     focus_input: bool,
+    /// The shared keys and folders, and when they were read (again a second later, so Canopy's Settings apply).
+    keys_read: Option<(Instant, Keys)>,
 }
 
 fn folder(data_dir: &std::path::Path) -> PathBuf {
@@ -103,6 +107,8 @@ impl StreamCuts {
 
     fn codex_settings(&mut self) -> Settings {
         if self.codex.settings.is_none() {
+            // Keys set here before Canopy had one place for them go there first.
+            stock::migrate(&self.place.data_dir);
             let loaded: Settings = std::fs::read(folder(&self.place.data_dir).join("settings.json"))
                 .ok()
                 .and_then(|b| serde_json::from_slice(&b).ok())
@@ -113,6 +119,10 @@ impl StreamCuts {
         if settings.model.is_empty() {
             settings.model = codex::DEFAULT_MODEL.into();
         }
+        if self.codex.keys_read.as_ref().is_none_or(|(at, _)| at.elapsed() > Duration::from_secs(1)) {
+            self.codex.keys_read = Some((Instant::now(), Keys::current()));
+        }
+        settings.keys = self.codex.keys_read.as_ref().map(|(_, keys)| keys.clone()).unwrap_or_default();
         settings
     }
 
@@ -465,33 +475,20 @@ impl StreamCuts {
                 }
             });
             ui.end_row();
-            for (label, key, hint) in [
-                ("GIPHY key", &mut settings.keys.giphy, "for GIFs and stickers"),
-                ("Pixabay key", &mut settings.keys.pixabay, "for pictures and stock video"),
-                ("Freesound key", &mut settings.keys.freesound, "for sound effects"),
-            ] {
-                ui.label(label);
-                ui.add(egui::TextEdit::singleline(key).password(true).hint_text(hint).desired_width(200.0));
-                ui.end_row();
-            }
-            ui.label("Sound folder");
-            ui.horizontal(|ui| {
-                let shown = settings.keys.sounds.as_ref().map_or("None".to_string(), |p| {
-                    p.file_name().map_or(p.display().to_string(), |n| n.to_string_lossy().into_owned())
-                });
-                ui.label(canopy_ui::muted(shown));
-                if ui.button("Choose…").clicked() {
-                    if let Some(dir) = rfd::FileDialog::new().set_title("Your sound effects folder").pick_folder() {
-                        settings.keys.sounds = Some(dir);
-                    }
-                }
-                if settings.keys.sounds.is_some() && ui.button("Clear").clicked() {
-                    settings.keys.sounds = None;
-                }
-            });
-            ui.end_row();
         });
-        ui.label(canopy_ui::muted("Keys stay on this computer, in StreamCuts' own data folder."));
+        ui.add_space(6.0);
+        if self.place.space.is_some() {
+            // Inside Canopy they're set once for every space, in Canopy's Settings.
+            ui.label(canopy_ui::muted(
+                "GIPHY, Pixabay and Freesound keys and your sound, picture and video folders are in Canopy's Settings: the gear at the top right. Codex looks in your folders first, then uses the keys.",
+            ));
+        } else {
+            let mut shared = canopy_ui::canopy_core::settings::Settings::load();
+            if canopy_ui::shared_settings_ui(ui, &mut shared) {
+                let _ = shared.save();
+                self.codex.keys_read = None;
+            }
+        }
         if settings != before {
             self.codex.settings = Some(settings);
             self.save_codex_settings();
@@ -521,11 +518,24 @@ fn clock(seconds: f64) -> String {
 /// What the person's keys allow, told to Codex.
 fn services(keys: &Keys) -> String {
     let mut out = Vec::new();
-    out.push(if keys.giphy.trim().is_empty() { "No GIPHY key: don't use gif." } else { "GIFs and stickers: GIPHY." });
-    out.push(if keys.pixabay.trim().is_empty() {
-        "No Pixabay key: don't use picture or stock_video."
-    } else {
-        "Pictures and stock video: Pixabay."
+    let (pictures, videos, pixabay) = (keys.pictures.is_some(), keys.videos.is_some(), !keys.pixabay.trim().is_empty());
+    out.push(match (pictures, !keys.giphy.trim().is_empty()) {
+        (true, true) => "GIFs: a .gif from the person's pictures folder first (use its exact name), else GIPHY.",
+        (true, false) => "GIFs: only .gif files from the person's pictures folder (use the exact name).",
+        (false, true) => "GIFs and stickers: GIPHY.",
+        (false, false) => "No GIFs: don't use gif.",
+    });
+    out.push(match (pictures, pixabay) {
+        (true, true) => "Pictures: the person's pictures folder first (use a file's exact name), else Pixabay.",
+        (true, false) => "Pictures: only the person's pictures folder (use a file's exact name).",
+        (false, true) => "Pictures: Pixabay.",
+        (false, false) => "No pictures: don't use picture.",
+    });
+    out.push(match (videos, pixabay) {
+        (true, true) => "Video: the person's videos folder first (use a file's exact name), else Pixabay stock video.",
+        (true, false) => "Video: only the person's videos folder (use a file's exact name).",
+        (false, true) => "Video: Pixabay stock video.",
+        (false, false) => "No stock video: don't use stock_video.",
     });
     out.push(match (keys.sounds.is_some(), !keys.freesound.trim().is_empty()) {
         (true, true) => "Sounds: the person's folder first (use a file's exact name), else Freesound.",
@@ -579,8 +589,23 @@ fn work(
                         .collect()
                 })
                 .unwrap_or_default();
+            // The person's own pictures and videos, by name, so Codex can pick them before searching the services.
+            let names = |folder: &Option<PathBuf>, extensions: &[&str]| -> Vec<String> {
+                folder
+                    .as_deref()
+                    .map(|folder| {
+                        stock::files_with(folder, extensions)
+                            .iter()
+                            .take(300)
+                            .map(|p| p.file_name().unwrap_or_default().to_string_lossy().into_owned())
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+            let pictures = names(&settings.keys.pictures, &stock::PICTURES);
+            let videos = names(&settings.keys.videos, &stock::VIDEOS);
             let noises = speech::timeline_noises(data_dir, project, assets);
-            let state = codex::describe(project, &words, &noises, &sounds);
+            let state = codex::describe(project, &words, &noises, &codex::Folders { sounds: &sounds, pictures: &pictures, videos: &videos });
             let prompt = if thread.is_none() {
                 format!("{}\n\n{state}\n# The person says\n{text}", codex::instructions(&services(&settings.keys)))
             } else {

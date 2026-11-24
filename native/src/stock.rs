@@ -1,16 +1,19 @@
 //! Finding and downloading what Codex asks for: GIFs and stickers from GIPHY, pictures and stock video from Pixabay,
-//! and sound effects from the person's own sound folder or Freesound. Requests go through Windows' curl.exe with the URL
+//! and sound effects from Freesound, each looked for first in the person's own folders (sounds, pictures, videos).
+//! Keys and folders are Canopy's shared settings (`canopy_core::settings`). Requests go through Windows' curl.exe with the URL
 //! (and so the key) on its standard input, never on its command line. Each download is kept in the project's assets
 //! folder and reused when the same thing is asked for again.
 
 use crate::ffmpeg;
+use canopy_ui::canopy_core::settings::Settings;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
-/// The person's keys and sound folder, kept in the app's private data folder.
+/// The person's keys and folders. They used to be kept per space in StreamCuts' data folder (as this, under
+/// `keys` in `codex/settings.json`); now they're Canopy's shared settings, and [`migrate`] moves old ones there.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Keys {
@@ -18,6 +21,59 @@ pub struct Keys {
     pub pixabay: String,
     pub freesound: String,
     pub sounds: Option<PathBuf>,
+    #[serde(skip)]
+    pub pictures: Option<PathBuf>,
+    #[serde(skip)]
+    pub videos: Option<PathBuf>,
+}
+
+impl Keys {
+    /// What Canopy's Settings say now.
+    pub fn current() -> Self {
+        Self::from(&Settings::load())
+    }
+}
+
+impl From<&Settings> for Keys {
+    fn from(s: &Settings) -> Self {
+        Self {
+            giphy: s.giphy_key.clone(),
+            pixabay: s.pixabay_key.clone(),
+            freesound: s.freesound_key.clone(),
+            sounds: s.sounds.clone(),
+            pictures: s.pictures.clone(),
+            videos: s.videos.clone(),
+        }
+    }
+}
+
+/// Moves keys and a sound folder set in Codex's settings in this data folder (one space's, before Canopy had one
+/// place for them) into Canopy's shared settings, filling only what's empty there, then takes them out of the old
+/// file. Whether the shared settings changed.
+pub fn migrate(data_dir: &Path) -> bool {
+    migrate_into(data_dir, &canopy_ui::canopy_core::settings::file())
+}
+
+fn migrate_into(data_dir: &Path, shared: &Path) -> bool {
+    let old_file = data_dir.join("codex").join("settings.json");
+    let Some(mut old) = std::fs::read(&old_file).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()) else {
+        return false;
+    };
+    let Some(keys) = old.get("keys").and_then(|k| serde_json::from_value::<Keys>(k.clone()).ok()) else {
+        return false;
+    };
+    let mut settings = Settings::load_from(shared);
+    let found = Settings { giphy_key: keys.giphy, pixabay_key: keys.pixabay, freesound_key: keys.freesound, sounds: keys.sounds, ..Settings::default() };
+    let changed = settings.adopt(&found);
+    if changed && settings.save_to(shared).is_err() {
+        return false;
+    }
+    // In the shared settings now (or there already): out of the space's folder.
+    if let Some(object) = old.as_object_mut() {
+        object.remove("keys");
+    }
+    let _ = std::fs::write(&old_file, serde_json::to_vec_pretty(&old).unwrap_or_default());
+    changed
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -37,6 +93,8 @@ pub struct Found {
 }
 
 const AUDIO: [&str; 7] = ["mp3", "wav", "ogg", "m4a", "flac", "aac", "opus"];
+pub const PICTURES: [&str; 6] = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
+pub const VIDEOS: [&str; 7] = ["mp4", "mov", "webm", "mkv", "m4v", "avi", "gif"];
 
 /// Fetches what's wanted into `dir`, or finds it there (or in the sound folder) from before.
 pub fn find(want: Want, query: &str, keys: &Keys, dir: &Path) -> Result<Found, String> {
@@ -63,9 +121,22 @@ pub fn find(want: Want, query: &str, keys: &Keys, dir: &Path) -> Result<Found, S
             None if keys.sounds.is_some() => return Err(format!("No sound like \"{query}\" in your sound folder, and no Freesound key to look further.")),
             None => return Err("Add a sound folder or a Freesound key to get sounds.".into()),
         },
-        Want::Gif { sticker } => giphy(query, sticker, &keys.giphy, dir)?,
-        Want::Picture => pixabay_picture(query, &keys.pixabay, dir)?,
-        Want::StockVideo => pixabay_video(query, &keys.pixabay, dir)?,
+        // The person's own pictures and videos first; the services only when nothing there fits.
+        Want::Gif { sticker } => match keys.pictures.as_deref().and_then(|folder| from_media_folder(folder, query, &["gif"])) {
+            Some(path) => Found { credit: String::new(), path },
+            None if !keys.giphy.trim().is_empty() => giphy(query, sticker, &keys.giphy, dir)?,
+            None => return Err(missing("GIF", query, keys.pictures.is_some(), "pictures", "GIPHY")),
+        },
+        Want::Picture => match keys.pictures.as_deref().and_then(|folder| from_media_folder(folder, query, &PICTURES)) {
+            Some(path) => Found { credit: String::new(), path },
+            None if !keys.pixabay.trim().is_empty() => pixabay_picture(query, &keys.pixabay, dir)?,
+            None => return Err(missing("picture", query, keys.pictures.is_some(), "pictures", "Pixabay")),
+        },
+        Want::StockVideo => match keys.videos.as_deref().and_then(|folder| from_media_folder(folder, query, &VIDEOS)) {
+            Some(path) => Found { credit: String::new(), path },
+            None if !keys.pixabay.trim().is_empty() => pixabay_video(query, &keys.pixabay, dir)?,
+            None => return Err(missing("video", query, keys.videos.is_some(), "videos", "Pixabay")),
+        },
     };
     index.insert(key, (found.path.to_string_lossy().into_owned(), found.credit.clone()));
     let _ = std::fs::create_dir_all(dir);
@@ -75,9 +146,18 @@ pub fn find(want: Want, query: &str, keys: &Keys, dir: &Path) -> Result<Found, S
 
 fn need(key: &str, service: &str) -> Result<(), String> {
     if key.trim().is_empty() {
-        Err(format!("Add your {service} key in Codex's settings first."))
+        Err(format!("Add your {service} key in Canopy's Settings (the gear at the top right) first."))
     } else {
         Ok(())
+    }
+}
+
+/// Why nothing came for a picture, GIF or video: nothing fitting in the folder, and no key to look further.
+fn missing(what: &str, query: &str, have_folder: bool, folder: &str, service: &str) -> String {
+    if have_folder {
+        format!("No {what} like \"{query}\" in your {folder} folder, and no {service} key to look further.")
+    } else {
+        format!("Add a {folder} folder or your {service} key in Canopy's Settings (the gear at the top right) to get a {what}.")
     }
 }
 
@@ -174,6 +254,11 @@ fn freesound(query: &str, longest: f64, key: &str, dir: &Path) -> Result<Found, 
 
 /// The sound files in a folder (and the folders in it), for Codex to pick from by name.
 pub fn sound_files(folder: &Path) -> Vec<PathBuf> {
+    files_with(folder, &AUDIO)
+}
+
+/// The files with one of `extensions` in a folder and the folders in it (four deep, the first 2000).
+pub fn files_with(folder: &Path, extensions: &[&str]) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![(folder.to_path_buf(), 0)];
     while let Some((dir, depth)) = stack.pop() {
@@ -184,7 +269,7 @@ pub fn sound_files(folder: &Path) -> Vec<PathBuf> {
                 stack.push((path, depth + 1));
             } else if path
                 .extension()
-                .is_some_and(|e| AUDIO.contains(&e.to_string_lossy().to_lowercase().as_str()))
+                .is_some_and(|e| extensions.contains(&e.to_string_lossy().to_lowercase().as_str()))
             {
                 out.push(path);
             }
@@ -225,6 +310,32 @@ fn from_folder(folder: &Path, query: &str) -> Option<PathBuf> {
             (score, std::cmp::Reverse(name_words.len()), p)
         })
         .filter(|(score, ..)| *score > 0)
+        .max_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)))
+        .map(|(.., p)| p)
+}
+
+/// The picture or video in a folder that fits the query: its exact file name, else the file sharing the most words
+/// with it, so long as that's at least half of the query's words (photo folders are full of names that share one
+/// word with anything).
+fn from_media_folder(folder: &Path, query: &str, extensions: &[&str]) -> Option<PathBuf> {
+    let files = files_with(folder, extensions);
+    let wanted = query.trim().to_lowercase();
+    if let Some(exact) = files.iter().find(|p| {
+        let name = p.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
+        let stem = p.file_stem().unwrap_or_default().to_string_lossy().to_lowercase();
+        name == wanted || stem == wanted
+    }) {
+        return Some(exact.clone());
+    }
+    let query_words = words(query);
+    files
+        .into_iter()
+        .map(|p| {
+            let name_words = words(&p.file_stem().unwrap_or_default().to_string_lossy());
+            let score = query_words.iter().filter(|w| name_words.contains(w)).count();
+            (score, std::cmp::Reverse(name_words.len()), p)
+        })
+        .filter(|(score, ..)| *score > 0 && score * 2 >= query_words.len())
         .max_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)))
         .map(|(.., p)| p)
 }
@@ -324,6 +435,50 @@ mod tests {
         assert_eq!(find(Want::Sound { longest: 5.0 }, "air horn", &keys, &dir.join("assets")).unwrap(), first);
         assert!(find(Want::Sound { longest: 5.0 }, "sad violin", &keys, &dir.join("assets")).unwrap_err().contains("sound folder"));
         assert!(find(Want::Gif { sticker: false }, "wow", &Keys::default(), &dir).unwrap_err().contains("GIPHY key"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn pictures_gifs_and_videos_come_from_the_folders_first() {
+        let dir = std::env::temp_dir().join(format!("streamcuts-media-{}", crate::project::new_id()));
+        std::fs::create_dir_all(dir.join("Pictures/Memes")).unwrap();
+        std::fs::create_dir_all(dir.join("Videos")).unwrap();
+        for name in ["Pictures/Memes/creeper face.png", "Pictures/IMG_0412.jpg", "Pictures/dancing creeper.gif", "Videos/creeper explosion.mp4", "Videos/notes.txt"] {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+        // A Pixabay key that would fail if it were used: the folders answer first.
+        let keys = Keys { pixabay: "unused".into(), giphy: "unused".into(), pictures: Some(dir.join("Pictures")), videos: Some(dir.join("Videos")), ..Keys::default() };
+        let assets = dir.join("assets");
+        let name = |found: Found| found.path.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(name(find(Want::Picture, "creeper face", &keys, &assets).unwrap()), "creeper face.png");
+        assert_eq!(name(find(Want::Picture, "IMG_0412.jpg", &keys, &assets).unwrap()), "IMG_0412.jpg");
+        assert_eq!(name(find(Want::Gif { sticker: false }, "creeper dancing", &keys, &assets).unwrap()), "dancing creeper.gif");
+        assert_eq!(name(find(Want::StockVideo, "creeper explosion", &keys, &assets).unwrap()), "creeper explosion.mp4");
+        // One shared word out of three isn't enough to take a file.
+        assert!(from_media_folder(&dir.join("Pictures"), "happy creeper birthday cake", &PICTURES).is_none());
+        // No fit and no key: said plainly.
+        let folders_only = Keys { pictures: Some(dir.join("Pictures")), ..Keys::default() };
+        assert!(find(Want::Picture, "sunset beach", &folders_only, &assets).unwrap_err().contains("pictures folder, and no Pixabay key"));
+        assert!(find(Want::StockVideo, "sunset", &Keys::default(), &assets).unwrap_err().contains("videos folder or your Pixabay key"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn keys_set_in_a_space_move_to_the_shared_settings() {
+        let dir = std::env::temp_dir().join(format!("streamcuts-migrate-{}", crate::project::new_id()));
+        let shared = dir.join("profile").join("settings.json");
+        std::fs::create_dir_all(dir.join("data/codex")).unwrap();
+        std::fs::write(dir.join("data/codex/settings.json"), r#"{"keys":{"giphy":"g1","pixabay":"p1","freesound":"","sounds":"D:/Sounds"},"model":"m"}"#).unwrap();
+        // Already set in the shared settings: kept.
+        Settings { pixabay_key: "p0".into(), ..Settings::default() }.save_to(&shared).unwrap();
+        assert!(migrate_into(&dir.join("data"), &shared));
+        let settings = Settings::load_from(&shared);
+        assert_eq!((settings.giphy_key.as_str(), settings.pixabay_key.as_str()), ("g1", "p0"));
+        assert_eq!(settings.sounds, Some(PathBuf::from("D:/Sounds")));
+        // The space's file keeps its model but no keys any more; a second run changes nothing.
+        let left: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("data/codex/settings.json")).unwrap()).unwrap();
+        assert!(left.get("keys").is_none() && left["model"] == "m");
+        assert!(!migrate_into(&dir.join("data"), &shared));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

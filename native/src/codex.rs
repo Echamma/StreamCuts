@@ -128,7 +128,15 @@ fn clock(t: f64) -> String {
 
 /// The project as Codex reads it: its tracks top first with every clip, the titles, captions and markers, and what's
 /// said when, all in timeline seconds.
-pub fn describe(project: &Project, words: &[Spoken], noises: &[Spoken], sounds: &[String]) -> String {
+/// The file names in the person's own folders, for Codex to pick from before the services.
+#[derive(Default)]
+pub struct Folders<'a> {
+    pub sounds: &'a [String],
+    pub pictures: &'a [String],
+    pub videos: &'a [String],
+}
+
+pub fn describe(project: &Project, words: &[Spoken], noises: &[Spoken], folders: &Folders) -> String {
     let mut out = String::new();
     let w = &mut out;
     let _ = writeln!(w, "# The project now");
@@ -218,11 +226,17 @@ pub fn describe(project: &Project, words: &[Spoken], noises: &[Spoken], sounds: 
     for (start, end, text) in lines {
         let _ = writeln!(w, "[{}-{}] {text}", clock(start), clock(end));
     }
-    let _ = writeln!(w, "\n## Sounds in the person's sound folder");
-    if sounds.is_empty() {
-        let _ = writeln!(w, "None (sounds come from Freesound, if there's a key).");
-    } else {
-        let _ = writeln!(w, "{}", sounds.join("\n"));
+    for (heading, names, otherwise) in [
+        ("Sounds in the person's sound folder", folders.sounds, "None (sounds come from Freesound, if there's a key)."),
+        ("Pictures in the person's pictures folder (.gif ones can be gifs)", folders.pictures, "None (pictures come from Pixabay and GIFs from GIPHY, if there are keys)."),
+        ("Videos in the person's videos folder", folders.videos, "None (stock video comes from Pixabay, if there's a key)."),
+    ] {
+        let _ = writeln!(w, "\n## {heading}");
+        if names.is_empty() {
+            let _ = writeln!(w, "{otherwise}");
+        } else {
+            let _ = writeln!(w, "{}", names.join("\n"));
+        }
     }
     out
 }
@@ -246,9 +260,9 @@ Answer in the given JSON shape: "reply" (what you did, or the answer to a questi
 - cut: start, end. Takes that stretch out of the whole timeline (every track that isn't locked); what comes after moves up. Cut on the pauses between words, never through a word: use the word times. Use it for dead air, false starts, repeats and boring stretches. Lines marked "(sound, no words heard)" have sound the transcript couldn't make out: a laugh, a reaction, or words it missed. They aren't silence: don't cut them unless you're cutting the whole moment they belong to.
 - remove: clip (an id from the lists, a clip or a title). Deletes it.
 - move: clip, start. Moves a clip or title so it starts there.
-- gif: query (2-4 words for GIPHY), sticker (true: a cut-out sticker with no background; false: a rectangular GIF), start, end, x, y, size. Plays it over the video from start to end (it loops).
-- picture: query (for Pixabay photos and illustrations), start, end, x, y, size. A still over the video.
-- stock_video: query (for Pixabay videos), start, end, x, y, size. Silent stock footage over the video (size 1 fills the frame: a cutaway).
+- gif: query (2-4 words for GIPHY, or the exact name of a .gif from the person's pictures folder), sticker (true: a cut-out sticker with no background; false: a rectangular GIF), start, end, x, y, size. Plays it over the video from start to end (it loops).
+- picture: query (words for Pixabay photos and illustrations, or the exact name of a file from the person's pictures folder), start, end, x, y, size. A still over the video.
+- stock_video: query (words for Pixabay videos, or the exact name of a file from the person's videos folder), start, end, x, y, size. Silent stock footage over the video (size 1 fills the frame: a cutaway).
 - sound: query (words for Freesound, or the exact name of a file from the person's sound folder), start, end (optional: where it must stop), value (volume, 0.1-1.5; 0.6 is a good start). A sound effect on its own audio track.
 - transition: start (the time of a cut: where two clips meet on a video track), style, value (seconds, 0.2-1.5). How the cut's second clip comes in; it needs footage left over past the first clip's end, and StreamCuts says when there isn't.
 - title: text, start, end, x, y, size (text height as a part of the frame's height, 0.04-0.15). On-screen text.
@@ -494,7 +508,8 @@ mod tests {
             Spoken { start: 4.0, end: 4.5, text: "later".into() },
         ];
         let noises = vec![Spoken { start: 2.5, end: 3.0, text: String::new() }];
-        let text = describe(&project, &words, &noises, &["boom.mp3".into()]);
+        let sounds = ["boom.mp3".to_string()];
+        let text = describe(&project, &words, &noises, &Folders { sounds: &sounds, ..Folders::default() });
         assert!(text.contains(&format!("- clip {clip} \"v.mp4\" 0.00-10.00 (source 0.00-10.00)")), "{text}");
         assert!(text.contains("[1.00-1.90] hello there\n[2.50-3.00] (sound, no words heard)\n[4.00-4.50] later"), "{text}");
         assert!(text.contains("boom.mp3"));
