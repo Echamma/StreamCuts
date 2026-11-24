@@ -1114,6 +1114,10 @@ impl StreamCuts {
             Cmd::GrabFrame => self.grab_frame(None, None),
             Cmd::EditInFolio => self.to_folio = Some(self.one_clip().unwrap_or_default()),
             Cmd::EditFrameInFolio => self.grab(None, None, true),
+            Cmd::BlurPart => {
+                let (from, to) = crate::timeline::picked_span(&self.project, &self.timeline.selection).unwrap_or((self.playhead, self.playhead + 3.0));
+                self.blur_part(from, to);
+            }
             Cmd::ExportPart => match crate::timeline::picked_span(&self.project, &self.timeline.selection) {
                 Some((from, to)) => self.export_part(ctx, from, to),
                 None => self.toasts.push("Pick clips (click them, or drag a box over them) to export that part".into()),
@@ -1976,6 +1980,15 @@ impl StreamCuts {
         if self.export.is_some() {
             self.toasts.push(format!("Exporting {} to {}", timecode(from, self.project.fps), timecode(to, self.project.fps)));
         }
+    }
+
+    /// Right-click > Blur: the whole picture blurred from `from` to `to`, on the Blurs row, picked.
+    fn blur_part(&mut self, from: f64, to: f64) {
+        self.history.record(&self.project);
+        let id = self.project.add_blur(from, to);
+        self.timeline.selection = vec![id];
+        self.edited();
+        self.toasts.push("Blurred on the Blurs row: drag its ends there to change when".into());
     }
 
     fn export_project(&mut self, ctx: &egui::Context, project: &Project, name: &str) {
@@ -3732,6 +3745,13 @@ impl CanopyApp for StreamCuts {
                 Cmd::GrabFrame => self.grab_frame(Some(choice.clip), Some(choice.at)),
                 Cmd::EditInFolio => self.to_folio = Some(choice.clip),
                 Cmd::EditFrameInFolio => self.grab(Some(choice.clip), Some(choice.at), true),
+                Cmd::BlurPart => {
+                    let span = crate::timeline::picked_span(&self.project, &self.timeline.selection)
+                        .or_else(|| self.project.clip(&choice.clip).map(|c| (c.start, c.end())));
+                    if let Some((from, to)) = span {
+                        self.blur_part(from, to);
+                    }
+                }
                 Cmd::ExportPart => {
                     let span = crate::timeline::picked_span(&self.project, &self.timeline.selection)
                         .or_else(|| self.project.clip(&choice.clip).map(|c| (c.start, c.end())));

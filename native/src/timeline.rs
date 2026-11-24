@@ -82,6 +82,8 @@ pub struct Timeline {
     gesture: Option<Gesture>,
     /// A title being dragged: which, by which part, its start and end then, and where the button went down.
     title_grab: Option<(String, Grab, f64, f64, f32)>,
+    /// A blur being dragged on the Blurs row, the same way.
+    blur_grab: Option<(String, Grab, f64, f64, f32)>,
     /// Where dragged clips are going in between others (the cut), shown as a line while the drag lasts.
     insert_line: Option<f64>,
     /// A medium from the bin held over the lanes: it's on the timeline already, where it would land, until it's let
@@ -128,6 +130,7 @@ impl Default for Timeline {
             snap: true,
             gesture: None,
             title_grab: None,
+            blur_grab: None,
             insert_line: None,
             drop_preview: None,
             marquee: None,
@@ -189,6 +192,7 @@ fn clip_menu(ui: &mut Ui, facts: &MenuFacts) -> Option<Cmd> {
     let one = facts.picked <= 1;
     let (from, to) = facts.span;
     item(ui, Cmd::ExportPart, &format!("Export {} to {} as a video", timecode(from, facts.fps), timecode(to, facts.fps)));
+    item(ui, Cmd::BlurPart, &format!("Blur {} to {}", timecode(from, facts.fps), timecode(to, facts.fps)));
     ui.separator();
     let video = facts.kind == MediaKind::Video;
     if one && facts.kind == MediaKind::Image && facts.editable {
@@ -252,6 +256,7 @@ pub fn picked_span(project: &Project, selection: &[String]) -> Option<(f64, f64)
             .map(|c| (c.start, c.end()))
             .or_else(|| project.titles.iter().find(|t| &t.id == id).map(|t| (t.start, t.end)))
             .or_else(|| project.captions.iter().find(|c| &c.id == id).map(|c| (c.start, c.end)))
+            .or_else(|| project.blurs.iter().find(|b| &b.id == id).map(|b| (b.start, b.end)))
     });
     spans.fold(None, |span: Option<(f64, f64)>, (s, e)| Some(span.map_or((s, e), |(a, b)| (a.min(s), b.max(e)))))
 }
@@ -284,6 +289,21 @@ pub fn timecode(seconds: f64, fps: u32) -> String {
 
 const CAPTION_FILL: Color32 = Color32::from_rgb(0x3A, 0x3F, 0x52);
 const TITLE_FILL: Color32 = Color32::from_rgb(0x52, 0x46, 0x2E);
+const BLUR_FILL: Color32 = Color32::from_rgb(0x2E, 0x4A, 0x52);
+
+/// Which part of a block on a text or blur row is under `x`: an edge within reach (the nearer one), else the middle.
+/// A block too short to have a middle beside its edges keeps its middle third for moving.
+fn grab_part(x: f32, block: Rect) -> Grab {
+    let reach = EDGE.min(block.width() / 3.0);
+    let (left, right) = ((x - block.left()).abs(), (x - block.right()).abs());
+    if left <= reach && left <= right {
+        Grab::Start
+    } else if right <= reach {
+        Grab::End
+    } else {
+        Grab::Move
+    }
+}
 
 fn clip_fill(kind: MediaKind) -> Color32 {
     match kind {
@@ -322,11 +342,12 @@ impl Timeline {
         let painter = ui.painter_at(rect);
         let lanes = Rect::from_min_max(pos2(rect.left() + HEADER, rect.top()), rect.max);
         // Rows, top to bottom: the tracks, the one to drop media on, the text tracks (titles that overlap in time go
-        // on separate ones), then captions. When they don't all fit, Shift+wheel scrolls them.
+        // on separate ones), captions, then blurs. When they don't all fit, Shift+wheel scrolls them.
         let title_rows = project.title_rows();
         let text_tracks = title_rows.iter().max().map_or(0, |r| r + 1);
         let first_text = project.tracks.len() + 1;
-        let lane_count = first_text + text_tracks + usize::from(!project.captions.is_empty());
+        let first_blur = first_text + text_tracks + usize::from(!project.captions.is_empty());
+        let lane_count = first_blur + usize::from(!project.blurs.is_empty());
         let overflow = (RULER + lane_count as f32 * ROW - rect.height()).max(0.0);
         self.vscroll = self.vscroll.clamp(0.0, overflow);
         let (pps, scroll, vscroll) = (self.pps, self.scroll, self.vscroll);
@@ -1081,6 +1102,108 @@ impl Timeline {
             }
         }
 
+        // Blurs: a row of their own; click to pick, drag the middle to move in time, an edge to start or end it.
+        if !project.blurs.is_empty() {
+            let lane = row(first_blur);
+            body_painter.line_segment(
+                [pos2(rect.left(), lane.top()), pos2(rect.right(), lane.top())],
+                Stroke::new(1.0, color::HAIRLINE),
+            );
+            body_painter.text(pos2(lane.left() + 10.0, lane.top() + 14.0), Align2::LEFT_CENTER, "Blurs", font::ui(12.0), color::INK_SOFT);
+            let (mut grabbed, mut moved, mut dropped) = (false, None, false);
+            for blur in &project.blurs {
+                boxes.push((blur.id.clone(), blur.start, blur.end, lane.top() + 6.0 + vscroll, lane.top() + 34.0 + vscroll));
+                let block = Rect::from_min_max(
+                    pos2(x_of(blur.start), lane.top() + 6.0),
+                    pos2(x_of(blur.end).max(x_of(blur.start) + 3.0), lane.top() + 34.0),
+                );
+                let visible = block.intersect(lane_area);
+                if visible.width() <= 0.0 || visible.height() <= 0.0 {
+                    continue;
+                }
+                let selected = self.selection.contains(&blur.id);
+                lane_painter.rect_filled(block, 5, BLUR_FILL);
+                lane_painter.rect_stroke(
+                    block,
+                    5,
+                    Stroke::new(if selected { 2.0 } else { 1.0 }, if selected { color::SELECT_INK } else { color::HAIRLINE_STRONG }),
+                    StrokeKind::Inside,
+                );
+                let whole = blur.w >= 0.999 && blur.h >= 0.999;
+                lane_painter.with_clip_rect(visible.shrink(3.0)).text(
+                    pos2(block.left() + 6.0, block.center().y),
+                    Align2::LEFT_CENTER,
+                    if whole { "Blur: whole picture" } else { "Blur" },
+                    font::ui(11.0),
+                    color::INK,
+                );
+                let response = ui.interact(
+                    visible.expand2(vec2(EDGE, 0.0)).intersect(lane_area),
+                    ui.scope_id().with(("blur", &blur.id)),
+                    Sense::click_and_drag(),
+                );
+                if response.hovered() {
+                    ui.ctx().set_cursor_icon(match pointer.map(|p| grab_part(p.x, block)) {
+                        Some(Grab::Start | Grab::End) => CursorIcon::ResizeHorizontal,
+                        _ => CursorIcon::Grab,
+                    });
+                }
+                if response.clicked() {
+                    clicked_clip = true;
+                    if ui.input(|i| i.modifiers.shift) {
+                        if selected {
+                            self.selection.retain(|id| id != &blur.id)
+                        } else {
+                            self.selection.push(blur.id.clone())
+                        }
+                    } else {
+                        self.selection = vec![blur.id.clone()];
+                    }
+                }
+                if response.drag_started() {
+                    grabbed = true;
+                    if !selected {
+                        self.selection = vec![blur.id.clone()];
+                    }
+                    // By where the button went down, as for titles.
+                    let down = ui.input(|i| i.pointer.press_origin()).or(response.interact_pointer_pos());
+                    let grab = down.map_or(Grab::Move, |p| grab_part(p.x, block));
+                    self.blur_grab = Some((blur.id.clone(), grab, blur.start, blur.end, down.map_or(block.center().x, |p| p.x)));
+                }
+                if response.dragged() {
+                    if let (Some((id, grab, start, end, x)), Some(p)) = (&self.blur_grab, response.interact_pointer_pos()) {
+                        if id == &blur.id {
+                            moved = Some((blur.id.clone(), *grab, *start, *end, ((p.x - x) / pps) as f64));
+                        }
+                    }
+                }
+                if response.drag_stopped() {
+                    self.blur_grab = None;
+                    dropped = true;
+                }
+            }
+            if grabbed {
+                history.record(project);
+            }
+            if let Some((id, grab, start, end, dt)) = moved {
+                if let Some(blur) = project.blur_mut(&id) {
+                    const SHORTEST: f64 = 0.1;
+                    match grab {
+                        Grab::Move => {
+                            let dt = dt.max(-start);
+                            (blur.start, blur.end) = (start + dt, end + dt);
+                        }
+                        Grab::Start => blur.start = (start + dt).clamp(0.0, end - SHORTEST),
+                        Grab::End => blur.end = (end + dt).max(start + SHORTEST),
+                    }
+                    output.changed = true;
+                }
+            }
+            if dropped {
+                output.changed = true;
+            }
+        }
+
         // An active move or trim follows the pointer until release.
         let mut grew = 0.0;
         let (mut moved, mut insert_line) = (None, None);
@@ -1626,6 +1749,43 @@ mod tests {
         let from = on_title(&bench, 2.0);
         drag(&mut bench, from, 30.0);
         assert_eq!(span(&bench), (2.0, 4.0), "moved whole");
+    }
+
+    /// Blurs sit on their own row: a drag from an edge changes when it starts or ends, from the middle moves it.
+    #[test]
+    fn a_blur_is_moved_and_trimmed_on_its_row() {
+        let mut bench = Bench::new();
+        let id = bench.project.add_blur(2.0, 5.0);
+        bench.frame(Vec::new());
+        let span = |bench: &Bench| {
+            let b = bench.project.blurs.iter().find(|b| b.id == id).unwrap();
+            (b.start, b.end)
+        };
+        // No titles or captions: the blur row comes right after the tracks and the drop row.
+        let first_blur = (bench.project.tracks.len() + 1) as f32;
+        let on_row = |bench: &Bench, t: f64| bench.at(t) + vec2(0.0, first_blur * ROW - ROW / 2.0 + 20.0);
+        let drag = |bench: &mut Bench, from: Pos2, by: f32| {
+            bench.frame(vec![Event::PointerMoved(from)]);
+            bench.press(from, true);
+            for i in 1..=4 {
+                bench.frame(vec![Event::PointerMoved(from + vec2(by * i as f32 / 4.0, 0.0))]);
+            }
+            bench.press(from + vec2(by, 0.0), false);
+            bench.frame(Vec::new());
+        };
+        let from = on_row(&bench, 5.0) - vec2(2.0, 0.0);
+        drag(&mut bench, from, 60.0);
+        assert_eq!(span(&bench), (2.0, 7.0));
+        let from = on_row(&bench, 2.0) + vec2(2.0, 0.0);
+        drag(&mut bench, from, 30.0);
+        assert_eq!(span(&bench), (3.0, 7.0));
+        let from = on_row(&bench, 5.0);
+        drag(&mut bench, from, -60.0);
+        assert_eq!(span(&bench), (1.0, 5.0));
+        assert_eq!(bench.timeline.selection, [id.clone()]);
+        // One undo per drag.
+        assert!(bench.history.undo(&mut bench.project));
+        assert_eq!(span(&bench), (3.0, 7.0));
     }
 
     #[test]

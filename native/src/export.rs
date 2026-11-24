@@ -352,6 +352,19 @@ pub fn arguments(project: &Project, output: &Path) -> Result<Vec<String>, String
             input += 1;
         }
     }
+    // Blurred boxes, over every track and under the text: the box cut out of the picture, blurred and laid back for
+    // its time.
+    for (k, blur) in project.blurs.iter().enumerate().filter(|(_, b)| b.end > b.start) {
+        let (x, y, bw, bh) = blur.pixels(w, h);
+        filters.push(format!(
+            "[base{base}]split[bk{k}][bc{k}];[bc{k}]crop={bw}:{bh}:{x}:{y},gblur=sigma={sigma:.2}:steps=3[bz{k}];[bk{k}][bz{k}]overlay={x}:{y}:enable='between(t,{start:.3},{end:.3})'[base{next}]",
+            sigma = blur.sigma(h),
+            start = blur.start,
+            end = blur.end,
+            next = base + 1
+        ));
+        base += 1;
+    }
     let captions = if project.has_text() {
         format!("subtitles={CAPTIONS}:fontsdir=.,")
     } else {
@@ -852,6 +865,48 @@ mod tests {
         let first = frame(&output, "0");
         assert!(difference(&first, &frame(&clip, "2.0")) < difference(&first, &frame(&clip, "0")), "starts at 2 s");
         assert!(difference(&first, &frame(&clip, "2.0")) < 6.0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn renders_a_blurred_box_only_where_and_when_it_is() {
+        // Sharp black and white stripes; the left half blurred from 1 s to 2 s of 3.
+        let dir = std::env::temp_dir().join(format!("streamcuts-blur-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let clip = dir.join("stripes.mp4");
+        assert!(command(&ffmpeg())
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i", "color=c=white:s=320x180:r=30:d=3", "-vf", "drawgrid=w=8:h=180:t=4:c=black", "-pix_fmt", "yuv420p"])
+            .arg(&clip)
+            .status()
+            .unwrap()
+            .success());
+        let mut project = Project::new("Blur");
+        (project.width, project.height) = (320, 180);
+        let video = project.add_media(crate::ffmpeg::probe(&clip).unwrap());
+        project.place(&video, None, 0.0).unwrap();
+        let id = project.add_blur(1.0, 2.0);
+        let blur = project.blur_mut(&id).unwrap();
+        (blur.x, blur.y, blur.w, blur.h, blur.strength) = (0.0, 0.0, 0.5, 1.0, 1.0);
+        let output = dir.join("blurred.mp4");
+        let run = start(&project, &output, egui::Context::default()).unwrap();
+        assert_eq!(run.result.recv().unwrap(), Ok(()));
+        // How far a row of pixels swings between dark and light: stripes swing a lot, a blur hardly at all.
+        let swing = |at: &str, from: usize, to: usize| {
+            let out = command(&ffmpeg())
+                .args(["-v", "error", "-ss", at, "-i"])
+                .arg(&output)
+                .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gray", "-"])
+                .output()
+                .unwrap()
+                .stdout;
+            let row = &out[90 * 320..91 * 320];
+            let part = &row[from..to];
+            *part.iter().max().unwrap() as i32 - *part.iter().min().unwrap() as i32
+        };
+        assert!(swing("1.5", 20, 140) < 40, "blurred on the left at 1.5 s: {}", swing("1.5", 20, 140));
+        assert!(swing("1.5", 180, 300) > 150, "sharp on the right at 1.5 s: {}", swing("1.5", 180, 300));
+        assert!(swing("0.5", 20, 140) > 150, "sharp on the left before it: {}", swing("0.5", 20, 140));
+        assert!(swing("2.5", 20, 140) > 150, "and after it: {}", swing("2.5", 20, 140));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

@@ -1194,6 +1194,10 @@ pub struct Project {
     /// Moments marked on the timeline, in order: by hand (M) or by scene detection.
     #[serde(default)]
     pub markers: Vec<Marker>,
+    /// Parts of the picture blurred for a while (a face, a name, a screen), over every track but under titles and
+    /// captions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blurs: Vec<Blur>,
     /// Saved Media searches.
     #[serde(default)]
     pub smart_bins: Vec<SmartBin>,
@@ -1221,6 +1225,59 @@ pub struct Project {
     pub origin: Option<String>,
     #[serde(default)]
     pub saved_at: u64,
+}
+
+/// A box of the picture blurred from `start` to `end`: `x`, `y` its top-left corner and `w`, `h` its size, each a part
+/// of the frame (0-1), and how strongly (0-1). Exports blur it with FFmpeg's gblur; the preview blurs the same box.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Blur {
+    pub id: String,
+    pub start: f64,
+    pub end: f64,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    #[serde(default = "blur_strength")]
+    pub strength: f32,
+}
+
+fn blur_strength() -> f32 {
+    0.5
+}
+
+/// A blur box can't get smaller than this part of the frame.
+pub const SMALLEST_BLUR: f32 = 0.02;
+
+impl Blur {
+    /// The box in pixels of a `width` x `height` frame: even numbers (for 4:2:0 video), at least 2, inside the frame.
+    pub fn pixels(&self, width: u32, height: u32) -> (u32, u32, u32, u32) {
+        let even_down = |v: f32, most: u32| ((v.max(0.0) as u32) / 2 * 2).min(most.saturating_sub(2) / 2 * 2);
+        let even_up = |v: f32, most: u32| (((v.max(0.0).ceil() as u32) + 1) / 2 * 2).min(most / 2 * 2);
+        let (x0, y0) = (even_down(self.x * width as f32, width), even_down(self.y * height as f32, height));
+        let x1 = even_up((self.x + self.w) * width as f32, width).max(x0 + 2);
+        let y1 = even_up((self.y + self.h) * height as f32, height).max(y0 + 2);
+        (x0, y0, x1 - x0, y1 - y0)
+    }
+
+    /// How far it blurs, as a Gaussian's sigma in pixels of a frame `height` tall (strength 1 is 4% of the height).
+    pub fn sigma(&self, height: u32) -> f32 {
+        self.strength.clamp(0.05, 1.0) * 0.04 * height as f32
+    }
+
+    /// Kept inside the frame and no smaller than [`SMALLEST_BLUR`].
+    pub fn tidy(&mut self) {
+        self.w = self.w.clamp(SMALLEST_BLUR, 1.0);
+        self.h = self.h.clamp(SMALLEST_BLUR, 1.0);
+        self.x = self.x.clamp(0.0, 1.0 - self.w);
+        self.y = self.y.clamp(0.0, 1.0 - self.h);
+        self.strength = self.strength.clamp(0.05, 1.0);
+    }
+
+    pub fn shows_at(&self, t: f64) -> bool {
+        t >= self.start && t < self.end
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1381,6 +1438,7 @@ impl Project {
             markers: Vec::new(),
             smart_bins: Vec::new(),
             titles: Vec::new(),
+            blurs: Vec::new(),
             even_loudness: false,
             export_format: ExportFormat::default(),
             caption_bottom: caption_gap(),
@@ -1460,6 +1518,19 @@ impl Project {
             placed.push(i);
         }
         rows
+    }
+
+    /// Blurs the whole picture from `start` to `end` (the box is then dragged on the preview to blur just part of it).
+    pub fn add_blur(&mut self, start: f64, end: f64) -> String {
+        let id = new_id();
+        let start = start.max(0.0);
+        self.blurs.push(Blur { id: id.clone(), start, end: end.max(start + 0.1), x: 0.0, y: 0.0, w: 1.0, h: 1.0, strength: blur_strength() });
+        self.blurs.sort_by(|a, b| a.start.total_cmp(&b.start));
+        id
+    }
+
+    pub fn blur_mut(&mut self, id: &str) -> Option<&mut Blur> {
+        self.blurs.iter_mut().find(|b| b.id == id)
     }
 
     /// Stores where `title_rows` shows each title, so titles stay on their tracks from then on.
@@ -1989,6 +2060,10 @@ impl Project {
             title.start += by;
             title.end += by;
         }
+        for blur in self.blurs.iter_mut().filter(|b| b.start >= from) {
+            blur.start += by;
+            blur.end += by;
+        }
         for marker in self.markers.iter_mut().filter(|m| m.t >= from) {
             marker.t += by;
         }
@@ -2374,6 +2449,10 @@ impl Project {
             title.start += by;
             title.end += by;
         }
+        for blur in self.blurs.iter_mut().filter(|b| b.start >= from) {
+            blur.start += by;
+            blur.end += by;
+        }
         for marker in self.markers.iter_mut().filter(|m| m.t >= from) {
             marker.t += by;
         }
@@ -2621,6 +2700,10 @@ impl Project {
             title.start = (title.start + delta).max(0.0);
             title.end = (title.end + delta).max(title.start);
         }
+        for blur in self.blurs.iter_mut().filter(|b| after(b.start)) {
+            blur.start = (blur.start + delta).max(0.0);
+            blur.end = (blur.end + delta).max(blur.start);
+        }
         for caption in self.captions.iter_mut().filter(|c| after(c.start)) {
             caption.start = (caption.start + delta).max(0.0);
             caption.end = (caption.end + delta).max(caption.start);
@@ -2854,10 +2937,11 @@ impl Project {
     /// Deletes clips (and the clips linked to them) and captions by id.
     pub fn delete(&mut self, clip_ids: &[String]) -> usize {
         let clip_ids = &self.with_linked(clip_ids);
-        let text = self.captions.len() + self.titles.len();
+        let text = self.captions.len() + self.titles.len() + self.blurs.len();
         self.captions.retain(|c| !clip_ids.contains(&c.id));
         self.titles.retain(|t| !clip_ids.contains(&t.id));
-        let mut removed = text - self.captions.len() - self.titles.len();
+        self.blurs.retain(|b| !clip_ids.contains(&b.id));
+        let mut removed = text - self.captions.len() - self.titles.len() - self.blurs.len();
         for track in &mut self.tracks {
             let before = track.clips.len();
             track.clips.retain(|c| !clip_ids.contains(&c.id));
@@ -2990,6 +3074,7 @@ impl Project {
             true
         };
         self.titles.retain_mut(|t| squeeze(&mut t.start, &mut t.end));
+        self.blurs.retain_mut(|b| squeeze(&mut b.start, &mut b.end));
         self.captions.retain_mut(|c| {
             let keep = squeeze(&mut c.start, &mut c.end);
             if keep {
@@ -3171,6 +3256,30 @@ mod tests {
         assert!(project.set_speed_ripple(&first, 2.0));
         assert_eq!(project.clip(&first).unwrap().duration, 2.0);
         assert_eq!(project.clip(&second).unwrap().start, 2.0);
+    }
+
+    #[test]
+    fn a_blur_box_is_whole_even_pixels_inside_the_frame_and_moves_with_time() {
+        let (mut project, video) = project_with(20.0);
+        project.place(&video, None, 0.0).unwrap();
+        let id = project.add_blur(2.0, 5.0);
+        let full = project.blurs[0].clone();
+        assert_eq!(full.pixels(1920, 1080), (0, 0, 1920, 1080));
+        let part = Blur { x: 0.1001, y: 0.333, w: 0.25, h: 0.1, ..full.clone() };
+        let (x, y, w, h) = part.pixels(1920, 1080);
+        assert!([x, y, w, h].iter().all(|n| n % 2 == 0), "{:?}", (x, y, w, h));
+        assert!(x <= 192 && x + w >= 672 && y <= 360 && y + h >= 467, "covers the box: {:?}", (x, y, w, h));
+        let mut wild = Blur { x: 0.95, y: -0.2, w: 0.5, h: 0.001, strength: 4.0, ..full.clone() };
+        wild.tidy();
+        assert!(wild.x + wild.w <= 1.0 && wild.y >= 0.0 && wild.h >= SMALLEST_BLUR && wild.strength <= 1.0);
+        assert!((part.sigma(1080) - 0.5 * 0.04 * 1080.0).abs() < 1e-3);
+        // It moves with what's after a stretch taken out, goes when its time does, and is deleted by id.
+        project.blurs.push(Blur { id: "late".into(), start: 10.0, end: 12.0, ..full.clone() });
+        project.remove_range(0.0, 1.0);
+        assert_eq!((project.blurs[0].start, project.blurs[0].end), (1.0, 4.0));
+        assert_eq!(project.blurs[1].start, 9.0);
+        assert_eq!(project.delete(&[id]), 1);
+        assert_eq!(project.blurs.len(), 1);
     }
 
     #[test]
