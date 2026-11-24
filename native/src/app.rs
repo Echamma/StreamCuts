@@ -1114,6 +1114,10 @@ impl StreamCuts {
             Cmd::GrabFrame => self.grab_frame(None, None),
             Cmd::EditInFolio => self.to_folio = Some(self.one_clip().unwrap_or_default()),
             Cmd::EditFrameInFolio => self.grab(None, None, true),
+            Cmd::ExportPart => match crate::timeline::picked_span(&self.project, &self.timeline.selection) {
+                Some((from, to)) => self.export_part(ctx, from, to),
+                None => self.toasts.push("Pick clips (click them, or drag a box over them) to export that part".into()),
+            },
             Cmd::ResetColor => self.change_clips(|clip, _| (clip.grade, clip.lut) = (Grade::default(), None)),
             Cmd::ResetEffects => self.change_clips(|clip, _| clip.effects = Effects::default()),
             Cmd::ShowMore { before, seconds } => {
@@ -1949,7 +1953,33 @@ impl StreamCuts {
     }
 
     fn start_export(&mut self, ctx: &egui::Context) {
-        if let Some(media) = self.project.missing_media().first() {
+        let (project, name) = (self.project.clone(), self.project.name.clone());
+        self.export_project(ctx, &project, &name);
+    }
+
+    /// Right-click > Export this part: the timeline from `from` to `to` (every track, titles and captions), as its own
+    /// video in the exports folder, named after the project and the times, with the project's export settings.
+    fn export_part(&mut self, ctx: &egui::Context, from: f64, to: f64) {
+        if to - from < 0.05 {
+            return self.toasts.push("That part is too short to export".into());
+        }
+        if self.export.is_some() {
+            return self.toasts.push("An export is already running".into());
+        }
+        let clock = |t: f64| {
+            let ms = (t * 1000.0).round() as u64;
+            format!("{}m{:02}s{:03}", ms / 60_000, ms / 1000 % 60, ms % 1000)
+        };
+        let part = self.project.excerpt(from, to);
+        let name = format!("{} {}-{}", self.project.name, clock(from), clock(to));
+        self.export_project(ctx, &part, &name);
+        if self.export.is_some() {
+            self.toasts.push(format!("Exporting {} to {}", timecode(from, self.project.fps), timecode(to, self.project.fps)));
+        }
+    }
+
+    fn export_project(&mut self, ctx: &egui::Context, project: &Project, name: &str) {
+        if let Some(media) = project.missing_media().first() {
             self.toasts.push(format!(
                 "Can't export: {} is missing. Click it in Media to find it.",
                 media.name
@@ -1959,14 +1989,10 @@ impl StreamCuts {
         let _ = std::fs::create_dir_all(&self.place.exports_dir);
         let name = canopy_ui::canopy_core::files::unique_name(
             &self.place.exports_dir,
-            &format!(
-                "{}.{}",
-                self.project.name,
-                self.project.export_format.extension()
-            ),
+            &format!("{name}.{}", project.export_format.extension()),
         );
         let output = self.place.exports_dir.join(name);
-        match export::start(&self.project, &output, ctx.clone()) {
+        match export::start(project, &output, ctx.clone()) {
             Ok(run) => {
                 self.export = Some(run);
                 self.exported.push(output);
@@ -3706,6 +3732,13 @@ impl CanopyApp for StreamCuts {
                 Cmd::GrabFrame => self.grab_frame(Some(choice.clip), Some(choice.at)),
                 Cmd::EditInFolio => self.to_folio = Some(choice.clip),
                 Cmd::EditFrameInFolio => self.grab(Some(choice.clip), Some(choice.at), true),
+                Cmd::ExportPart => {
+                    let span = crate::timeline::picked_span(&self.project, &self.timeline.selection)
+                        .or_else(|| self.project.clip(&choice.clip).map(|c| (c.start, c.end())));
+                    if let Some((from, to)) = span {
+                        self.export_part(ui.ctx(), from, to);
+                    }
+                }
                 cmd => self.run(cmd, ui.ctx()),
             }
         }

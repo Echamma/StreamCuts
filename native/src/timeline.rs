@@ -166,6 +166,8 @@ struct MenuFacts<'a> {
     fps: u32,
     /// A still PNG, JPEG or WebP Folio can edit.
     editable: bool,
+    /// From the start of the first picked thing to the end of the last.
+    span: (f64, f64),
 }
 
 /// A clip's right-click menu: the usual edits, then what this clip can do. Each entry shows its key.
@@ -185,6 +187,9 @@ fn clip_menu(ui: &mut Ui, facts: &MenuFacts) -> Option<Cmd> {
     };
     let clip = facts.clip;
     let one = facts.picked <= 1;
+    let (from, to) = facts.span;
+    item(ui, Cmd::ExportPart, &format!("Export {} to {} as a video", timecode(from, facts.fps), timecode(to, facts.fps)));
+    ui.separator();
     let video = facts.kind == MediaKind::Video;
     if one && facts.kind == MediaKind::Image && facts.editable {
         item(ui, Cmd::EditInFolio, "Edit the picture in Folio");
@@ -237,6 +242,18 @@ fn clip_menu(ui: &mut Ui, facts: &MenuFacts) -> Option<Cmd> {
         item(ui, Cmd::ClipMenu, "More in the Clip menu…");
     }
     chosen
+}
+
+/// From the start of the first picked clip, title or caption to the end of the last.
+pub fn picked_span(project: &Project, selection: &[String]) -> Option<(f64, f64)> {
+    let spans = selection.iter().filter_map(|id| {
+        project
+            .clip(id)
+            .map(|c| (c.start, c.end()))
+            .or_else(|| project.titles.iter().find(|t| &t.id == id).map(|t| (t.start, t.end)))
+            .or_else(|| project.captions.iter().find(|c| &c.id == id).map(|c| (c.start, c.end)))
+    });
+    spans.fold(None, |span: Option<(f64, f64)>, (s, e)| Some(span.map_or((s, e), |(a, b)| (a.min(s), b.max(e)))))
 }
 
 fn tick_step(pps: f32) -> f64 {
@@ -725,6 +742,7 @@ impl Timeline {
                 at: self.menu_at,
                 fps: project.fps,
                 editable: crate::app::folio_can_edit(&media),
+                span: picked_span(project, &self.selection).unwrap_or((clip.start, clip.end())),
             };
             let menu_at = self.menu_at;
             if let Some(Some(cmd)) = egui::Popup::context_menu(&response)

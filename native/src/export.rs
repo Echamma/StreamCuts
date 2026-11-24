@@ -816,6 +816,46 @@ mod tests {
 
     /// Needs FFmpeg on PATH: renders a real two-track timeline and checks the result plays for the right length.
     #[test]
+    fn renders_a_part_of_the_timeline_with_ffmpeg() {
+        // A 6-second clip whose picture tells the time (testsrc2's clock), with sound; the part from 2 s to 4.5 s.
+        let dir = std::env::temp_dir().join(format!("streamcuts-part-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let clip = dir.join("clip.mp4");
+        assert!(command(&ffmpeg())
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=30:duration=6", "-f", "lavfi", "-i", "sine=duration=6", "-shortest", "-pix_fmt", "yuv420p"])
+            .arg(&clip)
+            .status()
+            .unwrap()
+            .success());
+        let mut project = Project::new("Part");
+        (project.width, project.height) = (320, 180);
+        let video = project.add_media(crate::ffmpeg::probe(&clip).unwrap());
+        project.place(&video, None, 0.0).unwrap();
+        let part = project.excerpt(2.0, 4.5);
+        let output = dir.join("part.mp4");
+        let run = start(&part, &output, egui::Context::default()).unwrap();
+        assert_eq!(run.result.recv().unwrap(), Ok(()));
+        let rendered = crate::ffmpeg::probe(&output).unwrap();
+        assert!((rendered.duration - 2.5).abs() < 0.15, "rendered {}", rendered.duration);
+        assert!(rendered.has_audio);
+        // Its first frame is the source's frame at 2 s, not its first.
+        let frame = |path: &Path, at: &str| {
+            let out = command(&ffmpeg())
+                .args(["-v", "error", "-ss", at, "-i"])
+                .arg(path)
+                .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gray", "-"])
+                .output()
+                .unwrap();
+            out.stdout
+        };
+        let difference = |a: &[u8], b: &[u8]| a.iter().zip(b).map(|(x, y)| (*x as i32 - *y as i32).unsigned_abs() as u64).sum::<u64>() as f64 / a.len().max(1) as f64;
+        let first = frame(&output, "0");
+        assert!(difference(&first, &frame(&clip, "2.0")) < difference(&first, &frame(&clip, "0")), "starts at 2 s");
+        assert!(difference(&first, &frame(&clip, "2.0")) < 6.0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn renders_a_timeline_with_ffmpeg() {
         let dir = std::env::temp_dir().join(format!("streamcuts-export-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

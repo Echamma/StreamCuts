@@ -2910,6 +2910,24 @@ impl Project {
         removed
     }
 
+    /// The timeline from `from` to `to` on its own, starting at 0: every track (locked ones too) cut at both ends,
+    /// titles, captions and markers with it. What "Export this part" renders.
+    pub fn excerpt(&self, from: f64, to: f64) -> Project {
+        let mut part = self.clone();
+        for track in &mut part.tracks {
+            track.locked = false;
+        }
+        let (from, to) = (from.max(0.0), to.max(from));
+        let end = part.duration();
+        if to < end {
+            part.remove_range(to, end);
+        }
+        if from > 0.0 {
+            part.remove_range(0.0, from);
+        }
+        part
+    }
+
     /// Takes the stretch `from`..`to` out of the timeline: on every unlocked track, clips across its ends are cut there
     /// and what's inside goes, then everything after moves up by its length; titles, captions and markers in it go
     /// (or are shortened), and those after it move up too. Locked tracks stay as they are. Returns whether anything
@@ -3153,6 +3171,32 @@ mod tests {
         assert!(project.set_speed_ripple(&first, 2.0));
         assert_eq!(project.clip(&first).unwrap().duration, 2.0);
         assert_eq!(project.clip(&second).unwrap().start, 2.0);
+    }
+
+    #[test]
+    fn an_excerpt_is_the_timeline_between_two_times_from_zero() {
+        let (mut project, video) = project_with(20.0);
+        let first = project.place(&video, None, 0.0).unwrap();
+        project.trim_end(&first, 6.0);
+        let second = project.place(&video, None, 6.0).unwrap();
+        project.trim_end(&second, 12.0);
+        project.clip_mut(&second).unwrap().source_in = 3.0;
+        // A locked overlay across the whole stretch is cut too: the part shows what the timeline shows there.
+        let overlay = project.add_track(TrackKind::Video);
+        let over = project.place(&video, Some(overlay), 1.0).unwrap();
+        project.trim_end(&over, 11.0);
+        project.tracks[overlay].locked = true;
+        project.add_title(4.0);
+        let part = project.excerpt(4.0, 9.0);
+        assert!((part.duration() - 5.0).abs() < 1e-6, "{}", part.duration());
+        let mut clips: Vec<(f64, f64, f64)> = part.tracks.iter().flat_map(|t| t.clips.iter()).map(|c| (c.start, c.duration, c.source_in)).collect();
+        clips.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        // The first clip's last 2 s, the overlay from 4 s to 9 s (3 s into it), and the second clip's first 3 s.
+        assert_eq!(clips, [(0.0, 2.0, 4.0), (0.0, 5.0, 3.0), (2.0, 3.0, 3.0)]);
+        assert_eq!((part.titles[0].start, part.titles[0].end), (0.0, 3.0));
+        // The project itself is untouched.
+        assert_eq!(project.clip(&first).unwrap().duration, 6.0);
+        assert!(project.tracks[overlay].locked);
     }
 
     #[test]
