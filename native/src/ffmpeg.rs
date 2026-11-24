@@ -718,10 +718,12 @@ pub fn still(
         let scaled = image
             .resize_exact(sw, sh, image::imageops::FilterType::Triangle)
             .to_rgba8();
+        // Black bars where a fitted picture leaves the frame open (as exports pad it), and the picture's own see-through
+        // parts kept, so the tracks under it show there.
         let mut canvas = image::RgbaImage::from_pixel(width, height, image::Rgba([0, 0, 0, 255]));
         let x = ((width as f32 - sw as f32) * focus.0).round() as i64;
         let y = ((height as f32 - sh as f32) * focus.1).round() as i64;
-        image::imageops::overlay(&mut canvas, &scaled, x, y);
+        image::imageops::replace(&mut canvas, &scaled, x, y);
         return Ok(Frame {
             time: at,
             size: [width as usize, height as usize],

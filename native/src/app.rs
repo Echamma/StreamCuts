@@ -10,7 +10,7 @@ use crate::filmstrip::Strip;
 use crate::keys::{self, Cmd};
 use crate::preview::{Clock, Preview};
 use crate::project::{
-    Effects, ExportFormat, Framing, Grade, History, MediaKind, Picture, Placement, Project, Retime,
+    Blur, Effects, ExportFormat, Framing, Grade, History, MediaKind, Picture, Placement, Project, Retime,
     SPEEDS, Sound,
 };
 use crate::storage;
@@ -95,6 +95,8 @@ pub struct StreamCuts {
     under: HashMap<usize, Preview>,
     /// A drag on the picture: what it moves or sizes, and how things were when it began.
     picture_drag: Option<PictureDrag>,
+    /// Each showing blur's blurred picture, and what it was made from.
+    blur_patches: HashMap<String, (String, TextureHandle)>,
     clock: Clock,
     audio: Audio,
     playhead: f64,
@@ -182,12 +184,14 @@ enum Target {
     Title(String),
     /// The captions (all of them move and size together); the id is the one showing.
     Captions(String),
+    /// A blurred box.
+    Blur(String),
 }
 
 impl Target {
     fn id(&self) -> &str {
         match self {
-            Target::Clip(id) | Target::Title(id) | Target::Captions(id) => id,
+            Target::Clip(id) | Target::Title(id) | Target::Captions(id) | Target::Blur(id) => id,
         }
     }
 }
@@ -210,7 +214,58 @@ struct PictureDrag {
     start: Pos2,
     place: Placement,
     text: (f32, f32, f32),
+    /// A blur's box: left, top, width, height.
+    area: [f32; 4],
     center: Pos2,
+}
+
+/// Where a blur's box is on the preview `screen`.
+fn blur_rect(screen: Rect, blur: &Blur) -> Rect {
+    Rect::from_min_size(
+        pos2(screen.left() + blur.x * screen.width(), screen.top() + blur.y * screen.height()),
+        vec2(blur.w * screen.width(), blur.h * screen.height()),
+    )
+}
+
+/// The picture inside a `dw` x `dh` box at (`x`, `y`), put together from `layers` (bottom first, each a frame and where
+/// it's placed; see-through parts let the ones under show, over black) and blurred by `sigma` pixels.
+fn blurred_box(layers: &[(Arc<Frame>, Placement)], (x, y, w, h): (u32, u32, u32, u32), (dw, dh): (u32, u32), sigma: f32) -> Frame {
+    let (w, h) = (w as usize, h as usize);
+    let mut rgba = vec![0u8; w * h * 4];
+    for px in rgba.chunks_exact_mut(4) {
+        px[3] = 255;
+    }
+    let unit = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+    for (frame, place) in layers {
+        let [fw, fh] = frame.size;
+        if fw == 0 || fh == 0 {
+            continue;
+        }
+        let (to, uv) = placed(unit, place);
+        for row in 0..h {
+            let fy = (y as f32 + row as f32 + 0.5) / dh as f32;
+            if fy < to.top() || fy >= to.bottom() {
+                continue;
+            }
+            let v = uv.top() + (fy - to.top()) / to.height() * uv.height();
+            let sy = ((v * fh as f32) as usize).min(fh - 1);
+            for col in 0..w {
+                let fx = (x as f32 + col as f32 + 0.5) / dw as f32;
+                if fx < to.left() || fx >= to.right() {
+                    continue;
+                }
+                let u = uv.left() + (fx - to.left()) / to.width() * uv.width();
+                let sx = ((u * fw as f32) as usize).min(fw - 1);
+                let from = (sy * fw + sx) * 4;
+                let (src, out) = (&frame.rgba[from..from + 4], (row * w + col) * 4);
+                let a = src[3] as u32;
+                for c in 0..3 {
+                    rgba[out + c] = ((src[c] as u32 * a + rgba[out + c] as u32 * (255 - a) + 127) / 255) as u8;
+                }
+            }
+        }
+    }
+    crate::ffmpeg::blurred(&Frame { time: 0.0, size: [w, h], rgba }, sigma)
 }
 
 /// Where a clip's picture goes on the preview `screen` and which part of its frame shows (`Place`).
@@ -262,6 +317,7 @@ impl StreamCuts {
             preview: Preview::default(),
             under: HashMap::new(),
             picture_drag: None,
+            blur_patches: HashMap::new(),
             clock: Clock::default(),
             audio: Audio::default(),
             playhead: 0.0,
@@ -1988,7 +2044,7 @@ impl StreamCuts {
         let id = self.project.add_blur(from, to);
         self.timeline.selection = vec![id];
         self.edited();
-        self.toasts.push("Blurred on the Blurs row: drag its ends there to change when".into());
+        self.toasts.push("Blurred: drag the box on the picture to blur just part of it, its ends on the Blurs row to change when".into());
     }
 
     fn export_project(&mut self, ctx: &egui::Context, project: &Project, name: &str) {
@@ -2352,6 +2408,22 @@ impl StreamCuts {
         // What's on the picture and where, front first, for picking and dragging (see `edit_on_picture`).
         let mut elements: Vec<(Target, Rect)> = Vec::new();
         let over_picture = ui.painter().with_clip_rect(screen);
+        // Blurred boxes, over the clips and under the text, as exports put them. One over the whole picture is only
+        // picked from the picture while it's picked already (else nothing under it could be).
+        let showing: Vec<Blur> = self.project.blurs.iter().filter(|b| b.shows_at(self.playhead)).cloned().collect();
+        self.blur_patches.retain(|id, _| showing.iter().any(|b| &b.id == id));
+        for blur in &showing {
+            let rect = blur_rect(screen, blur);
+            if !self.preview.blank {
+                if let Some(texture) = self.blur_patch(ui.ctx(), blur) {
+                    over_picture.image(texture.id(), rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                }
+            }
+            let whole = blur.w >= 0.999 && blur.h >= 0.999;
+            if !whole || self.timeline.selection.contains(&blur.id) {
+                elements.insert(0, (Target::Blur(blur.id.clone()), rect));
+            }
+        }
         for title in self
             .project
             .titles
@@ -2462,6 +2534,47 @@ impl StreamCuts {
     /// Moving, resizing and cropping on the picture, as in a photo editor. A click picks what's under the pointer (a
     /// title, the captions, or a clip, front first); the picked one gets a box: drag inside to move it, a corner to
     /// resize it, and, for clips, an edge to crop it. `elements` is what's on the picture and where, front first.
+    /// The picture inside a blur's box, blurred as exports blur it: put together from what each layer shows (bottom
+    /// first, see-through parts letting the ones under show), at the preview's size, then blurred. Made again only when
+    /// a layer's frame, the box or the strength changes.
+    fn blur_patch(&mut self, ctx: &egui::Context, blur: &Blur) -> Option<TextureHandle> {
+        let (dw, dh) = crate::preview::decode_size(&self.project);
+        let (x, y, w, h) = blur.pixels(dw, dh);
+        let tracks = self.project.layers_at(self.playhead);
+        let mut layers: Vec<(Arc<Frame>, Placement)> = Vec::new();
+        for (i, track) in tracks.iter().enumerate().rev() {
+            let preview = if i == 0 { Some(&self.preview) } else { self.under.get(track) };
+            let Some(frame) = preview.filter(|p| !p.blank).and_then(|p| p.frame.clone()) else { continue };
+            let place = self.project.clip_on(*track, self.playhead).map(|(c, _)| c.place).unwrap_or_default();
+            layers.push((frame, place));
+        }
+        if layers.is_empty() {
+            return None;
+        }
+        let sigma = blur.sigma(dh);
+        let key = format!(
+            "{x},{y},{w},{h},{sigma:.3},{}",
+            layers.iter().map(|(f, p)| format!("{:p}:{p:?}", Arc::as_ptr(f))).collect::<Vec<_>>().join(";")
+        );
+        if let Some((made, texture)) = self.blur_patches.get(&blur.id) {
+            if *made == key {
+                return Some(texture.clone());
+            }
+        }
+        let blurred = blurred_box(&layers, (x, y, w, h), (dw, dh), sigma);
+        let (w, h) = (w as usize, h as usize);
+        let image = ColorImage::from_rgba_unmultiplied([w, h], &blurred.rgba);
+        let texture = match self.blur_patches.remove(&blur.id) {
+            Some((_, mut texture)) => {
+                texture.set(image, TextureOptions::LINEAR);
+                texture
+            }
+            None => ctx.load_texture(format!("blur-{}", blur.id), image, TextureOptions::LINEAR),
+        };
+        self.blur_patches.insert(blur.id.clone(), (key, texture.clone()));
+        Some(texture)
+    }
+
     fn edit_on_picture(&mut self, ui: &mut Ui, screen: Rect, elements: &[(Target, Rect)]) {
         let response = ui.interact(
             screen,
@@ -2497,7 +2610,7 @@ impl StreamCuts {
                     }
                 }
             }
-            if matches!(target, Target::Clip(_)) {
+            if matches!(target, Target::Clip(_) | Target::Blur(_)) {
                 let near_x = (rect.top()..=rect.bottom()).contains(&p.y);
                 let near_y = (rect.left()..=rect.right()).contains(&p.x);
                 for (side, hit) in [
@@ -2537,7 +2650,7 @@ impl StreamCuts {
                     egui::StrokeKind::Middle,
                 );
             }
-            if matches!(target, Target::Clip(_)) {
+            if matches!(target, Target::Clip(_) | Target::Blur(_)) {
                 for (at, size) in [
                     (rect.left_center(), vec2(4.0, 16.0)),
                     (rect.right_center(), vec2(4.0, 16.0)),
@@ -2612,6 +2725,11 @@ impl StreamCuts {
                                 self.project.caption_size,
                             ),
                         ),
+                        Target::Blur(_) => (Placement::default(), (0.0, 0.0, 0.0)),
+                    };
+                    let area = match &target {
+                        Target::Blur(id) => self.project.blurs.iter().find(|b| &b.id == id).map_or([0.0, 0.0, 1.0, 1.0], |b| [b.x, b.y, b.w, b.h]),
+                        _ => [0.0; 4],
                     };
                     self.picture_drag = Some(PictureDrag {
                         target,
@@ -2619,6 +2737,7 @@ impl StreamCuts {
                         start: p,
                         place,
                         text,
+                        area,
                         center: rect.center(),
                     });
                 }
@@ -2688,6 +2807,38 @@ impl StreamCuts {
                     if let Some(clip) = self.project.clip_mut(id) {
                         if clip.place != place {
                             clip.place = place;
+                            self.edited();
+                        }
+                    }
+                }
+                Target::Blur(id) => {
+                    // The body moves it; a corner or an edge moves that corner or edge, the other side staying put.
+                    let [x0, y0, w0, h0] = drag.area;
+                    let (mut l, mut t, mut r, mut b) = (x0, y0, x0 + w0, y0 + h0);
+                    match drag.grip {
+                        Grip::Move => {
+                            let dx = d.x.clamp(-l, 1.0 - r);
+                            let dy = d.y.clamp(-t, 1.0 - b);
+                            (l, r, t, b) = (l + dx, r + dx, t + dy, b + dy);
+                        }
+                        Grip::Corner(sx, sy) => {
+                            if sx < 0 { l = px } else { r = px }
+                            if sy < 0 { t = py } else { b = py }
+                        }
+                        Grip::Edge(side) => match side {
+                            0 => l = px,
+                            2 => r = px,
+                            1 => t = py,
+                            _ => b = py,
+                        },
+                    }
+                    let (l, r) = (l.min(r).clamp(0.0, 1.0), l.max(r).clamp(0.0, 1.0));
+                    let (t, b) = (t.min(b).clamp(0.0, 1.0), t.max(b).clamp(0.0, 1.0));
+                    if let Some(blur) = self.project.blur_mut(id) {
+                        let before = blur.clone();
+                        (blur.x, blur.y, blur.w, blur.h) = (l, t, r - l, b - t);
+                        blur.tidy();
+                        if *blur != before {
                             self.edited();
                         }
                     }
@@ -2794,6 +2945,7 @@ impl StreamCuts {
             self.clip_settings(ui);
             self.caption_editor(ui);
             self.title_editor(ui);
+            self.blur_editor(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if icon_button(ui, Icon::ZoomIn, "Zoom in (+, or Ctrl+wheel)", false).clicked() {
                     self.timeline.pps = (self.timeline.pps * 1.5).min(600.0);
@@ -3283,6 +3435,39 @@ impl StreamCuts {
         {
             self.history.record(&self.project);
             self.project.caption_words = words;
+            self.edited();
+        }
+    }
+
+    /// One picked blur: how strong it is, and a button to blur the whole picture again.
+    fn blur_editor(&mut self, ui: &mut Ui) {
+        let [id] = self.timeline.selection.as_slice() else {
+            return;
+        };
+        let Some(blur) = self.project.blurs.iter().find(|b| &b.id == id).cloned() else {
+            return;
+        };
+        ui.add_space(10.0);
+        ui.label(egui::RichText::new("Blur").font(font::ui(12.0)).color(color::INK_SOFT));
+        let mut percent = (blur.strength * 100.0).round();
+        let slider = ui
+            .add(egui::Slider::new(&mut percent, 5.0..=100.0).suffix("%").step_by(1.0))
+            .on_hover_text("How strongly it blurs. Drag the box on the picture to blur just part of it");
+        if slider.drag_started() || (slider.changed() && !slider.dragged()) {
+            self.history.record(&self.project);
+        }
+        if slider.changed() {
+            if let Some(blur) = self.project.blur_mut(&blur.id) {
+                blur.strength = percent / 100.0;
+            }
+            self.edited();
+        }
+        let whole = blur.w >= 0.999 && blur.h >= 0.999;
+        if !whole && ui.button("Whole picture").on_hover_text("Blur all of the picture again").clicked() {
+            self.history.record(&self.project);
+            if let Some(blur) = self.project.blur_mut(&blur.id) {
+                (blur.x, blur.y, blur.w, blur.h) = (0.0, 0.0, 1.0, 1.0);
+            }
             self.edited();
         }
     }
@@ -4259,5 +4444,41 @@ mod keyboard_tests {
     fn frame_ui(app: &mut StreamCuts, ctx: &egui::Context, host: &mut dyn Host) {
         let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1400.0, 900.0))), ..Default::default() };
         ctx.run_ui(input, |ui| app.ui(ui, host)).textures_delta.clear();
+    }
+}
+
+#[cfg(test)]
+mod blur_tests {
+    use super::*;
+
+    fn stripes(width: usize, height: usize) -> Frame {
+        let rgba = (0..width * height).flat_map(|i| if (i % width / 4) % 2 == 0 { [0, 0, 0, 255] } else { [255, 255, 255, 255] }).collect();
+        Frame { time: 0.0, size: [width, height], rgba }
+    }
+
+    /// How far a row of a frame swings between dark and light, away from its ends.
+    fn swing(frame: &Frame, row: usize) -> i32 {
+        let [w, _] = frame.size;
+        let values: Vec<i32> = (w / 4..w * 3 / 4).map(|x| frame.rgba[(row * w + x) * 4] as i32).collect();
+        values.iter().max().unwrap() - values.iter().min().unwrap()
+    }
+
+    #[test]
+    fn the_preview_blurs_the_box_through_a_see_through_picture() {
+        // Stripes under a full-frame picture that's see-through on its left half and solid red on its right.
+        let under = Arc::new(stripes(160, 90));
+        let mut top = stripes(160, 90);
+        for (i, px) in top.rgba.chunks_exact_mut(4).enumerate() {
+            px.copy_from_slice(if i % 160 < 80 { &[0, 0, 0, 0] } else { &[255, 0, 0, 255] });
+        }
+        let layers = vec![(under, Placement::default()), (Arc::new(top), Placement::default())];
+        // Without blur the stripes show through the see-through half, and the red half is red.
+        let sharp = blurred_box(&layers, (0, 0, 160, 90), (160, 90), 0.0);
+        assert!(swing(&blurred_box(&layers, (0, 0, 64, 90), (160, 90), 0.0), 40) > 200, "sharp stripes through the see-through half");
+        assert_eq!(&sharp.rgba[(40 * 160 + 120) * 4..(40 * 160 + 120) * 4 + 3], &[255, 0, 0]);
+        // A box over the see-through half, blurred: the stripes come out an even gray.
+        let soft = blurred_box(&layers, (0, 0, 64, 90), (160, 90), 6.0);
+        assert_eq!(soft.size, [64, 90]);
+        assert!(swing(&soft, 40) < 40, "{}", swing(&soft, 40));
     }
 }

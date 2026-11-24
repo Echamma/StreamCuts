@@ -3112,14 +3112,15 @@ impl Project {
         self.media(&clip.media_id).map(|m| (clip, m))
     }
 
-    /// The video tracks whose clips show at `t`, front first: down to the first that fills the frame (it hides the rest,
-    /// as exports stack them).
+    /// The video tracks whose clips show at `t`, front first: down to the first video that fills the frame (it hides
+    /// the rest, as exports stack them). A picture can be see-through (a PNG with no background), so what's under it
+    /// shows too.
     pub fn layers_at(&self, t: f64) -> Vec<usize> {
         let mut layers = Vec::new();
         for track in 0..self.tracks.len() {
-            if let Some((clip, _)) = self.clip_on(track, t) {
+            if let Some((clip, media)) = self.clip_on(track, t) {
                 layers.push(track);
-                if clip.place.is_full() {
+                if clip.place.is_full() && media.kind != MediaKind::Image {
                     break;
                 }
             }
@@ -3280,6 +3281,23 @@ mod tests {
         assert_eq!(project.blurs[1].start, 9.0);
         assert_eq!(project.delete(&[id]), 1);
         assert_eq!(project.blurs.len(), 1);
+    }
+
+    #[test]
+    fn what_is_under_a_full_frame_picture_still_shows() {
+        let (mut project, video) = project_with(10.0);
+        let under = project.place(&video, None, 0.0).unwrap();
+        let top = project.add_track(TrackKind::Video);
+        let picture = project.add_media(media(MediaKind::Image, 0.0));
+        let logo = project.place(&picture, Some(top), 0.0).unwrap();
+        project.clip_mut(&logo).unwrap().place = Placement::default();
+        let layers = project.layers_at(1.0);
+        assert_eq!(layers.len(), 2, "the picture and the video under it: {layers:?}");
+        assert_eq!(project.clip_on(layers[1], 1.0).unwrap().0.id, under);
+        // A full-frame video on top still hides what's under it.
+        let cover = project.place(&video, Some(top), 6.0).unwrap();
+        project.clip_mut(&cover).unwrap().place = Placement::default();
+        assert_eq!(project.layers_at(7.0).len(), 1);
     }
 
     #[test]

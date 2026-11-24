@@ -98,6 +98,8 @@ pub struct Preview {
     pub proxies: HashMap<String, PathBuf>,
     /// The histogram and waveform of what's shown, while they're on.
     pub scopes: Scopes,
+    /// The frame shown, for what the app works out from it (a blurred box). A new one on each change.
+    pub frame: Option<std::sync::Arc<Frame>>,
     /// The video track this preview shows, or None for whichever clip is in front (the main preview). Tracks below
     /// a placed clip get a preview of their own (see `Project::layers_at`).
     pub track: Option<usize>,
@@ -136,10 +138,12 @@ impl Preview {
     fn show(
         texture: &mut Option<TextureHandle>,
         scopes: &mut Scopes,
+        kept: &mut Option<std::sync::Arc<Frame>>,
         ctx: &egui::Context,
         frame: &Frame,
     ) {
         scopes.update(ctx, frame);
+        *kept = Some(std::sync::Arc::new(frame.clone()));
         let image = ColorImage::from_rgba_unmultiplied(frame.size, &frame.rgba);
         match texture {
             Some(texture) => texture.set(image, TextureOptions::LINEAR),
@@ -158,7 +162,7 @@ impl Preview {
         self.waiting = None;
         if let Ok(frame) = frame {
             if self.playing.is_none() {
-                Self::show(&mut self.texture, &mut self.scopes, ctx, &frame);
+                Self::show(&mut self.texture, &mut self.scopes, &mut self.frame, ctx, &frame);
                 self.shown = Some(key);
             }
         }
@@ -251,14 +255,14 @@ impl Preview {
                 ) {
                     let frame =
                         ffmpeg::crossfade_frames(old, new, progress as f32, clip.transition);
-                    Self::show(&mut self.texture, &mut self.scopes, ctx, &frame);
+                    Self::show(&mut self.texture, &mut self.scopes, &mut self.frame, ctx, &frame);
                     self.shown = None;
                 }
             } else {
                 let had_transition = self.transition.take().is_some();
                 if changed || had_transition {
                     if let Some(frame) = self.playing.as_ref().and_then(|p| p.last.as_ref()) {
-                        Self::show(&mut self.texture, &mut self.scopes, ctx, frame);
+                        Self::show(&mut self.texture, &mut self.scopes, &mut self.frame, ctx, frame);
                         self.shown = None;
                     }
                 }
@@ -370,6 +374,7 @@ impl Preview {
         self.transition = None;
         self.next = None;
         self.texture = None;
+        self.frame = None;
     }
 }
 

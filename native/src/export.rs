@@ -869,6 +869,47 @@ mod tests {
     }
 
     #[test]
+    fn a_picture_with_no_background_shows_the_video_under_it() {
+        let dir = std::env::temp_dir().join(format!("streamcuts-see-through-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let clip = dir.join("red.mp4");
+        assert!(command(&ffmpeg())
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i", "color=c=red:s=320x180:r=30:d=2", "-pix_fmt", "yuv420p"])
+            .arg(&clip)
+            .status()
+            .unwrap()
+            .success());
+        // A 320x180 PNG: nothing on its left half, solid green on its right.
+        let picture = dir.join("half.png");
+        image::RgbaImage::from_fn(320, 180, |x, _| if x < 160 { image::Rgba([0, 0, 0, 0]) } else { image::Rgba([0, 255, 0, 255]) })
+            .save(&picture)
+            .unwrap();
+        let mut project = Project::new("See-through");
+        (project.width, project.height) = (320, 180);
+        let video = project.add_media(crate::ffmpeg::probe(&clip).unwrap());
+        let png = project.add_media(crate::ffmpeg::probe(&picture).unwrap());
+        project.place(&video, None, 0.0).unwrap();
+        let top = project.add_track(TrackKind::Video);
+        let still = project.place(&png, Some(top), 0.0).unwrap();
+        project.clip_mut(&still).unwrap().place = crate::project::Placement::default();
+        project.trim_end(&still, 2.0);
+        let output = dir.join("out.mp4");
+        let run = start(&project, &output, egui::Context::default()).unwrap();
+        assert_eq!(run.result.recv().unwrap(), Ok(()));
+        let out = command(&ffmpeg())
+            .args(["-v", "error", "-ss", "1", "-i"])
+            .arg(&output)
+            .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+            .output()
+            .unwrap()
+            .stdout;
+        let at = |x: usize| &out[(90 * 320 + x) * 3..(90 * 320 + x) * 3 + 3];
+        assert!(at(60)[0] > 200 && at(60)[1] < 60, "the red video shows through: {:?}", at(60));
+        assert!(at(260)[1] > 200 && at(260)[0] < 60, "the picture's green: {:?}", at(260));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn renders_a_blurred_box_only_where_and_when_it_is() {
         // Sharp black and white stripes; the left half blurred from 1 s to 2 s of 3.
         let dir = std::env::temp_dir().join(format!("streamcuts-blur-{}", std::process::id()));
