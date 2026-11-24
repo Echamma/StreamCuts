@@ -80,8 +80,8 @@ pub struct Timeline {
     pub selection: Vec<String>,
     pub snap: bool,
     gesture: Option<Gesture>,
-    /// A title being dragged, and by which part.
-    title_grab: Option<(String, Grab)>,
+    /// A title being dragged: which, by which part, its start and end then, and where the button went down.
+    title_grab: Option<(String, Grab, f64, f64, f32)>,
     /// Where dragged clips are going in between others (the cut), shown as a line while the drag lasts.
     insert_line: Option<f64>,
     /// A medium from the bin held over the lanes: it's on the timeline already, where it would land, until it's let
@@ -111,7 +111,7 @@ struct DropPreview {
 /// How long clips take to slide out of the way of a drag, in seconds.
 const SLIDE: f32 = 0.12;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum Grab {
     Move,
     Start,
@@ -881,13 +881,26 @@ impl Timeline {
                     font::ui(11.0),
                     color::INK,
                 );
+                // A little wider than it's drawn, so an edge can be taken from just outside it too.
                 let response = ui.interact(
-                    visible,
+                    visible.expand2(vec2(EDGE, 0.0)).intersect(lane_area),
                     ui.scope_id().with(("title", &title.id)),
                     Sense::click_and_drag(),
                 );
-                let near_edge =
-                    |x: f32| (x - block.left()).abs() <= EDGE || (x - block.right()).abs() <= EDGE;
+                // Which part is under x: an edge within reach (the nearer one), else the middle. A title too short to
+                // have a middle beside its edges keeps its middle third for moving.
+                let reach = EDGE.min(block.width() / 3.0);
+                let part = |x: f32| {
+                    let (left, right) = ((x - block.left()).abs(), (x - block.right()).abs());
+                    if left <= reach && left <= right {
+                        Grab::Start
+                    } else if right <= reach {
+                        Grab::End
+                    } else {
+                        Grab::Move
+                    }
+                };
+                let near_edge = |x: f32| part(x) != Grab::Move;
                 if response.hovered() {
                     ui.ctx()
                         .set_cursor_icon(if pointer.is_some_and(|p| near_edge(p.x)) {
@@ -913,20 +926,23 @@ impl Timeline {
                     if !selected {
                         self.selection = vec![title.id.clone()];
                     }
-                    // Its edges change when it starts or ends; anywhere else moves it.
-                    let grab = match response.interact_pointer_pos() {
-                        Some(p) if (p.x - block.left()).abs() <= EDGE => Grab::Start,
-                        Some(p) if (p.x - block.right()).abs() <= EDGE => Grab::End,
-                        _ => Grab::Move,
-                    };
-                    self.title_grab = Some((title.id.clone(), grab));
+                    // Its edges change when it starts or ends; anywhere else moves it. Decided by where the button
+                    // went down: by the time egui calls it a drag, the pointer has already left a 7 px edge.
+                    let down = ui.input(|i| i.pointer.press_origin()).or(response.interact_pointer_pos());
+                    let grab = down.map_or(Grab::Move, |p| part(p.x));
+                    let x = down.map_or(block.center().x, |p| p.x);
+                    self.title_grab = Some((title.id.clone(), grab, title.start, title.end, x));
                 }
-                if response.dragged() && response.drag_delta().x != 0.0 {
-                    moved = Some((title.id.clone(), (response.drag_delta().x / pps) as f64));
+                if response.dragged() {
+                    if let (Some((id, grab, start, end, x)), Some(p)) = (&self.title_grab, response.interact_pointer_pos()) {
+                        if id == &title.id {
+                            moved = Some((title.id.clone(), *grab, *start, *end, ((p.x - x) / pps) as f64));
+                        }
+                    }
                 }
                 // Held by its middle over another text track (or the row under the last one, for a new track), it goes
                 // there.
-                let by_middle = matches!(&self.title_grab, Some((id, Grab::Move)) if id == &title.id);
+                let by_middle = matches!(&self.title_grab, Some((id, Grab::Move, ..)) if id == &title.id);
                 if response.dragged() && by_middle {
                     if let Some(p) = response.interact_pointer_pos() {
                         let over = row_at(p.y) - first_text as f32;
@@ -954,24 +970,17 @@ impl Timeline {
                     output.changed = true;
                 }
             }
-            if let Some((id, dt)) = moved {
-                let grab = self
-                    .title_grab
-                    .as_ref()
-                    .filter(|(grabbed, _)| grabbed == &id)
-                    .map_or(Grab::Move, |(_, grab)| *grab);
+            // Measured from where the drag began, so nothing is lost to the drag threshold or rounding.
+            if let Some((id, grab, start, end, dt)) = moved {
                 if let Some(title) = project.title_mut(&id) {
                     const SHORTEST: f64 = 0.3;
                     match grab {
                         Grab::Move => {
-                            let dt = dt.max(-title.start);
-                            title.start += dt;
-                            title.end += dt;
+                            let dt = dt.max(-start);
+                            (title.start, title.end) = (start + dt, end + dt);
                         }
-                        Grab::Start => {
-                            title.start = (title.start + dt).clamp(0.0, title.end - SHORTEST)
-                        }
-                        Grab::End => title.end = (title.end + dt).max(title.start + SHORTEST),
+                        Grab::Start => title.start = (start + dt).clamp(0.0, end - SHORTEST),
+                        Grab::End => title.end = (end + dt).max(start + SHORTEST),
                     }
                     output.changed = true;
                 }
@@ -1558,6 +1567,47 @@ mod tests {
         bench.frame(Vec::new());
         assert_eq!(rows(&bench), [0, 1, 1]);
         assert_eq!(bench.project.titles.iter().find(|t| t.id == c).unwrap().start, 10.0);
+    }
+
+    /// A title's edges change how long it shows, like a clip's, even when the drag sets off quickly from the edge (the
+    /// pointer is well past the edge by the time egui calls it a drag) or from just outside it.
+    #[test]
+    fn a_title_is_trimmed_by_dragging_its_edges() {
+        let mut bench = Bench::new();
+        let id = bench.project.add_title(2.0);
+        bench.frame(Vec::new());
+        let span = |bench: &Bench| {
+            let t = bench.project.titles.iter().find(|t| t.id == id).unwrap();
+            (t.start, t.end)
+        };
+        assert_eq!(span(&bench), (2.0, 5.0));
+        let first_text = (bench.project.tracks.len() + 1) as f32;
+        let on_title = |bench: &Bench, t: f64| bench.at(t) + vec2(0.0, first_text * ROW - ROW / 2.0 + 20.0);
+        let drag = |bench: &mut Bench, from: Pos2, by: f32| {
+            bench.frame(vec![Event::PointerMoved(from)]);
+            bench.press(from, true);
+            for i in 1..=4 {
+                bench.frame(vec![Event::PointerMoved(from + vec2(by * i as f32 / 4.0, 0.0))]);
+            }
+            bench.press(from + vec2(by, 0.0), false);
+            bench.frame(Vec::new());
+        };
+        // The right edge, from 2 px inside, 2 s later (60 px at 30 px a second): it shows longer.
+        let from = on_title(&bench, 5.0) - vec2(2.0, 0.0);
+        drag(&mut bench, from, 60.0);
+        assert_eq!(span(&bench), (2.0, 7.0));
+        // The left edge, from 3 px outside it, 1 s earlier: it starts sooner, its end stays.
+        let from = on_title(&bench, 2.0) - vec2(3.0, 0.0);
+        drag(&mut bench, from, -30.0);
+        assert_eq!(span(&bench), (1.0, 7.0));
+        // The right edge back in by 4 s: shorter.
+        let from = on_title(&bench, 7.0) + vec2(1.0, 0.0);
+        drag(&mut bench, from, -120.0);
+        assert_eq!(span(&bench), (1.0, 3.0));
+        // Its middle still moves it whole.
+        let from = on_title(&bench, 2.0);
+        drag(&mut bench, from, 30.0);
+        assert_eq!(span(&bench), (2.0, 4.0), "moved whole");
     }
 
     #[test]
