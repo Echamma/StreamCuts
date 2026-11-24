@@ -194,6 +194,7 @@ fn clip_menu(ui: &mut Ui, facts: &MenuFacts) -> Option<Cmd> {
         // The frame under the playhead when it's on this clip, else the one where it was right-clicked.
         let t = if clip.contains(facts.playhead) { facts.playhead } else { facts.at };
         item(ui, Cmd::GrabFrame, &format!("Grab the frame at {} as a picture", timecode(t, facts.fps)));
+        item(ui, Cmd::EditFrameInFolio, &format!("Edit the frame at {} in Folio", timecode(t, facts.fps)));
         ui.separator();
     }
     if clip.contains(facts.playhead) && clip.start < facts.playhead {

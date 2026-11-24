@@ -1812,6 +1812,25 @@ impl Project {
         Some(id)
     }
 
+    /// A grabbed frame laid exactly over the clip it came from, to be edited (in Folio): in front of it, the same
+    /// size, framing, place and color, from `at` for a still's usual length but not past the clip's end, so it
+    /// reads as the video paused with the edit on it.
+    pub fn place_frame_edit(&mut self, media_id: &str, from: &str, at: f64) -> Option<String> {
+        let media = self.media(media_id)?.clone();
+        let source = self.clip(from)?.clone();
+        let main = self.find(from)?.track;
+        let start = at.max(0.0);
+        let duration = STILL_SECONDS.min(source.end() - start).max(MIN_CLIP);
+        let track = crate::autoedit::free_track(self, TrackKind::Video, start, start + duration, Some(main));
+        let mut clip = Self::new_clip(&media, start, duration);
+        (clip.framing, clip.place) = (source.framing, source.place);
+        (clip.grade, clip.lut, clip.effects) = (source.grade, source.lut, source.effects);
+        let id = clip.id.clone();
+        self.tracks[track].clips.push(clip);
+        self.sort_track(track);
+        Some(id)
+    }
+
     fn new_clip(media: &Media, start: f64, duration: f64) -> Clip {
         Clip {
             id: new_id(),
@@ -3285,6 +3304,27 @@ mod tests {
         let again = project.place_grab(&frame, &source, 4.0).unwrap();
         assert_ne!(project.find(&again).unwrap().track, project.find(&grab).unwrap().track);
         assert_eq!(project.clip(&again).unwrap().start, 4.0);
+    }
+
+    #[test]
+    fn a_frame_to_edit_lies_exactly_over_its_clip_until_the_clip_ends() {
+        let (mut project, video) = project_with(20.0);
+        let source = project.place(&video, None, 0.0).unwrap();
+        project.trim_end(&source, 8.0);
+        {
+            let clip = project.clip_mut(&source).unwrap();
+            clip.framing = Framing::Fill { x: 0.3, y: 0.5 };
+            clip.place.scale = 0.8;
+        }
+        let frame = project.add_media(media(MediaKind::Image, 0.0));
+        let edit = project.place_frame_edit(&frame, &source, 6.0).unwrap();
+        let (track, clip) = (project.find(&edit).unwrap().track, project.clip(&edit).unwrap().clone());
+        assert!(track < project.find(&source).unwrap().track, "in front of the video");
+        let from = project.clip(&source).unwrap();
+        assert_eq!((clip.framing, clip.place), (from.framing, from.place), "lined up with the video");
+        assert_eq!((clip.start, clip.duration), (6.0, 2.0), "stops where the clip does");
+        let early = project.place_frame_edit(&frame, &source, 1.0).unwrap();
+        assert_eq!(project.clip(&early).unwrap().duration, STILL_SECONDS);
     }
 
     #[test]

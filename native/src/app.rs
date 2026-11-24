@@ -116,6 +116,8 @@ pub struct StreamCuts {
     open_clip_menu: bool,
     /// A picture clip to send to Folio, once the host is at hand.
     to_folio: Option<String>,
+    /// Frames being grabbed to edit in Folio (by the file they're saved to).
+    frames_to_edit: HashSet<PathBuf>,
     focus_clip_menu: bool,
     /// Ctrl+F asked for the Media search; Page Up/Down picked a file to bring into view.
     focus_media_search: bool,
@@ -276,6 +278,7 @@ impl StreamCuts {
             palette: None,
             open_clip_menu: false,
             to_folio: None,
+            frames_to_edit: HashSet::new(),
             focus_clip_menu: false,
             focus_media_search: false,
             media_scroll_to: None,
@@ -376,13 +379,8 @@ impl StreamCuts {
                             let id = self.project.add_media(media);
                             if let Some(from) = pending.as_ref().and_then(|p| p.over.clone()) {
                                 let at = pending.as_ref().map_or(self.playhead, |p| p.at);
-                                match self.project.place_grab(&id, &from, at) {
-                                    Some(clip) => {
-                                        self.timeline.selection = vec![clip];
-                                        self.toasts.push("Frame grabbed: drag it on the picture to move it, a corner to resize, an edge to crop".into());
-                                    }
-                                    None => self.toasts.push("The frame is in Media: the clip it came from is gone".into()),
-                                }
+                                let edit = self.frames_to_edit.remove(&path);
+                                self.place_grabbed(&id, &from, at, edit);
                             } else if let Some(p) = pending {
                                 let landed = p
                                     .dropped
@@ -1115,6 +1113,7 @@ impl StreamCuts {
             Cmd::ResetPlace => self.change_clips(|clip, _| clip.place = Placement::default()),
             Cmd::GrabFrame => self.grab_frame(None, None),
             Cmd::EditInFolio => self.to_folio = Some(self.one_clip().unwrap_or_default()),
+            Cmd::EditFrameInFolio => self.grab(None, None, true),
             Cmd::ResetColor => self.change_clips(|clip, _| (clip.grade, clip.lut) = (Grade::default(), None)),
             Cmd::ResetEffects => self.change_clips(|clip, _| clip.effects = Effects::default()),
             Cmd::ShowMore { before, seconds } => {
@@ -1497,7 +1496,30 @@ impl StreamCuts {
     /// Saves a frame of a video clip as a PNG and puts it in front of the clip as a picture, ready to move around. The
     /// clip is `clip`, else the one picked, else the video clip in front under the playhead. The frame is the one under
     /// the playhead when that's on the clip, else the one at `at` (where it was right-clicked), else its first.
+    /// A grabbed frame, probed and in Media, goes on the timeline: half size in front of its clip to move around, or
+    /// (`edit`) laid exactly over it and sent to Folio.
+    fn place_grabbed(&mut self, media: &str, from: &str, at: f64, edit: bool) {
+        let placed = if edit { self.project.place_frame_edit(media, from, at) } else { self.project.place_grab(media, from, at) };
+        match placed {
+            Some(clip) => {
+                self.timeline.selection = vec![clip.clone()];
+                if edit {
+                    self.to_folio = Some(clip);
+                    self.toasts.push("The frame is over the video: Save in Folio puts your edit there".into());
+                } else {
+                    self.toasts.push("Frame grabbed: drag it on the picture to move it, a corner to resize, an edge to crop".into());
+                }
+            }
+            None => self.toasts.push("The frame is in Media: the clip it came from is gone".into()),
+        }
+    }
+
     fn grab_frame(&mut self, clip: Option<String>, at: Option<f64>) {
+        self.grab(clip, at, false);
+    }
+
+    /// Grabs the frame under the playhead (or at `at` on `clip`) as a PNG; `edit` sends it on to Folio once placed.
+    fn grab(&mut self, clip: Option<String>, at: Option<f64>, edit: bool) {
         let is_video = |p: &Project, id: &str| {
             p.find(id).is_some_and(|r| p.tracks[r.track].kind == crate::project::TrackKind::Video)
                 && p.clip(id).and_then(|c| p.media(&c.media_id)).is_some_and(|m| m.kind == MediaKind::Video)
@@ -1535,6 +1557,9 @@ impl StreamCuts {
         let name = format!("{stem} at {}m{:02}s{:03}.png", whole / 60, whole % 60, ((source_at - whole as f64) * 1000.0).round() as u64 % 1000);
         // One folder per video, so two videos of the same name don't share frames.
         let output = self.place.data_dir.join("frames").join(&media.id).join(name);
+        if edit {
+            self.frames_to_edit.insert(output.clone());
+        }
         self.worker.send(Job::GrabFrame { clip: clip.id.clone(), at: t, path: media.path.clone(), source_at, output });
         self.toasts.push(format!("Grabbing the frame at {}", timecode(t, self.project.fps)));
     }
@@ -3680,6 +3705,7 @@ impl CanopyApp for StreamCuts {
             match choice.cmd {
                 Cmd::GrabFrame => self.grab_frame(Some(choice.clip), Some(choice.at)),
                 Cmd::EditInFolio => self.to_folio = Some(choice.clip),
+                Cmd::EditFrameInFolio => self.grab(Some(choice.clip), Some(choice.at), true),
                 cmd => self.run(cmd, ui.ctx()),
             }
         }
@@ -4126,5 +4152,59 @@ mod keyboard_tests {
         app.history.undo(&mut app.project);
         assert_eq!(app.project.media("logo").unwrap().path, picture);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Edit the frame in Folio: once grabbed, the frame lies over its video and goes straight to Folio.
+    #[test]
+    fn a_frame_grabbed_to_edit_goes_over_its_video_and_on_to_folio() {
+        #[derive(Default)]
+        struct Canopy(Vec<(String, String)>);
+        impl Host for Canopy {
+            fn toast(&mut self, _: String) {}
+            fn exported(&mut self, _: PathBuf) {}
+            fn open_in(&mut self, app: &str, document: &str) -> bool {
+                self.0.push((app.into(), document.into()));
+                true
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("streamcuts-frame-folio-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let frame_file = dir.join("clip at 0m03s000.png");
+        image::RgbaImage::from_pixel(32, 18, image::Rgba([9, 9, 9, 255])).save(&frame_file).unwrap();
+        let place = Place { space: None, projects_dir: dir.join("projects"), data_dir: dir.join("data"), exports_dir: dir.join("exports") };
+        let ctx = egui::Context::default();
+        let mut app = StreamCuts::new(place, &ctx);
+        let mut project = Project::new("Frames");
+        let still = |id: &str, path: PathBuf, kind: MediaKind, duration: f64| Media {
+            id: id.into(),
+            path,
+            name: id.into(),
+            kind,
+            duration,
+            width: 32,
+            height: 18,
+            has_audio: false,
+            frame_rate: 30.0,
+            attributes: Attributes::default(),
+        };
+        let video = project.add_media(still("video", dir.join("clip.mp4"), MediaKind::Video, 10.0));
+        let source = project.place(&video, Some(0), 0.0).unwrap();
+        let frame = project.add_media(still("frame", frame_file.clone(), MediaKind::Image, 0.0));
+        app.open(project);
+        app.place_grabbed(&frame, &source, 3.0, true);
+        let edit = app.to_folio.clone().expect("on its way to Folio");
+        let clip = app.project.clip(&edit).unwrap();
+        assert_eq!((clip.start, clip.place), (3.0, app.project.clip(&source).unwrap().place));
+        let mut canopy = Canopy::default();
+        frame_ui(&mut app, &ctx, &mut canopy);
+        let (to, document) = canopy.0.last().expect("Folio was asked").clone();
+        assert_eq!(to, "folio");
+        assert!(document.starts_with(EDIT_PICTURE) && document.contains("clip at 0m03s000.png"), "{document}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn frame_ui(app: &mut StreamCuts, ctx: &egui::Context, host: &mut dyn Host) {
+        let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1400.0, 900.0))), ..Default::default() };
+        ctx.run_ui(input, |ui| app.ui(ui, host)).textures_delta.clear();
     }
 }
