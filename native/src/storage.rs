@@ -41,6 +41,11 @@ pub fn file_for(dir: &Path, project: &Project) -> PathBuf {
         })
 }
 
+/// The saved file of the project with this id, if there is one.
+pub fn find(dir: &Path, id: &str) -> Option<PathBuf> {
+    project_files(dir).into_iter().find(|path| load(path).is_ok_and(|p| p.id == id))
+}
+
 pub fn save(dir: &Path, project: &mut Project) -> Result<PathBuf, String> {
     project.saved_at = now_ms();
     let path = file_for(dir, project);

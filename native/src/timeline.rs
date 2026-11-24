@@ -164,6 +164,8 @@ struct MenuFacts<'a> {
     playhead: f64,
     at: f64,
     fps: u32,
+    /// A still PNG, JPEG or WebP Folio can edit.
+    editable: bool,
 }
 
 /// A clip's right-click menu: the usual edits, then what this clip can do. Each entry shows its key.
@@ -184,6 +186,10 @@ fn clip_menu(ui: &mut Ui, facts: &MenuFacts) -> Option<Cmd> {
     let clip = facts.clip;
     let one = facts.picked <= 1;
     let video = facts.kind == MediaKind::Video;
+    if one && facts.kind == MediaKind::Image && facts.editable {
+        item(ui, Cmd::EditInFolio, "Edit the picture in Folio");
+        ui.separator();
+    }
     if one && video {
         // The frame under the playhead when it's on this clip, else the one where it was right-clicked.
         let t = if clip.contains(facts.playhead) { facts.playhead } else { facts.at };
@@ -717,6 +723,7 @@ impl Timeline {
                 playhead,
                 at: self.menu_at,
                 fps: project.fps,
+                editable: crate::app::folio_can_edit(&media),
             };
             let menu_at = self.menu_at;
             if let Some(Some(cmd)) = egui::Popup::context_menu(&response)

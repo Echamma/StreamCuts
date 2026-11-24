@@ -114,6 +114,8 @@ pub struct StreamCuts {
     palette: Option<Palette>,
     /// Enter asked for the Clip menu: open it, then put the keyboard on its first field.
     open_clip_menu: bool,
+    /// A picture clip to send to Folio, once the host is at hand.
+    to_folio: Option<String>,
     focus_clip_menu: bool,
     /// Ctrl+F asked for the Media search; Page Up/Down picked a file to bring into view.
     focus_media_search: bool,
@@ -273,6 +275,7 @@ impl StreamCuts {
             exported: Vec::new(),
             palette: None,
             open_clip_menu: false,
+            to_folio: None,
             focus_clip_menu: false,
             focus_media_search: false,
             media_scroll_to: None,
@@ -1111,6 +1114,7 @@ impl StreamCuts {
             }),
             Cmd::ResetPlace => self.change_clips(|clip, _| clip.place = Placement::default()),
             Cmd::GrabFrame => self.grab_frame(None, None),
+            Cmd::EditInFolio => self.to_folio = Some(self.one_clip().unwrap_or_default()),
             Cmd::ResetColor => self.change_clips(|clip, _| (clip.grade, clip.lut) = (Grade::default(), None)),
             Cmd::ResetEffects => self.change_clips(|clip, _| clip.effects = Effects::default()),
             Cmd::ShowMore { before, seconds } => {
@@ -1849,12 +1853,23 @@ impl StreamCuts {
         let Some(path) = dialog.pick_file() else {
             return;
         };
+        self.replace_media_file(id, path);
+    }
+
+    /// Points a media at another file (found again, or edited elsewhere): every clip of it shows the new one and
+    /// keeps its place and trims. One undo step.
+    fn replace_media_file(&mut self, id: &str, path: PathBuf) {
         self.history.record(&self.project);
         if let Some(target) = self.project.media.iter_mut().find(|m| m.id == id) {
             target.name = path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or(target.name.clone());
+            if target.kind == MediaKind::Image {
+                if let Ok((w, h)) = image::image_dimensions(&path) {
+                    (target.width, target.height) = (w, h);
+                }
+            }
             target.path = path;
         }
         self.looks.thumbnails.remove(id);
@@ -1862,6 +1877,50 @@ impl StreamCuts {
         self.reset_preview();
         self.request_looks();
         self.edited();
+    }
+
+    /// Right-click > Edit the picture in Folio: Canopy opens the picture in Folio, whose Save sends the edited one
+    /// back to [`CanopyApp::open_document`] as `edited-picture:`, where it replaces this one.
+    fn edit_in_folio(&mut self, clip: &str, host: &mut dyn Host) {
+        let Some(media) = self.project.clip(clip).and_then(|c| self.project.media(&c.media_id)).cloned() else {
+            return self.toasts.push("Pick a picture clip to edit it in Folio".into());
+        };
+        if !folio_can_edit(&media) {
+            return self.toasts.push("Folio edits still PNG, JPEG and WebP pictures".into());
+        }
+        if !media.path.is_file() {
+            return self.toasts.push("The picture is missing: find it in Media first".into());
+        }
+        // Saved, so the edited picture finds this project again even if another one is open by then.
+        if let Err(error) = self.save() {
+            return self.toasts.push(format!("Couldn't save the project first: {error}"));
+        }
+        let reply = serde_json::json!({ "project": self.project.id, "media": media.id }).to_string();
+        let request = serde_json::json!({ "path": media.path.to_string_lossy(), "app": "streamcuts", "reply": reply });
+        if !host.open_in("folio", &format!("{EDIT_PICTURE}{request}")) {
+            self.toasts.push("Editing in Folio works when StreamCuts runs inside Canopy".into());
+        }
+    }
+
+    /// Folio's edited picture coming back (`edited-picture:{"path", "reply"}`): it replaces the picture in the
+    /// project that sent it, opening that project if another one is open.
+    fn take_edited_picture(&mut self, json: &str) -> Result<String, String> {
+        let unreadable = || "StreamCuts couldn't read what Folio sent back".to_string();
+        let back: serde_json::Value = serde_json::from_str(json).map_err(|_| unreadable())?;
+        let path = PathBuf::from(back["path"].as_str().ok_or_else(unreadable)?);
+        let reply: serde_json::Value = serde_json::from_str(back["reply"].as_str().ok_or_else(unreadable)?).map_err(|_| unreadable())?;
+        let (project, media) = (reply["project"].as_str().ok_or_else(unreadable)?, reply["media"].as_str().ok_or_else(unreadable)?);
+        if !path.is_file() {
+            return Err(format!("The edited picture isn't there any more: {}", path.display()));
+        }
+        if self.project.id != project {
+            let file = storage::find(&self.place.projects_dir, project).ok_or("The project the picture came from is gone")?;
+            self.open(storage::load(&file)?);
+        }
+        let name = self.project.media(media).map(|m| m.name.clone()).ok_or("The picture is no longer in this project's Media")?;
+        self.replace_media_file(media, path);
+        let _ = self.save();
+        Ok(format!("Replaced {name} with Folio's edit"))
     }
 
     fn start_export(&mut self, ctx: &egui::Context) {
@@ -3620,8 +3679,12 @@ impl CanopyApp for StreamCuts {
         if let Some(choice) = output.menu {
             match choice.cmd {
                 Cmd::GrabFrame => self.grab_frame(Some(choice.clip), Some(choice.at)),
+                Cmd::EditInFolio => self.to_folio = Some(choice.clip),
                 cmd => self.run(cmd, ui.ctx()),
             }
+        }
+        if let Some(clip) = self.to_folio.take() {
+            self.edit_in_folio(&clip, host);
         }
         if let Some((files, at, track)) = output.dropped {
             self.import(
@@ -3673,6 +3736,12 @@ impl CanopyApp for StreamCuts {
     }
 
     fn open_document(&mut self, id: &str, host: &mut dyn Host) {
+        if let Some(json) = id.strip_prefix(EDITED_PICTURE) {
+            match self.take_edited_picture(json) {
+                Ok(text) | Err(text) => host.toast(text),
+            }
+            return;
+        }
         match storage::load(&self.place.projects_dir.join(id)) {
             Ok(project) => self.open(project),
             Err(error) => host.toast(error),
@@ -3690,6 +3759,16 @@ impl CanopyApp for StreamCuts {
     fn title(&self) -> String {
         self.project.name.clone()
     }
+}
+
+/// What Folio is sent to edit a picture, and what it sends back (see Folio's `PictureRequest`).
+const EDIT_PICTURE: &str = "edit-picture:";
+const EDITED_PICTURE: &str = "edited-picture:";
+
+/// A still picture Folio can open: PNG, JPEG or WebP, not animated.
+pub fn folio_can_edit(media: &crate::project::Media) -> bool {
+    let ext = media.path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    media.kind == MediaKind::Image && media.loop_length().is_none() && ["png", "jpg", "jpeg", "webp"].contains(&ext.as_str())
 }
 
 /// Video, pictures and sound.
@@ -3978,6 +4057,74 @@ mod keyboard_tests {
         app.timeline.selection = vec![first.clone()];
         frame(&mut app, &ctx, &mut host, key(Key::Delete, Modifiers::NONE));
         assert!(app.project.clip(&first).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Right-click > Edit the picture in Folio asks Canopy to open it in Folio; what Folio's Save sends back
+    /// replaces the picture in the project it came from, even with another project open by then.
+    #[test]
+    fn a_picture_edited_in_folio_replaces_the_old_one() {
+        #[derive(Default)]
+        struct Canopy(Vec<String>, Vec<(String, String)>);
+        impl Host for Canopy {
+            fn toast(&mut self, text: String) {
+                self.0.push(text);
+            }
+            fn exported(&mut self, _: PathBuf) {}
+            fn open_in(&mut self, app: &str, document: &str) -> bool {
+                self.1.push((app.into(), document.into()));
+                true
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("streamcuts-folio-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let picture = dir.join("logo.png");
+        image::RgbaImage::from_pixel(64, 32, image::Rgba([255, 0, 0, 255])).save(&picture).unwrap();
+        let place = Place { space: None, projects_dir: dir.join("projects"), data_dir: dir.join("data"), exports_dir: dir.join("exports") };
+        let ctx = egui::Context::default();
+        let mut app = StreamCuts::new(place, &ctx);
+        let mut project = Project::new("With a logo");
+        let media = project.add_media(Media {
+            id: "logo".into(),
+            path: picture.clone(),
+            name: "logo.png".into(),
+            kind: MediaKind::Image,
+            duration: 0.0,
+            width: 64,
+            height: 32,
+            has_audio: false,
+            frame_rate: 0.0,
+            attributes: Attributes::default(),
+        });
+        let clip = project.place(&media, Some(0), 2.0).unwrap();
+        let id = project.id.clone();
+        app.open(project);
+        assert!(folio_can_edit(app.project.media("logo").unwrap()));
+
+        let mut canopy = Canopy::default();
+        app.edit_in_folio(&clip, &mut canopy);
+        let (to, document) = canopy.1.last().unwrap().clone();
+        assert_eq!(to, "folio");
+        let request: serde_json::Value = serde_json::from_str(document.strip_prefix(EDIT_PICTURE).unwrap()).unwrap();
+        assert_eq!(request["path"], picture.to_string_lossy().as_ref());
+        assert_eq!(request["app"], "streamcuts");
+        assert!(storage::find(&app.place.projects_dir, &id).is_some(), "saved, so it can be found again");
+
+        // Meanwhile another project is opened; Folio's Save sends a bigger edited copy back.
+        app.open(Project::new("Something else"));
+        let edited = dir.join("logo (edited).png");
+        image::RgbaImage::from_pixel(128, 64, image::Rgba([0, 0, 255, 128])).save(&edited).unwrap();
+        let back = serde_json::json!({ "path": edited.to_string_lossy(), "reply": request["reply"] });
+        app.open_document(&format!("{EDITED_PICTURE}{back}"), &mut canopy);
+        assert_eq!(canopy.0.last().unwrap(), "Replaced logo.png with Folio's edit");
+        assert_eq!(app.project.id, id, "the picture's own project is back");
+        let replaced = app.project.media("logo").unwrap();
+        assert_eq!((replaced.path.clone(), replaced.width, replaced.height), (edited.clone(), 128, 64));
+        assert!(app.project.clip(&clip).is_some(), "the clip stays where it was");
+        assert!(picture.is_file(), "the original file is left alone");
+        // It's an edit like any other: undo puts the old picture back.
+        app.history.undo(&mut app.project);
+        assert_eq!(app.project.media("logo").unwrap().path, picture);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
