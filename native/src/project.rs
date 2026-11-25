@@ -1100,8 +1100,10 @@ impl Framing {
     /// The FFmpeg filters that put a picture into a `width`x`height` frame this way.
     pub fn filter(self, width: u32, height: u32) -> String {
         match self {
+            // The bars are see-through, so a picture or video of another shape shows the tracks under it there (over
+            // black when there's nothing under it).
             Framing::Fit => format!(
-                "scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black"
+                "scale={width}:{height}:force_original_aspect_ratio=decrease,format=yuva420p,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black@0"
             ),
             Framing::Fill { x, y } => format!(
                 "scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height}:(iw-ow)*{:.3}:(ih-oh)*{:.3}",
@@ -3123,15 +3125,18 @@ impl Project {
         self.media(&clip.media_id).map(|m| (clip, m))
     }
 
-    /// The video tracks whose clips show at `t`, front first: down to the first video that fills the frame (it hides
-    /// the rest, as exports stack them). A picture can be see-through (a PNG with no background), so what's under it
-    /// shows too.
+    /// The video tracks whose clips show at `t`, front first: down to the first that covers the whole frame (it hides
+    /// the rest, as exports stack them). A picture can be see-through (a PNG with no background), and a clip fitted
+    /// into a frame of another shape leaves see-through bars, so what's under those shows too.
     pub fn layers_at(&self, t: f64) -> Vec<usize> {
         let mut layers = Vec::new();
         for track in 0..self.tracks.len() {
             if let Some((clip, media)) = self.clip_on(track, t) {
                 layers.push(track);
-                if clip.place.is_full() && media.kind != MediaKind::Image {
+                let same_shape = media.height > 0
+                    && ((media.width as f64 / media.height as f64) - (self.width as f64 / self.height.max(1) as f64)).abs() < 0.01;
+                let fills = matches!(clip.framing, Framing::Fill { .. }) || same_shape;
+                if clip.place.is_full() && media.kind != MediaKind::Image && fills {
                     break;
                 }
             }

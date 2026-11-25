@@ -1411,3 +1411,48 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
+
+#[cfg(test)]
+mod see_through_bars {
+    use super::*;
+    use crate::project::TrackKind;
+
+    /// A picture of another shape (a portrait 4:5 PNG with no background, dropped over video in a 16:9 and a 9:16
+    /// project) is fitted with see-through bars: the video under it shows there, in exports and in the preview.
+    #[test]
+    fn a_fitted_picture_of_another_shape_leaves_the_video_under_it_showing() {
+        let dir = std::env::temp_dir().join(format!("streamcuts-bars-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let picture = dir.join("portrait.png");
+        image::RgbaImage::from_pixel(1080, 1350, image::Rgba([0, 0, 0, 0])).save(&picture).unwrap();
+        for (w, h) in [(1920u32, 1080u32), (1080, 1920)] {
+            // A red video the project's own shape, so it covers the whole frame.
+            let clip = dir.join(format!("red-{w}.mp4"));
+            let size = format!("color=c=red:s={}x{}:r=30:d=3", w / 4, h / 4);
+            assert!(command(&ffmpeg()).args(["-v", "error", "-y", "-f", "lavfi", "-i", &size, "-pix_fmt", "yuv420p"]).arg(&clip).status().unwrap().success());
+            let mut project = Project::new("Bars");
+            (project.width, project.height) = (w, h);
+            let video = project.add_media(crate::ffmpeg::probe(&clip).unwrap());
+            let pic = project.add_media(crate::ffmpeg::probe(&picture).unwrap());
+            project.place(&video, None, 0.0).unwrap();
+            let top = project.add_track(TrackKind::Video);
+            let (still, _) = project.place_at(&pic, Some(top), 0.5).unwrap();
+            assert_eq!(project.layers_at(1.0).len(), 2, "the video under it is drawn too");
+            // The preview's still of the picture: see-through in its bars as in its middle.
+            let (dw, dh) = crate::preview::decode_size(&project);
+            let frame = crate::ffmpeg::still(&picture, 0.0, dw, dh, project.clip(&still).unwrap().picture()).unwrap();
+            let alpha = |x: u32, y: u32| frame.rgba[((y * dw + x) * 4 + 3) as usize];
+            assert_eq!((alpha(dw / 2, dh / 2), alpha(2, 2)), (0, 0), "{w}x{h}");
+            let output = dir.join(format!("out-{w}.mp4"));
+            let run = start(&project, &output, egui::Context::default()).unwrap();
+            assert_eq!(run.result.recv().unwrap(), Ok(()));
+            let out = command(&ffmpeg()).args(["-v", "error", "-ss", "1", "-i"]).arg(&output).args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]).output().unwrap().stdout;
+            let px = |x: u32, y: u32| { let i = ((y * w + x) * 3) as usize; [out[i], out[i + 1], out[i + 2]] };
+            for (x, y) in [(w / 2, h / 2), (8, 8), (w - 8, h - 8)] {
+                let p = px(x, y);
+                assert!(p[0] > 200 && p[1] < 60, "{w}x{h} at {x},{y}: {p:?}");
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
