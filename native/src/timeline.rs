@@ -1755,7 +1755,7 @@ mod tests {
     #[test]
     fn a_blur_is_moved_and_trimmed_on_its_row() {
         let mut bench = Bench::new();
-        let id = bench.project.add_blur(2.0, 5.0);
+        let id = bench.project.add_blur(2.0, 5.0, None);
         bench.frame(Vec::new());
         let span = |bench: &Bench| {
             let b = bench.project.blurs.iter().find(|b| b.id == id).unwrap();

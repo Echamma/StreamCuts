@@ -1172,7 +1172,7 @@ impl StreamCuts {
             Cmd::EditFrameInFolio => self.grab(None, None, true),
             Cmd::BlurPart => {
                 let (from, to) = crate::timeline::picked_span(&self.project, &self.timeline.selection).unwrap_or((self.playhead, self.playhead + 3.0));
-                self.blur_part(from, to);
+                self.blur_part(from, to, None);
             }
             Cmd::ExportPart => match crate::timeline::picked_span(&self.project, &self.timeline.selection) {
                 Some((from, to)) => self.export_part(ctx, from, to),
@@ -2039,9 +2039,9 @@ impl StreamCuts {
     }
 
     /// Right-click > Blur: the whole picture blurred from `from` to `to`, on the Blurs row, picked.
-    fn blur_part(&mut self, from: f64, to: f64) {
+    fn blur_part(&mut self, from: f64, to: f64, track: Option<String>) {
         self.history.record(&self.project);
-        let id = self.project.add_blur(from, to);
+        let id = self.project.add_blur(from, to, track);
         self.timeline.selection = vec![id];
         self.edited();
         self.toasts.push("Blurred: drag the box on the picture to blur just part of it, its ends on the Blurs row to change when".into());
@@ -2345,6 +2345,33 @@ impl StreamCuts {
         };
         let screen = Rect::from_center_size(area.center(), size);
         ui.painter().rect_filled(screen, 4, Color32::BLACK);
+        // Blurred boxes showing now, made before drawing: each goes on right after the topmost layer it blurs (its
+        // track or one under it), so tracks above it stay sharp; those of every track go on after all of them.
+        let showing: Vec<Blur> = self.project.blurs.iter().filter(|b| b.shows_at(self.playhead)).cloned().collect();
+        self.blur_patches.retain(|id, _| showing.iter().any(|b| &b.id == id));
+        let patches: Vec<(Option<usize>, Rect, TextureHandle)> = if self.preview.blank {
+            Vec::new()
+        } else {
+            showing
+                .iter()
+                .filter_map(|blur| {
+                    let texture = self.blur_patch(ui.ctx(), blur)?;
+                    Some((self.project.blur_track(blur), blur_rect(screen, blur), texture))
+                })
+                .collect()
+        };
+        let whole_uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+        let layers = self.project.layers_at(self.playhead);
+        // Where a track's blur goes: after the topmost drawn layer at or under it, else before them all.
+        let after_layer = |lowest: usize| layers.iter().copied().filter(|&t| t >= lowest).min();
+        let draw_blurs = |painter: &egui::Painter, after: Option<usize>| {
+            for (lowest, rect, texture) in &patches {
+                if lowest.map(after_layer) == Some(after) {
+                    painter.image(texture.id(), *rect, whole_uv, Color32::WHITE);
+                }
+            }
+        };
+        draw_blurs(&ui.painter().with_clip_rect(screen), None);
         if let (Some(texture), false) = (&self.preview.texture, self.preview.blank) {
             // A clip fading in or out shows darker (exports fade it to what's below, which is black unless tracks stack).
             let fade = if self.project.crossfade_at(self.playhead).is_some() {
@@ -2367,7 +2394,6 @@ impl StreamCuts {
             let tint = Color32::from_gray((fade * 255.0).round() as u8);
             // Tracks below show where a moved, resized or cropped clip leaves the frame open, bottom first.
             let painter = ui.painter().with_clip_rect(screen);
-            let layers = self.project.layers_at(self.playhead);
             for track in layers.iter().skip(1).rev() {
                 if let (Some(layer), Some((clip, _))) = (
                     self.under.get(track).filter(|l| !l.blank),
@@ -2378,6 +2404,7 @@ impl StreamCuts {
                         painter.image(texture.id(), rect, uv, Color32::WHITE);
                     }
                 }
+                draw_blurs(&painter, Some(*track));
             }
             let front = self
                 .project
@@ -2386,6 +2413,9 @@ impl StreamCuts {
                 .unwrap_or_default();
             let (rect, uv) = placed(screen, &front);
             painter.image(texture.id(), rect, uv, tint);
+            if let Some(&top) = layers.first() {
+                draw_blurs(&painter, Some(top));
+            }
             // Scrubbing: until the exact still arrives (a static FFmpeg takes half a second to start), show the nearest
             // filmstrip frame, which is there at once. Only when it looks the same: a 16:9 frame, fitted, ungraded.
             if self.preview.waiting() && self.project.width * 9 == self.project.height * 16 {
@@ -2408,17 +2438,16 @@ impl StreamCuts {
         // What's on the picture and where, front first, for picking and dragging (see `edit_on_picture`).
         let mut elements: Vec<(Target, Rect)> = Vec::new();
         let over_picture = ui.painter().with_clip_rect(screen);
-        // Blurred boxes, over the clips and under the text, as exports put them. One over the whole picture is only
-        // picked from the picture while it's picked already (else nothing under it could be).
-        let showing: Vec<Blur> = self.project.blurs.iter().filter(|b| b.shows_at(self.playhead)).cloned().collect();
-        self.blur_patches.retain(|id, _| showing.iter().any(|b| &b.id == id));
+        // Blurs of every track go over all the clips, under the text, as exports put them.
+        for (lowest, rect, texture) in &patches {
+            if lowest.is_none() {
+                over_picture.image(texture.id(), *rect, whole_uv, Color32::WHITE);
+            }
+        }
+        // A blur over the whole picture is only picked from the picture while it's picked already (else nothing under
+        // it could be).
         for blur in &showing {
             let rect = blur_rect(screen, blur);
-            if !self.preview.blank {
-                if let Some(texture) = self.blur_patch(ui.ctx(), blur) {
-                    over_picture.image(texture.id(), rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
-                }
-            }
             let whole = blur.w >= 0.999 && blur.h >= 0.999;
             if !whole || self.timeline.selection.contains(&blur.id) {
                 elements.insert(0, (Target::Blur(blur.id.clone()), rect));
@@ -2541,15 +2570,14 @@ impl StreamCuts {
         let (dw, dh) = crate::preview::decode_size(&self.project);
         let (x, y, w, h) = blur.pixels(dw, dh);
         let tracks = self.project.layers_at(self.playhead);
+        // Only the blur's track and those under it (tracks are listed top first); the ones above are drawn over it.
+        let lowest = self.project.blur_track(blur);
         let mut layers: Vec<(Arc<Frame>, Placement)> = Vec::new();
-        for (i, track) in tracks.iter().enumerate().rev() {
+        for (i, track) in tracks.iter().enumerate().rev().filter(|(_, t)| lowest.is_none_or(|l| **t >= l)) {
             let preview = if i == 0 { Some(&self.preview) } else { self.under.get(track) };
             let Some(frame) = preview.filter(|p| !p.blank).and_then(|p| p.frame.clone()) else { continue };
             let place = self.project.clip_on(*track, self.playhead).map(|(c, _)| c.place).unwrap_or_default();
             layers.push((frame, place));
-        }
-        if layers.is_empty() {
-            return None;
         }
         let sigma = blur.sigma(dh);
         let key = format!(
@@ -3462,6 +3490,29 @@ impl StreamCuts {
             }
             self.edited();
         }
+        // Which tracks it blurs: every one, or a video track and those under it (tracks above stay sharp).
+        let shown = |track: &Option<String>| match track.as_deref().and_then(|id| self.project.tracks.iter().find(|t| t.id == id)) {
+            Some(t) => format!("{} and under", t.name),
+            None => "Every track".to_string(),
+        };
+        let mut track = blur.track.clone().filter(|id| self.project.tracks.iter().any(|t| &t.id == id));
+        let before = track.clone();
+        egui::ComboBox::from_id_salt("blur-track")
+            .selected_text(shown(&track))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut track, None, "Every track");
+                for t in self.project.tracks.iter().filter(|t| t.kind == crate::project::TrackKind::Video) {
+                    ui.selectable_value(&mut track, Some(t.id.clone()), format!("{} and under", t.name))
+                        .on_hover_text("Tracks above it stay sharp: a graphic over the blurred background stays crisp");
+                }
+            });
+        if track != before {
+            self.history.record(&self.project);
+            if let Some(blur) = self.project.blur_mut(&blur.id) {
+                blur.track = track;
+            }
+            self.edited();
+        }
         let whole = blur.w >= 0.999 && blur.h >= 0.999;
         if !whole && ui.button("Whole picture").on_hover_text("Blur all of the picture again").clicked() {
             self.history.record(&self.project);
@@ -3933,8 +3984,15 @@ impl CanopyApp for StreamCuts {
                 Cmd::BlurPart => {
                     let span = crate::timeline::picked_span(&self.project, &self.timeline.selection)
                         .or_else(|| self.project.clip(&choice.clip).map(|c| (c.start, c.end())));
+                    // The right-clicked clip's track and those under it: graphics on tracks above stay sharp.
+                    let track = self
+                        .project
+                        .find(&choice.clip)
+                        .map(|at| &self.project.tracks[at.track])
+                        .filter(|t| t.kind == crate::project::TrackKind::Video)
+                        .map(|t| t.id.clone());
                     if let Some((from, to)) = span {
-                        self.blur_part(from, to);
+                        self.blur_part(from, to, track);
                     }
                 }
                 Cmd::ExportPart => {

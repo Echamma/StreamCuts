@@ -1241,6 +1241,10 @@ pub struct Blur {
     pub h: f32,
     #[serde(default = "blur_strength")]
     pub strength: f32,
+    /// The video track (by id) it blurs, with every track under it: what's on tracks above stays sharp. None (or a
+    /// track that's gone) blurs every track.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track: Option<String>,
 }
 
 fn blur_strength() -> f32 {
@@ -1520,17 +1524,24 @@ impl Project {
         rows
     }
 
-    /// Blurs the whole picture from `start` to `end` (the box is then dragged on the preview to blur just part of it).
-    pub fn add_blur(&mut self, start: f64, end: f64) -> String {
+    /// Blurs the whole picture from `start` to `end` (the box is then dragged on the preview to blur just part of it):
+    /// video track `track` and those under it, or every track.
+    pub fn add_blur(&mut self, start: f64, end: f64, track: Option<String>) -> String {
         let id = new_id();
         let start = start.max(0.0);
-        self.blurs.push(Blur { id: id.clone(), start, end: end.max(start + 0.1), x: 0.0, y: 0.0, w: 1.0, h: 1.0, strength: blur_strength() });
+        self.blurs.push(Blur { id: id.clone(), start, end: end.max(start + 0.1), x: 0.0, y: 0.0, w: 1.0, h: 1.0, strength: blur_strength(), track });
         self.blurs.sort_by(|a, b| a.start.total_cmp(&b.start));
         id
     }
 
     pub fn blur_mut(&mut self, id: &str) -> Option<&mut Blur> {
         self.blurs.iter_mut().find(|b| b.id == id)
+    }
+
+    /// The index of the video track a blur blurs (with those under it), or None when it blurs every track.
+    pub fn blur_track(&self, blur: &Blur) -> Option<usize> {
+        let id = blur.track.as_deref()?;
+        self.tracks.iter().position(|t| t.id == id && t.kind == TrackKind::Video)
     }
 
     /// Stores where `title_rows` shows each title, so titles stay on their tracks from then on.
@@ -3263,7 +3274,7 @@ mod tests {
     fn a_blur_box_is_whole_even_pixels_inside_the_frame_and_moves_with_time() {
         let (mut project, video) = project_with(20.0);
         project.place(&video, None, 0.0).unwrap();
-        let id = project.add_blur(2.0, 5.0);
+        let id = project.add_blur(2.0, 5.0, None);
         let full = project.blurs[0].clone();
         assert_eq!(full.pixels(1920, 1080), (0, 0, 1920, 1080));
         let part = Blur { x: 0.1001, y: 0.333, w: 0.25, h: 0.1, ..full.clone() };

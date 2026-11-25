@@ -180,6 +180,25 @@ pub fn arguments(project: &Project, output: &Path) -> Result<Vec<String>, String
         .iter()
         .filter(|t| t.kind == TrackKind::Audio)
         .collect();
+    // A blurred box: the picture so far (the tracks up to `track`, or all of them) with the box cut out, blurred and
+    // laid back for its time. Tracks laid on after it stay sharp.
+    let blur_filter = |k: usize, blur: &crate::project::Blur, base: usize| {
+        let (x, y, bw, bh) = blur.pixels(w, h);
+        format!(
+            "[base{base}]split[bk{k}][bc{k}];[bc{k}]crop={bw}:{bh}:{x}:{y},gblur=sigma={sigma:.2}:steps=3[bz{k}];[bk{k}][bz{k}]overlay={x}:{y}:enable='between(t,{start:.3},{end:.3})'[base{next}]",
+            sigma = blur.sigma(h),
+            start = blur.start,
+            end = blur.end,
+            next = base + 1
+        )
+    };
+    let blurs: Vec<(usize, &crate::project::Blur, Option<usize>)> = project
+        .blurs
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| b.end > b.start)
+        .map(|(k, b)| (k, b, project.blur_track(b)))
+        .collect();
     for track in video_tracks.iter().chain(audio_tracks.iter()) {
         for clip in &track.clips {
             let Some(media) = project.media(&clip.media_id) else {
@@ -351,18 +370,18 @@ pub fn arguments(project: &Project, output: &Path) -> Result<Vec<String>, String
             }
             input += 1;
         }
+        // Blurs of the track just laid on (and those under it) go on before the tracks above.
+        if track.kind == TrackKind::Video {
+            let index = project.tracks.iter().position(|t| t.id == track.id);
+            for &(k, blur, _) in blurs.iter().filter(|(_, _, on)| on.is_some() && *on == index) {
+                filters.push(blur_filter(k, blur, base));
+                base += 1;
+            }
+        }
     }
-    // Blurred boxes, over every track and under the text: the box cut out of the picture, blurred and laid back for
-    // its time.
-    for (k, blur) in project.blurs.iter().enumerate().filter(|(_, b)| b.end > b.start) {
-        let (x, y, bw, bh) = blur.pixels(w, h);
-        filters.push(format!(
-            "[base{base}]split[bk{k}][bc{k}];[bc{k}]crop={bw}:{bh}:{x}:{y},gblur=sigma={sigma:.2}:steps=3[bz{k}];[bk{k}][bz{k}]overlay={x}:{y}:enable='between(t,{start:.3},{end:.3})'[base{next}]",
-            sigma = blur.sigma(h),
-            start = blur.start,
-            end = blur.end,
-            next = base + 1
-        ));
+    // Blurs of every track: over all of them, under the text.
+    for &(k, blur, _) in blurs.iter().filter(|(_, _, on)| on.is_none()) {
+        filters.push(blur_filter(k, blur, base));
         base += 1;
     }
     let captions = if project.has_text() {
@@ -910,6 +929,61 @@ mod tests {
     }
 
     #[test]
+    fn a_blur_on_a_track_leaves_the_graphic_above_it_sharp() {
+        // Stripes on the bottom track; a striped graphic (a small PNG) on the track above, at the left. The blur is
+        // the bottom track's, over the whole picture: the background goes soft, the graphic stays sharp.
+        let dir = std::env::temp_dir().join(format!("streamcuts-track-blur-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let clip = dir.join("stripes.mp4");
+        assert!(command(&ffmpeg())
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i", "color=c=white:s=320x180:r=30:d=2", "-vf", "drawgrid=w=8:h=180:t=4:c=black", "-pix_fmt", "yuv420p"])
+            .arg(&clip)
+            .status()
+            .unwrap()
+            .success());
+        let graphic = dir.join("graphic.png");
+        image::RgbaImage::from_fn(320, 180, |x, y| {
+            if x < 120 && (40..140).contains(&y) {
+                if (x / 6) % 2 == 0 { image::Rgba([255, 0, 0, 255]) } else { image::Rgba([255, 255, 0, 255]) }
+            } else {
+                image::Rgba([0, 0, 0, 0])
+            }
+        })
+        .save(&graphic)
+        .unwrap();
+        let mut project = Project::new("Track blur");
+        (project.width, project.height) = (320, 180);
+        let video = project.add_media(crate::ffmpeg::probe(&clip).unwrap());
+        let png = project.add_media(crate::ffmpeg::probe(&graphic).unwrap());
+        let background = project.place(&video, None, 0.0).unwrap();
+        let top = project.add_track(TrackKind::Video);
+        let still = project.place(&png, Some(top), 0.0).unwrap();
+        project.clip_mut(&still).unwrap().place = crate::project::Placement::default();
+        project.trim_end(&still, 2.0);
+        let bottom_track = project.tracks[project.find(&background).unwrap().track].id.clone();
+        let id = project.add_blur(0.0, 2.0, Some(bottom_track));
+        project.blur_mut(&id).unwrap().strength = 1.0;
+        let output = dir.join("out.mp4");
+        let run = start(&project, &output, egui::Context::default()).unwrap();
+        assert_eq!(run.result.recv().unwrap(), Ok(()));
+        let out = command(&ffmpeg())
+            .args(["-v", "error", "-ss", "1", "-i"])
+            .arg(&output)
+            .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+            .output()
+            .unwrap()
+            .stdout;
+        // The green channel swings with the graphic's red/yellow stripes and with the background's black/white ones.
+        let swing = |from: usize, to: usize| {
+            let row: Vec<i32> = (from..to).map(|x| out[(90 * 320 + x) * 3 + 1] as i32).collect();
+            row.iter().max().unwrap() - row.iter().min().unwrap()
+        };
+        assert!(swing(20, 100) > 150, "the graphic stays sharp: {}", swing(20, 100));
+        assert!(swing(180, 300) < 40, "the background is blurred: {}", swing(180, 300));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn renders_a_blurred_box_only_where_and_when_it_is() {
         // Sharp black and white stripes; the left half blurred from 1 s to 2 s of 3.
         let dir = std::env::temp_dir().join(format!("streamcuts-blur-{}", std::process::id()));
@@ -925,7 +999,7 @@ mod tests {
         (project.width, project.height) = (320, 180);
         let video = project.add_media(crate::ffmpeg::probe(&clip).unwrap());
         project.place(&video, None, 0.0).unwrap();
-        let id = project.add_blur(1.0, 2.0);
+        let id = project.add_blur(1.0, 2.0, None);
         let blur = project.blur_mut(&id).unwrap();
         (blur.x, blur.y, blur.w, blur.h, blur.strength) = (0.0, 0.0, 0.5, 1.0, 1.0);
         let output = dir.join("blurred.mp4");
