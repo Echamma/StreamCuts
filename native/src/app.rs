@@ -33,6 +33,8 @@ use std::time::{Duration, Instant};
 
 #[path = "codex_panel.rs"]
 mod codex_panel;
+#[path = "forma_templates.rs"]
+mod forma_templates;
 
 const BIN_WIDTH: f32 = 250.0;
 /// Below this width (half of a split Canopy window) the toolbar folds its text buttons into icons.
@@ -99,6 +101,9 @@ pub struct StreamCuts {
     blur_patches: HashMap<String, (String, TextureHandle)>,
     /// Each showing template's picture now, what it was drawn from, and where it goes (parts of the frame).
     template_frames: HashMap<String, (String, TextureHandle, Rect)>,
+    forma_templates: HashMap<String, crate::template::FormaPreview>,
+    forma_bounds: HashMap<String, [f32; 4]>,
+    received_forma: Vec<PathBuf>,
     /// The template whose settings window is open, and the name typed to keep it as one of yours.
     template_open: Option<String>,
     template_name: String,
@@ -324,6 +329,9 @@ impl StreamCuts {
             picture_drag: None,
             blur_patches: HashMap::new(),
             template_frames: HashMap::new(),
+            forma_templates: HashMap::new(),
+            forma_bounds: HashMap::new(),
+            received_forma: Vec::new(),
             template_open: None,
             template_name: String::new(),
             clock: Clock::default(),
@@ -409,6 +417,10 @@ impl StreamCuts {
     fn open(&mut self, project: Project) {
         let _ = self.save();
         self.project = project;
+        self.forma_templates.clear();
+        self.forma_bounds.clear();
+        self.template_frames.clear();
+        self.template_open = None;
         self.history.clear();
         self.timeline = Timeline::default();
         self.playhead = 0.0;
@@ -2465,14 +2477,15 @@ impl StreamCuts {
             self.project.titles.iter().filter(|t| self.playhead >= t.start && self.playhead < t.end).cloned().collect();
         self.template_frames.retain(|id, _| showing_titles.iter().any(|t| &t.id == id));
         for title in &showing_titles {
-            let rect = if title.look.is_some() {
+            let rect = if title.animated() {
                 // A template: drawn by the same renderer exports use, at the preview's size.
                 if let Some((texture, at)) = self.template_frame(ui.ctx(), title) {
                     let on = |f: Pos2| pos2(screen.left() + f.x * screen.width(), screen.top() + f.y * screen.height());
                     over_picture.image(texture.id(), Rect::from_min_max(on(at.min), on(at.max)), whole_uv, Color32::WHITE);
                 }
                 let (dw, dh) = crate::preview::decode_size(&self.project);
-                let [l, t, r, b] = crate::template::bounds(title, dw, dh).unwrap_or([0.4, 0.4, 0.6, 0.6]);
+                let [l, t, r, b] = self.forma_bounds.get(&title.id).copied()
+                    .or_else(|| crate::template::bounds(title, dw, dh)).unwrap_or([0.4, 0.4, 0.6, 0.6]);
                 Rect::from_min_max(
                     pos2(screen.left() + l * screen.width(), screen.top() + t * screen.height()),
                     pos2(screen.left() + r * screen.width(), screen.top() + b * screen.height()),
@@ -2629,13 +2642,25 @@ impl StreamCuts {
         let (dw, dh) = crate::preview::decode_size(&self.project);
         let fps = self.project.fps.max(1) as f64;
         let frame = ((self.playhead - title.start) * fps).floor().max(0.0);
-        let key = format!("{frame}|{dw}x{dh}|{title:?}");
+        let modified = title.forma.as_ref().and_then(crate::template::FormaPreview::modified);
+        let mut key = format!("{frame}|{dw}x{dh}|{title:?}|{modified:?}");
         if let Some((made, texture, at)) = self.template_frames.get(&title.id) {
             if *made == key {
                 return Some((texture.clone(), *at));
             }
         }
-        let (x, y, pixmap) = crate::template::render(title, frame / fps, dw, dh)?;
+        let (x, y, pixmap) = if let Some(forma) = &title.forma {
+            let pixels = self.forma_preview(&title.id, forma, modified).render(title, frame / fps, dw, dh)?;
+            if pixels.waiting {
+                ctx.request_repaint_after(Duration::from_millis(16));
+                key.clear();
+            }
+            self.forma_bounds.remove(&title.id);
+            if let Some(bounds) = pixels.bounds { self.forma_bounds.insert(title.id.clone(), bounds); }
+            (0, 0, pixels.pixels)
+        } else {
+            crate::template::render(title, frame / fps, dw, dh)?
+        };
         let image = ColorImage::from_rgba_premultiplied([pixmap.width() as usize, pixmap.height() as usize], pixmap.data());
         let at = Rect::from_min_size(
             pos2(x as f32 / dw as f32, y as f32 / dh as f32),
@@ -2661,6 +2686,7 @@ impl StreamCuts {
                 add = Some(kind.start());
             }
         }
+        self.forma_templates_menu(ui);
         let saved = crate::template::saved();
         if !saved.is_empty() {
             ui.separator();
@@ -2698,6 +2724,10 @@ impl StreamCuts {
             self.template_open = None;
             return;
         };
+        if title.forma.is_some() {
+            self.forma_template_window(ui, title);
+            return;
+        }
         let Some(look) = title.look.clone() else {
             self.template_open = None;
             return;
@@ -3589,7 +3619,7 @@ impl StreamCuts {
         let id = id.clone();
         let mut changed = title.clone();
         ui.add_space(10.0);
-        if title.look.is_some() && ui.button("Edit template").on_hover_text("Its words, font, colors, size, place and timing").clicked() {
+        if title.animated() && ui.button("Edit template").on_hover_text("Edit its appearance and timing").clicked() {
             self.template_open = Some(id.clone());
         }
         let field = ui.add(
@@ -4236,12 +4266,16 @@ impl CanopyApp for StreamCuts {
             self.edit_in_folio(&clip, host);
         }
         if let Some((files, at, track)) = output.dropped {
+            let mut media = Vec::new();
+            for file in files {
+                if Self::is_forma_template(&file.path) {
+                    self.receive_forma(file.path, host);
+                } else if accepts(&file) {
+                    media.push(file.path);
+                }
+            }
             self.import(
-                files
-                    .into_iter()
-                    .filter(|f| accepts(f))
-                    .map(|f| f.path)
-                    .collect(),
+                media,
                 at,
                 track,
                 true,
@@ -4261,11 +4295,14 @@ impl CanopyApp for StreamCuts {
         self.speed_window(ui);
     }
 
-    fn receive(&mut self, files: Vec<SharedFile>, _host: &mut dyn Host) -> Receipt {
+    fn receive(&mut self, files: Vec<SharedFile>, host: &mut dyn Host) -> Receipt {
         let mut receipt = Receipt::default();
         let mut media = Vec::new();
         for file in files {
-            if file.name.to_lowercase().ends_with(storage::EXTENSION) {
+            if Self::is_forma_template(&file.path) {
+                self.receive_forma(file.path, host);
+                receipt.accepted += 1;
+            } else if file.name.to_lowercase().ends_with(storage::EXTENSION) {
                 match storage::load(&file.path) {
                     Ok(project) => {
                         self.open(project);
@@ -4286,6 +4323,15 @@ impl CanopyApp for StreamCuts {
     }
 
     fn open_document(&mut self, id: &str, host: &mut dyn Host) {
+        if let Some(json) = id.strip_prefix(forma_native::template::OPEN_PREFIX) {
+            match serde_json::from_str::<PathBuf>(json) {
+                Ok(path) if Self::is_forma_template(&path) && path.starts_with(&self.place.exports_dir) => {
+                    self.receive_forma(path, host);
+                }
+                _ => host.toast("The Forma template is outside this space or has an invalid path.".into()),
+            }
+            return;
+        }
         if let Some(json) = id.strip_prefix(EDITED_PICTURE) {
             match self.take_edited_picture(json) {
                 Ok(text) | Err(text) => host.toast(text),
@@ -4325,6 +4371,7 @@ pub fn folio_can_edit(media: &crate::project::Media) -> bool {
 pub fn accepts(file: &SharedFile) -> bool {
     matches!(file.kind, Kind::Video | Kind::Image | Kind::Audio)
         || file.name.to_lowercase().ends_with(storage::EXTENSION)
+        || StreamCuts::is_forma_template(&file.path)
 }
 
 /// A color wheel, like the web StreamCuts' trackballs: drag its dot towards a hue to push the picture that way

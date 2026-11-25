@@ -11,6 +11,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Rect, Transform};
 
+mod forma_title;
+pub use forma_title::{FormaTitle, FormaPreview, FormaFrame, catalog, load_forma, render_forma};
+
 /// How a template looks and moves. Everything here is editable in the template's settings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -367,6 +370,9 @@ pub fn bounds(title: &Title, w: u32, h: u32) -> Option<[f32; 4]> {
 /// The part of a `w` x `h` frame a template can cover at any moment of its life (left, top, width, height: even
 /// pixels inside the frame). Everything it draws is inside it.
 pub fn extent(title: &Title, w: u32, h: u32) -> Option<(u32, u32, u32, u32)> {
+    if title.forma.is_some() {
+        return Some((0, 0, w, h));
+    }
     let p = parts(title, w, h)?;
     let [l, t, r, b] = p.rest;
     let (cx, cy, bw, bh) = ((l + r) / 2.0, (t + b) / 2.0, r - l, b - t);
@@ -501,17 +507,24 @@ pub fn plain(pixmap: &Pixmap) -> Vec<u8> {
 /// Writes a template's frames for an export into `folder` as PNGs, a new one only when the picture changes, with an
 /// FFmpeg concat list (`tpl<k>.txt`) that holds each for as long as it lasts.
 pub fn write_frames(title: &Title, k: usize, fps: u32, w: u32, h: u32, folder: &Path) -> Result<(), String> {
+    let forma = title.forma.as_ref().map(|title| forma_title::instance(title, &folder.join("forma")));
     let life = (title.end - title.start).max(0.0);
     let frames = ((life * fps as f64).ceil() as usize).max(1);
     let mut list = String::from("ffconcat version 1.0\n");
     let mut held: Option<(String, Vec<u8>, usize)> = None;
     let flush = |held: &Option<(String, Vec<u8>, usize)>, list: &mut String| {
         if let Some((file, _, count)) = held {
-            list.push_str(&format!("file '{file}'\nduration {:.6}\n", *count as f64 / fps as f64));
+            list.push_str(&format!("file '{file}'\noption framerate {fps}\nduration {:.6}\n", *count as f64 / fps as f64));
         }
     };
     for i in 0..frames {
-        let Some((_, _, pixmap)) = render(title, i as f64 / fps as f64, w, h) else {
+        let time = i as f64 / fps as f64;
+        let frame = if let Some(instance) = &forma {
+            render_forma(title, instance, time, w, h).map(|pixels| (0, 0, pixels))
+        } else {
+            render(title, time, w, h)
+        };
+        let Some((_, _, pixmap)) = frame else {
             return Err("A template couldn't be drawn.".into());
         };
         let data = pixmap.data().to_vec();
@@ -537,7 +550,7 @@ pub fn write_frames(title: &Title, k: usize, fps: u32, w: u32, h: u32, folder: &
     flush(&held, &mut list);
     // The concat demuxer only keeps the last picture's duration when it's named once more.
     if let Some((file, ..)) = &held {
-        list.push_str(&format!("file '{file}'\n"));
+        list.push_str(&format!("file '{file}'\noption framerate {fps}\n"));
     }
     std::fs::write(folder.join(format!("tpl{k}.txt")), list).map_err(|e| e.to_string())
 }
@@ -577,7 +590,7 @@ mod tests {
 
     fn template(kind: Kind) -> Title {
         let (look, text, x, y, size) = kind.start();
-        Title { id: "t".into(), start: 0.0, end: 3.0, text, x, y, size, row: 0, look: Some(look) }
+        Title { id: "t".into(), start: 0.0, end: 3.0, text, x, y, size, row: 0, look: Some(look), forma: None }
     }
 
     fn coverage(pixmap: &Pixmap) -> usize {

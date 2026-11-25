@@ -13,6 +13,7 @@ name = "streamcuts"
 path = "src/main.rs"
 
 [dependencies]
+forma-native = { path = "../../forma-studio/native" }
 canopy-ui = { path = "../../canopy/native/crates/canopy-ui" }
 cpal = "0.18.2"
 egui = "0.37.0"

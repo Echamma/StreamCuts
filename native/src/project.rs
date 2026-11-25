@@ -1308,6 +1308,14 @@ pub struct Title {
     /// An animated template (slam, wave, lower third...): drawn by `template` instead of as plain text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub look: Option<crate::template::Look>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forma: Option<crate::template::FormaTitle>,
+}
+
+impl Title {
+    pub fn animated(&self) -> bool {
+        self.look.is_some() || self.forma.is_some()
+    }
 }
 
 fn is_zero(n: &usize) -> bool {
@@ -1471,6 +1479,7 @@ impl Project {
             size: title_size(),
             row: 0,
             look: None,
+            forma: None,
         };
         let id = title.id.clone();
         // On the first text track that's free for its whole time, or a new one below the others.
@@ -1565,7 +1574,7 @@ impl Project {
     /// Whether there is any text to put on the picture.
     /// Whether there are captions or plain titles (templates are drawn on their own).
     pub fn has_text(&self) -> bool {
-        !self.captions.is_empty() || self.titles.iter().any(|t| t.look.is_none())
+        !self.captions.is_empty() || self.titles.iter().any(|t| !t.animated())
     }
 
     /// Puts new captions for the stretch `from`..`to` of the timeline, replacing the ones there.

@@ -48,9 +48,12 @@ pub fn script() -> Option<PathBuf> {
     {
         return Some(path);
     }
-    let exe = std::env::current_exe().ok()?;
-    exe.ancestors()
-        .skip(1)
+    script_from(std::env::current_exe().ok()?.parent()?)
+}
+
+fn script_from(start: &Path) -> Option<PathBuf> {
+    start
+        .ancestors()
         .map(|dir| dir.join(SCRIPT))
         .find(|path| path.is_file())
 }
@@ -237,8 +240,10 @@ mod tests {
 
     #[test]
     fn finds_the_script_in_the_checkout() {
-        // Test binaries live in native/target/debug/deps, inside the StreamCuts checkout.
-        assert!(script().is_some_and(|path| path.ends_with("transcribe.py")));
+        // The shared Canopy target directory can put this test executable outside StreamCuts.
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let expected = manifest.parent().unwrap().join(SCRIPT);
+        assert_eq!(script_from(manifest), Some(expected));
     }
 
     #[test]

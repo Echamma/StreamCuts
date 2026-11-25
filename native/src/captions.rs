@@ -190,7 +190,7 @@ pub fn ass(project: &Project) -> String {
             }
         }
     }
-    for title in project.titles.iter().filter(|t| t.look.is_none()) {
+    for title in project.titles.iter().filter(|t| !t.animated()) {
         // Placed and sized one by one: the middle of the text at the title's place.
         let (x, y, size) = (
             (w * title.x).round(),

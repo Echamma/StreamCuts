@@ -387,14 +387,15 @@ pub fn arguments(project: &Project, output: &Path) -> Result<Vec<String>, String
     // Templates (animated titles), over the clips and blurs, under captions and plain titles: their frames are drawn
     // into the run's folder by `template::write_frames` (see `start`), held by an FFmpeg concat list, and laid on at
     // their place for their time.
-    for (k, title) in project.titles.iter().enumerate().filter(|(_, t)| t.look.is_some()) {
+    for (k, title) in project.titles.iter().enumerate().filter(|(_, t)| t.animated()) {
         let Some((x, y, _, _)) = crate::template::extent(title, w, h) else {
             continue;
         };
         args.extend(["-f", "concat", "-safe", "0", "-i"].map(String::from));
         args.push(format!("tpl{k}.txt"));
         filters.push(format!("[{input}:v]fps={fps},setpts=PTS-STARTPTS+{:.3}/TB,format=yuva420p[tpl{k}]", title.start));
-        filters.push(format!("[base{base}][tpl{k}]overlay={x}:{y}:eof_action=pass[base{}]", base + 1));
+        filters.push(format!("[base{base}][tpl{k}]overlay={x}:{y}:eof_action=pass:enable='gte(t,{:.6})*lt(t,{:.6})'[base{}]",
+            title.start, title.end, base + 1));
         base += 1;
         input += 1;
     }
@@ -516,7 +517,7 @@ pub fn start(project: &Project, output: &Path, ctx: egui::Context) -> Result<Exp
     let folder = Some(folder);
     // Templates are drawn frame by frame on the export's own thread, before FFmpeg starts.
     let templates: Vec<(usize, crate::project::Title)> =
-        project.titles.iter().cloned().enumerate().filter(|(_, t)| t.look.is_some()).collect();
+        project.titles.iter().cloned().enumerate().filter(|(_, t)| t.animated()).collect();
     let (fps, width, height) = (project.fps, project.width, project.height);
     let mut ffmpeg_run = command(&ffmpeg());
     ffmpeg_run
@@ -1053,6 +1054,63 @@ mod tests {
         assert_eq!(white_in_middle(&frame("0.5")), 0, "nothing before it starts");
         assert!(white_in_middle(&frame("2.0")) > 20, "the words while it shows: {}", white_in_middle(&frame("2.0")));
         assert_eq!(white_in_middle(&frame("3.5")), 0, "nothing after it ends");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn exports_the_edited_text_in_a_forma_template() {
+        use forma_native::{model::Scene, template::{self as forma, Field, Target, Value, Values}};
+
+        let dir = std::env::temp_dir().join(format!("streamcuts-forma-title-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let place = canopy_ui::Place {
+            space: None, data_dir: dir.clone(), projects_dir: dir.clone(), exports_dir: dir.clone(),
+        };
+        let mut scene = Scene::empty("test".into());
+        (scene.width, scene.height, scene.duration) = (320.0, 180.0, 1.0);
+        scene.add_text("text".into());
+        let text = &mut scene.shapes[0];
+        text.extra.insert("text".into(), "I".into());
+        text.color = "#ffffff".into();
+        (text.keys[0].x, text.keys[0].y, text.keys[0].w, text.keys[0].h) = (160.0, 90.0, 140.0, 55.0);
+        text.template_fields.push(Field { id: "words".into(), label: "Words".into(), target: Target::Text });
+        let path = dir.join("Words.formatemplate");
+        forma::save(&scene, &place, &path).unwrap();
+        let values = Values::from([("words".into(), Value::Text("FORMA".into()))]);
+        let source = forma::load(&path, &place).unwrap();
+        let raster = |values| source.instantiate(values, &place).unwrap().render_frame(0.0, (320, 180)).unwrap();
+        let defaults = Values::new();
+        let original = raster(&defaults);
+        let reference = raster(&values);
+
+        let clip = dir.join("red.mp4");
+        assert!(command(&ffmpeg())
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i", "color=c=red:s=320x180:r=30:d=2", "-pix_fmt", "yuv420p"])
+            .arg(&clip).status().unwrap().success());
+        let mut project = Project::new("From Forma");
+        (project.width, project.height) = (320, 180);
+        let video = project.add_media(crate::ffmpeg::probe(&clip).unwrap());
+        project.place(&video, None, 0.0).unwrap();
+        let id = project.add_title(0.5);
+        let title = project.title_mut(&id).unwrap();
+        title.end = 1.5;
+        title.forma = Some(crate::template::FormaTitle { path, fields: values });
+        assert!(!project.has_text());
+        let output = dir.join("out.mp4");
+        let run = start(&project, &output, egui::Context::default()).unwrap();
+        assert_eq!(run.result.recv().unwrap(), Ok(()));
+        let pixels = command(&ffmpeg()).args(["-v", "error", "-ss", "0.75", "-i"]).arg(&output)
+            .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]).output().unwrap();
+        assert!(pixels.status.success(), "{}", String::from_utf8_lossy(&pixels.stderr));
+        assert_eq!(pixels.stdout.len(), 320 * 180 * 3);
+        let score = |expected: &tiny_skia::Pixmap| {
+            expected.pixels().iter().zip(pixels.stdout.chunks_exact(3)).filter(|(a, b)| {
+                (a.alpha() > 180) != (b[1] > 180)
+            }).count()
+        };
+        let (edited, unedited) = (score(&reference), score(&original));
+        assert!(edited < 280 && unedited > edited * 4, "edited {edited}, unedited {unedited}");
+        assert!(pixels.stdout[0] > 200 && pixels.stdout[1] < 30, "video shows through the title's transparent corner");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
