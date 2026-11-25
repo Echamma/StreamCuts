@@ -1305,6 +1305,9 @@ pub struct Title {
     /// Which text track it sits on in the timeline (0 is the first): titles at the same time go on separate ones.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub row: usize,
+    /// An animated template (slam, wave, lower third...): drawn by `template` instead of as plain text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub look: Option<crate::template::Look>,
 }
 
 fn is_zero(n: &usize) -> bool {
@@ -1467,6 +1470,7 @@ impl Project {
             x: middle(),
             size: title_size(),
             row: 0,
+            look: None,
         };
         let id = title.id.clone();
         // On the first text track that's free for its whole time, or a new one below the others.
@@ -1559,8 +1563,9 @@ impl Project {
     }
 
     /// Whether there is any text to put on the picture.
+    /// Whether there are captions or plain titles (templates are drawn on their own).
     pub fn has_text(&self) -> bool {
-        !self.captions.is_empty() || !self.titles.is_empty()
+        !self.captions.is_empty() || self.titles.iter().any(|t| t.look.is_none())
     }
 
     /// Puts new captions for the stretch `from`..`to` of the timeline, replacing the ones there.

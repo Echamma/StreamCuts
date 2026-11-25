@@ -17,6 +17,7 @@ pub mod scopes;
 pub mod speech;
 pub mod stock;
 pub mod storage;
+pub mod template;
 pub mod timeline;
 pub mod transcribe;
 pub mod waveform;

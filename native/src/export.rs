@@ -384,6 +384,20 @@ pub fn arguments(project: &Project, output: &Path) -> Result<Vec<String>, String
         filters.push(blur_filter(k, blur, base));
         base += 1;
     }
+    // Templates (animated titles), over the clips and blurs, under captions and plain titles: their frames are drawn
+    // into the run's folder by `template::write_frames` (see `start`), held by an FFmpeg concat list, and laid on at
+    // their place for their time.
+    for (k, title) in project.titles.iter().enumerate().filter(|(_, t)| t.look.is_some()) {
+        let Some((x, y, _, _)) = crate::template::extent(title, w, h) else {
+            continue;
+        };
+        args.extend(["-f", "concat", "-safe", "0", "-i"].map(String::from));
+        args.push(format!("tpl{k}.txt"));
+        filters.push(format!("[{input}:v]fps={fps},setpts=PTS-STARTPTS+{:.3}/TB,format=yuva420p[tpl{k}]", title.start));
+        filters.push(format!("[base{base}][tpl{k}]overlay={x}:{y}:eof_action=pass[base{}]", base + 1));
+        base += 1;
+        input += 1;
+    }
     let captions = if project.has_text() {
         format!("subtitles={CAPTIONS}:fontsdir=.,")
     } else {
@@ -500,6 +514,10 @@ pub fn start(project: &Project, output: &Path, ctx: egui::Context) -> Result<Exp
             .map_err(|e| format!("Couldn't get the captions ready ({e})."))?;
     }
     let folder = Some(folder);
+    // Templates are drawn frame by frame on the export's own thread, before FFmpeg starts.
+    let templates: Vec<(usize, crate::project::Title)> =
+        project.titles.iter().cloned().enumerate().filter(|(_, t)| t.look.is_some()).collect();
+    let (fps, width, height) = (project.fps, project.width, project.height);
     let mut ffmpeg_run = command(&ffmpeg());
     ffmpeg_run
         .args(&args)
@@ -508,12 +526,26 @@ pub fn start(project: &Project, output: &Path, ctx: egui::Context) -> Result<Exp
     if let Some(folder) = &folder {
         ffmpeg_run.current_dir(folder);
     }
-    let mut child = ffmpeg_run
-        .spawn()
-        .map_err(|e| format!("FFmpeg couldn't start ({e})."))?;
     let (progress_out, cancel_in) = (progress.clone(), cancel.clone());
     let output = output.to_path_buf();
     std::thread::spawn(move || {
+        let fail = |error: String, folder: &Option<std::path::PathBuf>| {
+            if let Some(folder) = folder {
+                let _ = std::fs::remove_dir_all(folder);
+            }
+            let _ = send.send(Err(error));
+            ctx.request_repaint();
+        };
+        for (k, title) in &templates {
+            let written = folder.as_ref().map_or(Ok(()), |dir| crate::template::write_frames(title, *k, fps, width, height, dir));
+            if let Err(error) = written {
+                return fail(format!("Couldn't draw a template: {error}"), &folder);
+            }
+        }
+        let mut child = match ffmpeg_run.spawn() {
+            Ok(child) => child,
+            Err(e) => return fail(format!("FFmpeg couldn't start ({e})."), &folder),
+        };
         let stdout = child.stdout.take().expect("piped");
         let mut stderr = child.stderr.take().expect("piped");
         let errors = std::thread::spawn(move || {
@@ -980,6 +1012,47 @@ mod tests {
         };
         assert!(swing(20, 100) > 150, "the graphic stays sharp: {}", swing(20, 100));
         assert!(swing(180, 300) < 40, "the background is blurred: {}", swing(180, 300));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn renders_a_template_over_the_video_for_its_time() {
+        let dir = std::env::temp_dir().join(format!("streamcuts-template-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let clip = dir.join("red.mp4");
+        assert!(command(&ffmpeg())
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i", "color=c=red:s=640x360:r=30:d=4", "-pix_fmt", "yuv420p"])
+            .arg(&clip)
+            .status()
+            .unwrap()
+            .success());
+        let mut project = Project::new("Template");
+        (project.width, project.height) = (640, 360);
+        let video = project.add_media(crate::ffmpeg::probe(&clip).unwrap());
+        project.place(&video, None, 0.0).unwrap();
+        // A slam in white, 1 s to 3 s, in the middle.
+        let id = project.add_title(1.0);
+        let (look, text, x, y, size) = crate::template::Kind::Slam.start();
+        let title = project.title_mut(&id).unwrap();
+        (title.look, title.text, title.x, title.y, title.size, title.end) = (Some(look), text, x, y, size, 3.0);
+        assert!(!project.has_text(), "no ASS file for a template");
+        let output = dir.join("out.mp4");
+        let run = start(&project, &output, egui::Context::default()).unwrap();
+        assert_eq!(run.result.recv().unwrap(), Ok(()));
+        let frame = |at: &str| {
+            command(&ffmpeg())
+                .args(["-v", "error", "-ss", at, "-i"])
+                .arg(&output)
+                .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+                .output()
+                .unwrap()
+                .stdout
+        };
+        // White text where the middle row crosses it: pixels with plenty of green (red video has none).
+        let white_in_middle = |f: &[u8]| (0..640).filter(|x| f[(180 * 640 + x) * 3 + 1] > 200).count();
+        assert_eq!(white_in_middle(&frame("0.5")), 0, "nothing before it starts");
+        assert!(white_in_middle(&frame("2.0")) > 20, "the words while it shows: {}", white_in_middle(&frame("2.0")));
+        assert_eq!(white_in_middle(&frame("3.5")), 0, "nothing after it ends");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

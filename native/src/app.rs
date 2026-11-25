@@ -97,6 +97,11 @@ pub struct StreamCuts {
     picture_drag: Option<PictureDrag>,
     /// Each showing blur's blurred picture, and what it was made from.
     blur_patches: HashMap<String, (String, TextureHandle)>,
+    /// Each showing template's picture now, what it was drawn from, and where it goes (parts of the frame).
+    template_frames: HashMap<String, (String, TextureHandle, Rect)>,
+    /// The template whose settings window is open, and the name typed to keep it as one of yours.
+    template_open: Option<String>,
+    template_name: String,
     clock: Clock,
     audio: Audio,
     playhead: f64,
@@ -318,6 +323,9 @@ impl StreamCuts {
             under: HashMap::new(),
             picture_drag: None,
             blur_patches: HashMap::new(),
+            template_frames: HashMap::new(),
+            template_open: None,
+            template_name: String::new(),
             clock: Clock::default(),
             audio: Audio::default(),
             playhead: 0.0,
@@ -2453,13 +2461,25 @@ impl StreamCuts {
                 elements.insert(0, (Target::Blur(blur.id.clone()), rect));
             }
         }
-        for title in self
-            .project
-            .titles
-            .iter()
-            .filter(|t| self.playhead >= t.start && self.playhead < t.end)
-        {
-            let rect = captions::draw_title(&over_picture, screen, title);
+        let showing_titles: Vec<crate::project::Title> =
+            self.project.titles.iter().filter(|t| self.playhead >= t.start && self.playhead < t.end).cloned().collect();
+        self.template_frames.retain(|id, _| showing_titles.iter().any(|t| &t.id == id));
+        for title in &showing_titles {
+            let rect = if title.look.is_some() {
+                // A template: drawn by the same renderer exports use, at the preview's size.
+                if let Some((texture, at)) = self.template_frame(ui.ctx(), title) {
+                    let on = |f: Pos2| pos2(screen.left() + f.x * screen.width(), screen.top() + f.y * screen.height());
+                    over_picture.image(texture.id(), Rect::from_min_max(on(at.min), on(at.max)), whole_uv, Color32::WHITE);
+                }
+                let (dw, dh) = crate::preview::decode_size(&self.project);
+                let [l, t, r, b] = crate::template::bounds(title, dw, dh).unwrap_or([0.4, 0.4, 0.6, 0.6]);
+                Rect::from_min_max(
+                    pos2(screen.left() + l * screen.width(), screen.top() + t * screen.height()),
+                    pos2(screen.left() + r * screen.width(), screen.top() + b * screen.height()),
+                )
+            } else {
+                captions::draw_title(&over_picture, screen, title)
+            };
             elements.insert(0, (Target::Title(title.id.clone()), rect));
         }
         if let Some(caption) = self.project.caption_at(self.playhead) {
@@ -2601,6 +2621,207 @@ impl StreamCuts {
         };
         self.blur_patches.insert(blur.id.clone(), (key, texture.clone()));
         Some(texture)
+    }
+
+    /// A template at the playhead, drawn at the preview's size (again only when the frame or the template changes),
+    /// and where it goes as parts of the frame.
+    fn template_frame(&mut self, ctx: &egui::Context, title: &crate::project::Title) -> Option<(TextureHandle, Rect)> {
+        let (dw, dh) = crate::preview::decode_size(&self.project);
+        let fps = self.project.fps.max(1) as f64;
+        let frame = ((self.playhead - title.start) * fps).floor().max(0.0);
+        let key = format!("{frame}|{dw}x{dh}|{title:?}");
+        if let Some((made, texture, at)) = self.template_frames.get(&title.id) {
+            if *made == key {
+                return Some((texture.clone(), *at));
+            }
+        }
+        let (x, y, pixmap) = crate::template::render(title, frame / fps, dw, dh)?;
+        let image = ColorImage::from_rgba_premultiplied([pixmap.width() as usize, pixmap.height() as usize], pixmap.data());
+        let at = Rect::from_min_size(
+            pos2(x as f32 / dw as f32, y as f32 / dh as f32),
+            vec2(pixmap.width() as f32 / dw as f32, pixmap.height() as f32 / dh as f32),
+        );
+        let texture = match self.template_frames.remove(&title.id) {
+            Some((_, mut texture, _)) => {
+                texture.set(image, TextureOptions::LINEAR);
+                texture
+            }
+            None => ctx.load_texture(format!("template-{}", title.id), image, TextureOptions::LINEAR),
+        };
+        self.template_frames.insert(title.id.clone(), (key, texture.clone(), at));
+        Some((texture, at))
+    }
+
+    /// The Templates menu: the built-in ones, then yours. Picking one puts it at the playhead and opens its settings.
+    fn templates_menu(&mut self, ui: &mut Ui) {
+        ui.set_min_width(280.0);
+        let mut add = None;
+        for kind in crate::template::Kind::ALL {
+            if ui.button(kind.name()).on_hover_text(kind.description()).clicked() {
+                add = Some(kind.start());
+            }
+        }
+        let saved = crate::template::saved();
+        if !saved.is_empty() {
+            ui.separator();
+            ui.label(egui::RichText::new("Yours").font(font::ui(12.0)).color(color::INK_MUTED));
+            for kept in &saved {
+                if ui.button(&kept.name).on_hover_text(kept.look.kind.name()).clicked() {
+                    add = Some((kept.look.clone(), kept.text.clone(), kept.x, kept.y, kept.size));
+                }
+            }
+        }
+        if let Some((look, text, x, y, size)) = add {
+            self.history.record(&self.project);
+            let id = self.project.add_title(self.playhead);
+            // A progress bar runs to the end of the video; the others last a few seconds.
+            let length = if look.kind == crate::template::Kind::Progress { (self.project.duration() - self.playhead).max(3.0) } else { 4.0 };
+            if let Some(title) = self.project.title_mut(&id) {
+                (title.text, title.x, title.y, title.size, title.end) = (text, x, y, size, title.start + length);
+                title.look = Some(look);
+            }
+            self.project.settle_title_rows();
+            self.timeline.selection = vec![id.clone()];
+            self.template_open = Some(id);
+            self.edited();
+            ui.close();
+        }
+    }
+
+    /// A template's settings, like a DaVinci title's Inspector: everything about how it looks and moves. Changes show
+    /// at once; one undo step per drag or stretch of typing.
+    fn template_window(&mut self, ui: &mut Ui) {
+        let Some(id) = self.template_open.clone() else {
+            return;
+        };
+        let Some(title) = self.project.titles.iter().find(|t| t.id == id).cloned() else {
+            self.template_open = None;
+            return;
+        };
+        let Some(look) = title.look.clone() else {
+            self.template_open = None;
+            return;
+        };
+        let (mut changed, mut open, mut keep) = (title.clone(), true, false);
+        let area = ui.max_rect();
+        egui::Window::new(format!("Template: {}", look.kind.name()))
+            .id(ui.scope_id().with("template-window"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .constrain_to(area)
+            .default_pos(pos2(area.right() - 360.0, area.top() + 60.0))
+            .show(ui.ctx(), |ui| {
+                let l = changed.look.as_mut().unwrap();
+                egui::Grid::new("template-settings").num_columns(2).spacing(vec2(10.0, 8.0)).show(ui, |ui| {
+                    ui.label("Style");
+                    egui::ComboBox::from_id_salt("template-kind").selected_text(l.kind.name()).show_ui(ui, |ui| {
+                        for kind in crate::template::Kind::ALL {
+                            ui.selectable_value(&mut l.kind, kind, kind.name()).on_hover_text(kind.description());
+                        }
+                    });
+                    ui.end_row();
+                    ui.label(if l.kind == crate::template::Kind::Progress { "Label" } else { "Words" });
+                    ui.add(egui::TextEdit::multiline(&mut changed.text).desired_rows(2).desired_width(220.0));
+                    ui.end_row();
+                    if l.kind == crate::template::Kind::LowerThird {
+                        ui.label("Second line");
+                        ui.add(egui::TextEdit::singleline(&mut l.subtitle).desired_width(220.0));
+                        ui.end_row();
+                    }
+                    ui.label("Font");
+                    egui::ComboBox::from_id_salt("template-font").selected_text(&l.font).show_ui(ui, |ui| {
+                        for (name, _) in crate::template::FONTS {
+                            ui.selectable_value(&mut l.font, name.to_string(), name);
+                        }
+                    });
+                    ui.end_row();
+                    let color_row = |ui: &mut Ui, label: &str, hex: &mut String| {
+                        ui.label(label);
+                        let mut c = crate::template::rgb(hex);
+                        if egui::color_picker::color_edit_button_srgb(ui, &mut c).changed() {
+                            *hex = format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2]);
+                        }
+                        ui.end_row();
+                    };
+                    color_row(ui, "Words color", &mut l.color);
+                    if matches!(l.kind, crate::template::Kind::LowerThird | crate::template::Kind::Progress | crate::template::Kind::Pop) {
+                        color_row(ui, "Accent color", &mut l.accent);
+                    }
+                    let progress = l.kind == crate::template::Kind::Progress;
+                    ui.label(if progress { "Thickness" } else { "Size" });
+                    ui.add(egui::Slider::new(&mut changed.size, if progress { 0.004..=0.06 } else { 0.02..=0.3 }).show_value(false));
+                    ui.end_row();
+                    ui.label("Across");
+                    ui.add(egui::Slider::new(&mut changed.x, 0.0..=1.0).show_value(false));
+                    ui.end_row();
+                    ui.label("Down");
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Slider::new(&mut changed.y, 0.0..=1.0).show_value(false));
+                        for (label, y) in [("Top", 0.12), ("Middle", 0.5), ("Bottom", 0.85)] {
+                            if ui.small_button(label).clicked() {
+                                changed.y = y;
+                            }
+                        }
+                    });
+                    ui.end_row();
+                    for (label, value) in [("Comes in over", &mut l.in_secs), ("Goes out over", &mut l.out_secs)] {
+                        ui.label(label);
+                        ui.add(egui::DragValue::new(value).range(0.05..=5.0).speed(0.01).fixed_decimals(2).suffix(" s"));
+                        ui.end_row();
+                    }
+                    if matches!(l.kind, crate::template::Kind::Wave | crate::template::Kind::Typewriter) {
+                        ui.label("Between letters");
+                        ui.add(egui::DragValue::new(&mut l.stagger).range(0.0..=0.5).speed(0.002).fixed_decimals(3).suffix(" s"));
+                        ui.end_row();
+                    }
+                    ui.label("Shadow");
+                    ui.checkbox(&mut l.shadow, "");
+                    ui.end_row();
+                    ui.label("Shows for");
+                    let mut length = changed.end - changed.start;
+                    if ui.add(egui::DragValue::new(&mut length).range(0.3..=3600.0).speed(0.05).fixed_decimals(1).suffix(" s")).changed() {
+                        changed.end = changed.start + length;
+                    }
+                    ui.end_row();
+                });
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(&mut self.template_name).hint_text("Name it to keep it").desired_width(170.0));
+                    keep = ui
+                        .add_enabled(!self.template_name.trim().is_empty(), egui::Button::new("Save as my template"))
+                        .on_hover_text("It shows under Yours in the Templates menu, in every space")
+                        .clicked();
+                });
+                ui.label(canopy_ui::muted("Drag it on the picture to move it, a corner to size it; its ends on the timeline to change when."));
+            });
+        if changed != title {
+            if !self.adjusting {
+                self.history.record(&self.project);
+                self.adjusting = true;
+            }
+            if let Some(target) = self.project.title_mut(&id) {
+                *target = changed.clone();
+            }
+            self.edited();
+        }
+        if !ui.input(|i| i.pointer.any_down()) && !ui.ctx().egui_wants_keyboard_input() {
+            self.adjusting = false;
+        }
+        if keep {
+            let name = self.template_name.trim().to_string();
+            let mut all = crate::template::saved();
+            all.retain(|kept| kept.name != name);
+            all.push(crate::template::Saved { name: name.clone(), look: changed.look.clone().unwrap(), text: changed.text.clone(), x: changed.x, y: changed.y, size: changed.size });
+            self.toasts.push(match crate::template::save_all(&all) {
+                Ok(()) => format!("Kept \"{name}\": it's under Yours in Templates"),
+                Err(error) => format!("Couldn't keep it: {error}"),
+            });
+            self.template_name.clear();
+        }
+        if !open {
+            self.template_open = None;
+        }
     }
 
     fn edit_on_picture(&mut self, ui: &mut Ui, screen: Rect, elements: &[(Target, Rect)]) {
@@ -2969,6 +3190,9 @@ impl StreamCuts {
                 self.timeline.selection = vec![id];
                 self.edited();
             }
+            ui.menu_button("Templates", |ui| self.templates_menu(ui))
+                .response
+                .on_hover_text("Animated titles: slam, wave, typewriter, lower third, progress bar, pop box");
             self.volume_control(ui);
             self.clip_settings(ui);
             self.caption_editor(ui);
@@ -3365,6 +3589,9 @@ impl StreamCuts {
         let id = id.clone();
         let mut changed = title.clone();
         ui.add_space(10.0);
+        if title.look.is_some() && ui.button("Edit template").on_hover_text("Its words, font, colors, size, place and timing").clicked() {
+            self.template_open = Some(id.clone());
+        }
         let field = ui.add(
             egui::TextEdit::singleline(&mut changed.text)
                 .desired_width(ui.available_width().clamp(100.0, 260.0) - 60.0)
@@ -4021,6 +4248,7 @@ impl CanopyApp for StreamCuts {
             );
         }
         self.projects_window(ui);
+        self.template_window(ui);
         // Codex's panel goes in last, so nothing laid over the whole editor (drops, the timeline) takes its clicks.
         if let Some(column) = codex {
             ui.scope_builder(UiBuilder::new().max_rect(column.shrink(10.0)), |ui| self.codex_panel(ui));
