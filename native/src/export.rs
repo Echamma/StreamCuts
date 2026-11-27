@@ -1,6 +1,8 @@
-//! Export renders the whole timeline with one FFmpeg run: every clip is an input, video clips are laid over a black
-//! canvas bottom track first, sound from every audible clip is delayed to its place and mixed, and captions are burned
-//! in last from an ASS file (FFmpeg runs in a folder holding it and the caption font, so no paths need escaping).
+//! Export renders the timeline with FFmpeg: every clip is an input, video clips are laid over a black canvas bottom
+//! track first, sound from every audible clip is delayed to its place and mixed, and captions are burned in last from
+//! an ASS file (FFmpeg runs in a folder holding it and the caption font, so no paths need escaping). The picture and
+//! the sound render in runs of their own, a long timeline part by part (at most `CLIPS_PER_PART` clips a run), and
+//! the parts are joined at the end: see `start`.
 
 use crate::captions;
 use crate::ffmpeg::{command, ffmpeg, is_gif};
@@ -151,20 +153,40 @@ impl Queued {
 /// The captions file an export's FFmpeg reads from its working folder.
 const CAPTIONS: &str = "captions.ass";
 
+/// What one FFmpeg run makes: the whole export, or only its picture or only its sound. `start` renders the picture
+/// and the sound in runs of their own. In one run, the sound mix and the picture's overlays ask the same files for
+/// different moments, so FFmpeg keeps every frame decoded in between; a long timeline of many cuts ran it out of
+/// memory that way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Streams {
+    Both,
+    Picture,
+    Sound,
+}
+
 /// The FFmpeg arguments that render `project` to an MP4 at `output`. Errors when there is nothing to export.
 pub fn arguments(project: &Project, output: &Path) -> Result<Vec<String>, String> {
+    arguments_for(project, output, Streams::Both)
+}
+
+/// `arguments`, for the picture or the sound alone; each opens only the clips it uses. The picture has no sound and
+/// no `-movflags` (it goes into a Matroska part); the sound is 48 kHz PCM padded with silence to the timeline's
+/// length, or silence throughout when nothing makes sound, so parts join without gaps or drift.
+pub fn arguments_for(project: &Project, output: &Path, streams: Streams) -> Result<Vec<String>, String> {
     let total = project.duration();
     if total <= 0.0 {
         return Err("Add something to the timeline first.".into());
     }
+    let (with_picture, with_sound) = (streams != Streams::Sound, streams != Streams::Picture);
     let (w, h, fps) = (project.width, project.height, project.fps);
     let mut args: Vec<String> = ["-v", "error", "-y"]
         .iter()
         .map(|s| s.to_string())
         .collect();
-    let mut filters: Vec<String> = vec![format!(
-        "color=c=black:s={w}x{h}:r={fps}:d={total:.3}[base0]"
-    )];
+    let mut filters: Vec<String> = Vec::new();
+    if with_picture {
+        filters.push(format!("color=c=black:s={w}x{h}:r={fps}:d={total:.3}[base0]"));
+    }
     let mut audio_labels = Vec::new();
     let mut input = 0;
     let mut base = 0;
@@ -204,6 +226,18 @@ pub fn arguments(project: &Project, output: &Path) -> Result<Vec<String>, String
             let Some(media) = project.media(&clip.media_id) else {
                 continue;
             };
+            let shows =
+                with_picture && track.kind == TrackKind::Video && !track.hidden && media.kind != MediaKind::Audio;
+            let hidden_video = track.kind == TrackKind::Video && track.hidden;
+            let audible = with_sound
+                && media.has_audio
+                && !track.muted
+                && !hidden_video
+                && clip.volume > 0.0
+                && !project.sounds_elsewhere(clip);
+            if streams != Streams::Both && !shows && !audible {
+                continue;
+            }
             let crossfade_out = project.crossfade_after(&clip.id);
             let crossfade_in = project.crossfade_before(&clip.id).map_or(0.0, |(_, d)| d);
             // An animated picture plays round and round, starting wherever the clip's source time is in its loop. FFmpeg
@@ -236,8 +270,6 @@ pub fn arguments(project: &Project, output: &Path) -> Result<Vec<String>, String
                 ]);
             }
             args.extend(["-i".into(), media.path.to_string_lossy().into_owned()]);
-            let shows =
-                track.kind == TrackKind::Video && !track.hidden && media.kind != MediaKind::Audio;
             if shows {
                 // Fades work on the picture's alpha, so a clip fades to whatever is below it (black when nothing is).
                 let pace = if (clip.speed - 1.0).abs() < 1e-6 {
@@ -327,13 +359,7 @@ pub fn arguments(project: &Project, output: &Path) -> Result<Vec<String>, String
                 ));
                 base += 1;
             }
-            let hidden_video = track.kind == TrackKind::Video && track.hidden;
-            if media.has_audio
-                && !track.muted
-                && !hidden_video
-                && clip.volume > 0.0
-                && !project.sounds_elsewhere(clip)
-            {
+            if audible {
                 let delay = (clip.start * 1000.0).round() as u64;
                 let mut chain = format!(
                     "[{input}:a]asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo,volume={:.3}",
@@ -371,7 +397,7 @@ pub fn arguments(project: &Project, output: &Path) -> Result<Vec<String>, String
             input += 1;
         }
         // Blurs of the track just laid on (and those under it) go on before the tracks above.
-        if track.kind == TrackKind::Video {
+        if track.kind == TrackKind::Video && with_picture {
             let index = project.tracks.iter().position(|t| t.id == track.id);
             for &(k, blur, _) in blurs.iter().filter(|(_, _, on)| on.is_some() && *on == index) {
                 filters.push(blur_filter(k, blur, base));
@@ -380,14 +406,14 @@ pub fn arguments(project: &Project, output: &Path) -> Result<Vec<String>, String
         }
     }
     // Blurs of every track: over all of them, under the text.
-    for &(k, blur, _) in blurs.iter().filter(|(_, _, on)| on.is_none()) {
+    for &(k, blur, _) in blurs.iter().filter(|(_, _, on)| on.is_none() && with_picture) {
         filters.push(blur_filter(k, blur, base));
         base += 1;
     }
     // Templates (animated titles), over the clips and blurs, under captions and plain titles: their frames are drawn
     // into the run's folder by `template::write_frames` (see `start`), held by an FFmpeg concat list, and laid on at
     // their place for their time.
-    for (k, title) in project.titles.iter().enumerate().filter(|(_, t)| t.animated()) {
+    for (k, title) in project.titles.iter().enumerate().filter(|(_, t)| t.animated() && with_picture) {
         let Some((x, y, _, _)) = crate::template::extent(title, w, h) else {
             continue;
         };
@@ -404,14 +430,21 @@ pub fn arguments(project: &Project, output: &Path) -> Result<Vec<String>, String
     } else {
         String::new()
     };
-    filters.push(format!("[base{base}]{captions}format=yuv420p[vout]"));
-    if !audio_labels.is_empty() {
+    if with_picture {
+        filters.push(format!("[base{base}]{captions}format=yuv420p[vout]"));
+    }
+    if streams == Streams::Sound && audio_labels.is_empty() {
+        filters.push("anullsrc=r=48000:cl=stereo[aout]".into());
+    } else if !audio_labels.is_empty() {
         let mix = format!(
             "{}amix=inputs={}:normalize=0:duration=longest",
             audio_labels.join(""),
             audio_labels.len()
         );
-        if project.even_loudness {
+        if streams == Streams::Sound {
+            // Loudness is evened out once the parts are joined, over the whole.
+            filters.push(format!("{mix},apad[aout]"));
+        } else if project.even_loudness {
             // One pass of loudnorm to -14 LUFS (what social apps play at); it works at 192 kHz, so come back to 48.
             filters.push(format!("{mix}[mixed]"));
             filters.push("[mixed]loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000[aout]".into());
@@ -420,19 +453,20 @@ pub fn arguments(project: &Project, output: &Path) -> Result<Vec<String>, String
         }
     }
     let format = project.export_format;
-    if format == ExportFormat::Audio && audio_labels.is_empty() {
+    if streams == Streams::Both && format == ExportFormat::Audio && audio_labels.is_empty() {
         return Err("Nothing on the timeline makes sound.".into());
     }
-    if format == ExportFormat::Audio {
+    if format == ExportFormat::Audio && with_picture {
         // FFmpeg refuses a filter output nothing reads: the picture goes nowhere.
         filters.push("[vout]nullsink".into());
     }
     args.extend(["-filter_complex".into(), filters.join(";")]);
-    if format != ExportFormat::Audio {
+    if format != ExportFormat::Audio && with_picture {
         args.extend(["-map".into(), "[vout]".into()]);
     }
-    if !audio_labels.is_empty() {
+    if !audio_labels.is_empty() || streams == Streams::Sound {
         let sound: &[&str] = match format {
+            _ if streams == Streams::Sound => &["-c:a", "pcm_s16le", "-ar", "48000"],
             ExportFormat::Prores | ExportFormat::Audio => &["-c:a", "pcm_s16le", "-ar", "48000"],
             _ => &["-c:a", "aac", "-b:a", "192k"],
         };
@@ -475,6 +509,12 @@ pub fn arguments(project: &Project, output: &Path) -> Result<Vec<String>, String
         ],
         ExportFormat::Audio => &[],
     };
+    let picture: &[&str] = match streams {
+        Streams::Sound => &[],
+        // Matroska has no -movflags; it's the last pair of every format that has it.
+        Streams::Picture if picture.contains(&"-movflags") => &picture[..picture.len() - 2],
+        _ => picture,
+    };
     args.extend(picture.iter().map(|s| s.to_string()));
     args.push("-t".into());
     args.push(format!("{total:.3}"));
@@ -491,102 +531,101 @@ pub struct Export {
     pub result: std::sync::mpsc::Receiver<Result<(), String>>,
 }
 
+/// At most this many clips go into one FFmpeg run. Every clip is an input FFmpeg decodes, scales and holds frames of
+/// at once, so a timeline of 166 cuts from one stream needed about 40 GB and failed with "Cannot allocate memory".
+/// Longer timelines render part by part (see `parts`) and the parts are joined.
+pub const CLIPS_PER_PART: usize = 12;
+
+/// Where `start` cuts the timeline into parts, as (from, to) in seconds; one span when it renders in one go. Cuts go
+/// on a frame, between clips, where no clip, crossfade or title runs across (so each part renders exactly as that
+/// stretch of the whole would); only when there's no such place within a part's clips is a clip cut in two.
+pub fn parts(project: &Project) -> Vec<(f64, f64)> {
+    let total = project.duration();
+    let fps = project.fps.max(1) as f64;
+    let on_frame = |t: f64| (t * fps).round() / fps;
+    let spans: Vec<(f64, f64)> = project
+        .tracks
+        .iter()
+        .flat_map(|t| t.clips.iter())
+        .map(|c| (c.start, c.end() + project.crossfade_after(&c.id)))
+        .collect();
+    if spans.len() <= CLIPS_PER_PART {
+        return vec![(0.0, total)];
+    }
+    let mut cuts: Vec<f64> = spans
+        .iter()
+        .flat_map(|(s, e)| [on_frame(*s), on_frame(*e)])
+        .filter(|t| *t > 0.0 && *t < total - 0.5 / fps)
+        .collect();
+    cuts.sort_by(f64::total_cmp);
+    cuts.dedup_by(|a, b| (*a - *b).abs() < 0.5 / fps);
+    let inside = |t: f64, (s, e): (f64, f64)| s < t - 1e-3 && e > t + 1e-3;
+    let clean = |t: f64| {
+        !spans.iter().any(|s| inside(t, *s)) && !project.titles.iter().any(|title| inside(t, (title.start, title.end)))
+    };
+    let clips_in = |a: f64, b: f64| spans.iter().filter(|(s, e)| *s < b - 1e-3 && *e > a + 1e-3).count();
+    let mut out = Vec::new();
+    let mut from = 0.0;
+    loop {
+        if clips_in(from, total) <= CLIPS_PER_PART {
+            out.push((from, total));
+            return out;
+        }
+        let later: Vec<f64> = cuts.iter().copied().filter(|t| *t > from + 0.5 / fps).collect();
+        let fits = |t: &&f64| clips_in(from, **t) <= CLIPS_PER_PART;
+        let cut = later
+            .iter()
+            .filter(fits)
+            .filter(|t| clean(**t))
+            .next_back()
+            .or_else(|| later.iter().find(|t| clean(**t)))
+            .or_else(|| later.iter().filter(fits).next_back())
+            .or_else(|| later.first())
+            .copied();
+        match cut {
+            Some(to) => {
+                out.push((from, to));
+                from = to;
+            }
+            None => {
+                out.push((from, total));
+                return out;
+            }
+        }
+    }
+}
+
 /// Starts rendering `project` to `output` in the background.
 pub fn start(project: &Project, output: &Path, ctx: egui::Context) -> Result<Export, String> {
-    let mut args = arguments(project, output)?;
+    let args = arguments(project, output)?;
     let total = project.duration();
     let progress = Arc::new(AtomicU32::new(0));
     let cancel = Arc::new(AtomicBool::new(false));
     let (send, result) = std::sync::mpsc::channel();
-    // Each run gets a folder of its own that FFmpeg runs in: the filter graph goes in a file there (a timeline of a
-    // hundred-odd clips makes a graph longer than Windows lets a command line be), with the captions and their font.
     let folder = std::env::temp_dir().join(format!("streamcuts-export-{}", new_id()));
     std::fs::create_dir_all(&folder).map_err(|e| format!("Couldn't get the export ready ({e})."))?;
-    if let Some(at) = args.iter().position(|a| a == "-filter_complex") {
-        let graph = folder.join("graph.txt");
-        std::fs::write(&graph, &args[at + 1]).map_err(|e| format!("Couldn't get the export ready ({e})."))?;
-        // FFmpeg 7 and later read an option's value from a file when its name starts with "-/".
-        args[at] = "-/filter_complex".into();
-        args[at + 1] = graph.to_string_lossy().into_owned();
-    }
-    if project.has_text() {
-        std::fs::write(folder.join(CAPTIONS), captions::ass(project))
-            .and_then(|_| std::fs::write(folder.join(captions::FONT_FILE), captions::font_bytes()))
-            .map_err(|e| format!("Couldn't get the captions ready ({e})."))?;
-    }
-    let folder = Some(folder);
-    // Templates are drawn frame by frame on the export's own thread, before FFmpeg starts.
-    let templates: Vec<(usize, crate::project::Title)> =
-        project.titles.iter().cloned().enumerate().filter(|(_, t)| t.animated()).collect();
-    let (fps, width, height) = (project.fps, project.width, project.height);
-    let mut ffmpeg_run = command(&ffmpeg());
-    ffmpeg_run
-        .args(&args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    if let Some(folder) = &folder {
-        ffmpeg_run.current_dir(folder);
-    }
+    let project = project.clone();
     let (progress_out, cancel_in) = (progress.clone(), cancel.clone());
     let output = output.to_path_buf();
     std::thread::spawn(move || {
-        let fail = |error: String, folder: &Option<std::path::PathBuf>| {
-            if let Some(folder) = folder {
-                let _ = std::fs::remove_dir_all(folder);
-            }
-            let _ = send.send(Err(error));
+        let spans = parts(&project);
+        // The join at the end is quick: the last 2% of the bar.
+        let report = |done: f64| {
+            progress_out.store((done / total * 980.0).clamp(0.0, 1000.0) as u32, Ordering::Relaxed);
             ctx.request_repaint();
         };
-        for (k, title) in &templates {
-            let written = folder.as_ref().map_or(Ok(()), |dir| crate::template::write_frames(title, *k, fps, width, height, dir));
-            if let Err(error) = written {
-                return fail(format!("Couldn't draw a template: {error}"), &folder);
-            }
-        }
-        let mut child = match ffmpeg_run.spawn() {
-            Ok(child) => child,
-            Err(e) => return fail(format!("FFmpeg couldn't start ({e})."), &folder),
-        };
-        let stdout = child.stdout.take().expect("piped");
-        let mut stderr = child.stderr.take().expect("piped");
-        let errors = std::thread::spawn(move || {
-            let mut text = String::new();
-            let _ = std::io::Read::read_to_string(&mut stderr, &mut text);
-            text
-        });
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            if cancel_in.load(Ordering::Relaxed) {
-                let _ = child.kill();
-                break;
-            }
-            if let Some(us) = line
-                .strip_prefix("out_time_us=")
-                .and_then(|v| v.trim().parse::<f64>().ok())
-            {
-                progress_out.store(
-                    ((us / 1e6 / total) * 1000.0).clamp(0.0, 1000.0) as u32,
-                    Ordering::Relaxed,
-                );
-                ctx.request_repaint();
-            }
-        }
-        let status = child.wait();
-        let errors = errors.join().unwrap_or_default();
+        let outcome = render(&project, &spans, &args, &output, &folder, &cancel_in, report);
+        let _ = std::fs::remove_dir_all(&folder);
         let outcome = if cancel_in.load(Ordering::Relaxed) {
             let _ = std::fs::remove_file(&output);
             Err("Export stopped.".into())
         } else {
-            match status {
-                Ok(s) if s.success() => Ok(()),
-                _ => Err(format!(
-                    "Export failed: {}",
-                    errors.lines().last().unwrap_or("FFmpeg stopped")
-                )),
+            // A failed run may have left a broken file behind.
+            if outcome.is_err() {
+                let _ = std::fs::remove_file(&output);
             }
+            outcome
         };
-        if let Some(folder) = folder {
-            let _ = std::fs::remove_dir_all(folder);
-        }
         let _ = send.send(outcome);
         ctx.request_repaint();
     });
@@ -597,13 +636,145 @@ pub fn start(project: &Project, output: &Path, ctx: egui::Context) -> Result<Exp
     })
 }
 
+/// Renders each span of the timeline (`parts`) on its own, the picture and the sound in runs of their own (see
+/// `Streams`), then joins them into `output`: the pictures as they are, the sound (uncompressed in the parts, so the
+/// seams are sample-exact) encoded once, and evened out over the whole when the project asks for that.
+fn render(
+    project: &Project,
+    spans: &[(f64, f64)],
+    whole: &[String],
+    output: &Path,
+    folder: &Path,
+    cancel: &AtomicBool,
+    report: impl Fn(f64),
+) -> Result<(), String> {
+    let picture = project.export_format != ExportFormat::Audio;
+    let sound = whole.iter().any(|a| a == "[aout]");
+    let (mut pictures, mut sounds) = (String::new(), String::new());
+    let mut done = 0.0;
+    for (k, (from, to)) in spans.iter().enumerate() {
+        let mut part = if spans.len() == 1 { project.clone() } else { project.excerpt(*from, *to) };
+        part.even_loudness = false;
+        let dir = folder.join(format!("part{k}"));
+        if picture {
+            let file = format!("picture{k}.mkv");
+            let args = prepare(&part, arguments_for(&part, &folder.join(&file), Streams::Picture)?, &dir, true)?;
+            run(&args, &dir, cancel, |t| report(done + t))?;
+            pictures.push_str(&format!("file '{file}'\n"));
+        }
+        if sound {
+            let file = format!("sound{k}.wav");
+            let args = prepare(&part, arguments_for(&part, &folder.join(&file), Streams::Sound)?, &dir, false)?;
+            run(&args, &dir, cancel, |t| if !picture { report(done + t) })?;
+            sounds.push_str(&format!("file '{file}'\n"));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        done += to - from;
+    }
+    let mut args: Vec<String> = ["-v", "error", "-y"].map(String::from).to_vec();
+    for (wanted, list, name) in [(picture, &pictures, "pictures.txt"), (sound, &sounds, "sounds.txt")] {
+        if wanted {
+            std::fs::write(folder.join(name), list).map_err(|e| format!("Couldn't join the parts ({e})."))?;
+            args.extend(["-f", "concat", "-safe", "0", "-i", name].map(String::from));
+        }
+    }
+    if picture {
+        args.extend(["-map", "0:v", "-c:v", "copy"].map(String::from));
+    }
+    if sound {
+        args.extend(["-map".into(), format!("{}:a", picture as usize)]);
+        if project.even_loudness {
+            // One pass of loudnorm to -14 LUFS (what social apps play at); it works at 192 kHz, so come back to 48.
+            args.extend(["-af".into(), "loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000".into()]);
+        }
+        // The export's own sound settings: from -c:a to the picture's settings, or to the length.
+        let from = whole.iter().position(|a| a == "-c:a");
+        let to = whole.iter().position(|a| a == "-c:v").or_else(|| whole.iter().rposition(|a| a == "-t"));
+        if let (Some(from), Some(to)) = (from, to) {
+            args.extend(whole[from..to].iter().cloned());
+        }
+    }
+    if whole.iter().any(|a| a == "-movflags") {
+        args.extend(["-movflags".into(), "+faststart".into()]);
+    }
+    args.extend(["-t".into(), format!("{:.3}", project.duration())]);
+    args.extend(["-progress".into(), "pipe:1".into(), "-nostats".into()]);
+    args.push(output.to_string_lossy().into_owned());
+    run(&args, folder, cancel, |_| {})?;
+    report(project.duration() / 0.98);
+    Ok(())
+}
+
+/// Gets `folder` ready for one FFmpeg run of `project`: the filter graph in a file (a timeline of a hundred-odd clips
+/// makes a graph longer than Windows lets a command line be) and, for a picture, the captions with their font and the
+/// templates' frames.
+fn prepare(project: &Project, mut args: Vec<String>, folder: &Path, picture: bool) -> Result<Vec<String>, String> {
+    std::fs::create_dir_all(folder).map_err(|e| format!("Couldn't get the export ready ({e})."))?;
+    if let Some(at) = args.iter().position(|a| a == "-filter_complex") {
+        let graph = folder.join("graph.txt");
+        std::fs::write(&graph, &args[at + 1]).map_err(|e| format!("Couldn't get the export ready ({e})."))?;
+        // FFmpeg 7 and later read an option's value from a file when its name starts with "-/".
+        args[at] = "-/filter_complex".into();
+        args[at + 1] = graph.to_string_lossy().into_owned();
+    }
+    if !picture {
+        return Ok(args);
+    }
+    if project.has_text() {
+        std::fs::write(folder.join(CAPTIONS), captions::ass(project))
+            .and_then(|_| std::fs::write(folder.join(captions::FONT_FILE), captions::font_bytes()))
+            .map_err(|e| format!("Couldn't get the captions ready ({e})."))?;
+    }
+    for (k, title) in project.titles.iter().enumerate().filter(|(_, t)| t.animated()) {
+        crate::template::write_frames(title, k, project.fps, project.width, project.height, folder)
+            .map_err(|error| format!("Couldn't draw a template: {error}"))?;
+    }
+    Ok(args)
+}
+
+/// Runs FFmpeg in `folder` until it's done, telling `report` how many seconds it has written.
+fn run(args: &[String], folder: &Path, cancel: &AtomicBool, report: impl Fn(f64)) -> Result<(), String> {
+    let mut child = command(&ffmpeg())
+        .args(args)
+        .current_dir(folder)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("FFmpeg couldn't start ({e})."))?;
+    let stdout = child.stdout.take().expect("piped");
+    let mut stderr = child.stderr.take().expect("piped");
+    let errors = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = std::io::Read::read_to_string(&mut stderr, &mut text);
+        text
+    });
+    for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+        if cancel.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            break;
+        }
+        if let Some(us) = line.strip_prefix("out_time_us=").and_then(|v| v.trim().parse::<f64>().ok()) {
+            report(us / 1e6);
+        }
+    }
+    let status = child.wait();
+    let errors = errors.join().unwrap_or_default();
+    if cancel.load(Ordering::Relaxed) {
+        return Err("Export stopped.".into());
+    }
+    match status {
+        Ok(s) if s.success() => Ok(()),
+        _ => Err(format!("Export failed: {}", errors.lines().last().unwrap_or("FFmpeg stopped"))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::project::{Media, Project, new_id};
     use std::path::PathBuf;
 
-    fn media(kind: MediaKind, duration: f64, has_audio: bool) -> Media {
+    pub(super) fn media(kind: MediaKind, duration: f64, has_audio: bool) -> Media {
         Media {
             id: new_id(),
             path: PathBuf::from(format!("C:/m/{}.mp4", new_id())),
@@ -1584,6 +1755,112 @@ mod see_through_bars {
                 assert!(p[0] > 200 && p[1] < 60, "{w}x{h} at {x},{y}: {p:?}");
             }
         }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn long_timelines_render_in_parts_with_picture_and_sound_apart() {
+        // 30 cuts of 2 s from one video, and a still on a track above from 3 s to 8 s.
+        let mut project = Project::new("Long");
+        let video = project.add_media(tests::media(MediaKind::Video, 60.0, true));
+        let still = project.add_media(tests::media(MediaKind::Image, 0.0, false));
+        let mut cut = project.place(&video, None, 0.0).unwrap();
+        for k in 1..30 {
+            cut = project.split(&cut, k as f64 * 2.0).unwrap();
+        }
+        let upper = project.add_track(TrackKind::Video);
+        project.place(&still, Some(upper), 3.0).unwrap();
+        let spans = parts(&project);
+        assert!(spans.len() > 1, "{spans:?}");
+        assert_eq!(spans[0].0, 0.0);
+        assert!((spans.last().unwrap().1 - project.duration()).abs() < 1e-9);
+        for pair in spans.windows(2) {
+            assert_eq!(pair[0].1, pair[1].0, "the parts follow on: {spans:?}");
+        }
+        for (from, to) in &spans {
+            let part = project.excerpt(*from, *to);
+            let clips: usize = part.tracks.iter().map(|t| t.clips.len()).sum();
+            assert!(clips <= CLIPS_PER_PART, "{clips} clips in {from}..{to}");
+            assert!(!(3.0 < *to && *to < 8.0), "no cut while the still is up: {spans:?}");
+            assert!(((to * 30.0).round() - to * 30.0).abs() < 1e-6, "cuts fall on a frame");
+        }
+        let short = project.excerpt(0.0, 10.0);
+        assert_eq!(parts(&short), vec![(0.0, short.duration())], "a short timeline renders in one go");
+
+        let graph = |args: &[String]| args[args.iter().position(|a| a == "-filter_complex").unwrap() + 1].clone();
+        let has = |args: &[String], word: &str| args.iter().any(|a| a == word);
+        let picture = arguments_for(&project, Path::new("picture.mkv"), Streams::Picture).unwrap();
+        assert!(has(&picture, "[vout]") && !has(&picture, "[aout]") && !has(&picture, "-movflags"));
+        assert!(!graph(&picture).contains(":a]"), "the picture run has no sound");
+        assert_eq!(picture.iter().filter(|a| *a == "-i").count(), 31);
+        let sound = arguments_for(&project, Path::new("sound.wav"), Streams::Sound).unwrap();
+        assert!(has(&sound, "[aout]") && !has(&sound, "[vout]") && !has(&sound, "-c:v"));
+        assert!(!graph(&sound).contains("[base0]"), "the sound run draws no picture");
+        assert!(graph(&sound).ends_with(",apad[aout]"), "padded to the part's length: {}", graph(&sound));
+        assert!(sound.windows(2).any(|w| w[0] == "-c:a" && w[1] == "pcm_s16le"));
+        assert_eq!(sound.iter().filter(|a| *a == "-i").count(), 30, "the silent still isn't opened for the sound");
+        // A part with nothing to hear is silence, so every part's sound joins up.
+        let mut quiet = project.excerpt(3.0, 8.0);
+        quiet.tracks.iter_mut().for_each(|t| t.muted = true);
+        assert!(graph(&arguments_for(&quiet, Path::new("s.wav"), Streams::Sound).unwrap()).contains("anullsrc"));
+        // The whole export's arguments are as they were.
+        let both = arguments(&project, Path::new("out.mp4")).unwrap();
+        assert!(has(&both, "[vout]") && has(&both, "[aout]") && has(&both, "-movflags"));
+    }
+
+    /// Needs FFmpeg on PATH: a timeline of more cuts than one run takes, with a gap, renders part by part and joins
+    /// into one file of the right length, its sound as long as its picture and still in step after the seams.
+    #[test]
+    fn renders_a_long_timeline_in_parts_with_ffmpeg() {
+        let dir = std::env::temp_dir().join(format!("streamcuts-parts-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let clip = dir.join("clip.mp4");
+        assert!(command(&ffmpeg())
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=30:duration=6", "-f", "lavfi", "-i", "sine=duration=6", "-shortest", "-pix_fmt", "yuv420p"])
+            .arg(&clip)
+            .status()
+            .unwrap()
+            .success());
+        let mut project = Project::new("Parts");
+        (project.width, project.height) = (320, 180);
+        let video = project.add_media(crate::ffmpeg::probe(&clip).unwrap());
+        let mut cut = project.place(&video, None, 0.0).unwrap();
+        let mut cuts = vec![cut.clone()];
+        for k in 1..20 {
+            cut = project.split(&cut, k as f64 * 0.3).unwrap();
+            cuts.push(cut.clone());
+        }
+        project.delete(&[cuts[8].clone()]);
+        assert!(parts(&project).len() > 1);
+        let output = dir.join("parts.mp4");
+        let run = start(&project, &output, egui::Context::default()).unwrap();
+        assert_eq!(run.result.recv().unwrap(), Ok(()));
+        let duration = |stream: &str| {
+            let out = command(&crate::ffmpeg::ffprobe())
+                .args(["-v", "error", "-select_streams", stream, "-show_entries", "stream=duration", "-of", "csv=p=0"])
+                .arg(&output)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().parse::<f64>().unwrap()
+        };
+        assert!((duration("v:0") - 6.0).abs() < 0.05, "picture {}", duration("v:0"));
+        assert!((duration("a:0") - 6.0).abs() < 0.05, "sound {}", duration("a:0"));
+        // Past the seams, the picture is still the source's at the same time.
+        let frame = |path: &Path, at: &str| {
+            command(&ffmpeg())
+                .args(["-v", "error", "-ss", at, "-i"])
+                .arg(path)
+                .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gray", "-"])
+                .output()
+                .unwrap()
+                .stdout
+        };
+        let difference = |a: &[u8], b: &[u8]| {
+            a.iter().zip(b).map(|(x, y)| (*x as i32 - *y as i32).unsigned_abs() as u64).sum::<u64>() as f64 / a.len().max(1) as f64
+        };
+        let late = frame(&output, "5.0");
+        assert!(difference(&late, &frame(&clip, "5.0")) < 6.0, "in step at 5 s");
+        assert!(difference(&late, &frame(&clip, "5.0")) < difference(&late, &frame(&clip, "4.5")));
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
